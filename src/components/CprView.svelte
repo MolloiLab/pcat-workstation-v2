@@ -212,8 +212,8 @@
       try {
         // The spline centerline is in cornerstone3D world coords [x, y, z]
         // Rust expects [z, y, x]
-        // Downsample to max 50 points to avoid slow IPC serialization
-        const sampled = downsample(cl, 50);
+        // Downsample to max 100 points for smooth CPR while keeping IPC fast
+        const sampled = downsample(cl, 100);
         const centerlineZyx = sampled.map(
           ([x, y, z]) => [z, y, x] as [number, number, number],
         );

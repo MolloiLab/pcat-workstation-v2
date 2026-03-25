@@ -10,7 +10,7 @@
    *   [0,0] Axial    [0,1] Coronal
    *   [1,0] Sagittal [1,1] ContextPanel
    */
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { tick } from 'svelte';
   import { Enums, setVolumesForViewports } from '@cornerstonejs/core';
 
@@ -115,14 +115,24 @@
   });
 
   // ---------- Navigate viewports when a seed is selected ----------
+  // ONLY re-run when selectedSeedIndex changes — use untrack() for seed data
+  // to prevent re-navigation on every seed add/move.
+  let lastNavigatedIdx: number | null = null;
+
   $effect(() => {
     const selectedIdx = seedStore.selectedSeedIndex;
+    if (selectedIdx === lastNavigatedIdx) return;
+    lastNavigatedIdx = selectedIdx;
+
     if (selectedIdx === null || !engineReady) return;
 
-    const data = seedStore.activeVesselData;
-    if (!data || selectedIdx >= data.seeds.length) return;
+    // Read seed position without creating a reactive dependency on seed data
+    const pos = untrack(() => {
+      const data = seedStore.activeVesselData;
+      if (!data || selectedIdx >= data.seeds.length) return null;
+      return data.seeds[selectedIdx].position;
+    });
 
-    const pos = data.seeds[selectedIdx].position;
     if (!pos || !isFinite(pos[0]) || !isFinite(pos[1]) || !isFinite(pos[2])) return;
 
     const engine = getRenderingEngine();
@@ -133,8 +143,6 @@
       const oldFocal = camera.focalPoint as [number, number, number];
       const oldPos = camera.position as [number, number, number];
 
-      // Move both focalPoint and position by the same delta
-      // to preserve view direction and orientation
       const delta: [number, number, number] = [
         pos[0] - oldFocal[0],
         pos[1] - oldFocal[1],
