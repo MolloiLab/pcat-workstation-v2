@@ -130,9 +130,25 @@
       const vp = engine.getViewport(vpId);
       if (!vp) continue;
       const camera = vp.getCamera();
+      const oldFocal = camera.focalPoint as [number, number, number];
+      const oldPos = camera.position as [number, number, number];
+
+      // Move both focalPoint and position by the same delta
+      // to preserve view direction and orientation
+      const delta: [number, number, number] = [
+        pos[0] - oldFocal[0],
+        pos[1] - oldFocal[1],
+        pos[2] - oldFocal[2],
+      ];
+
       vp.setCamera({
         ...camera,
         focalPoint: [pos[0], pos[1], pos[2]] as [number, number, number],
+        position: [
+          oldPos[0] + delta[0],
+          oldPos[1] + delta[1],
+          oldPos[2] + delta[2],
+        ] as [number, number, number],
       });
       vp.render();
     }

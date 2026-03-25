@@ -49,6 +49,21 @@
 
   // ---- Helpers ----
 
+  /** Downsample an array of points to at most maxPts, always keeping first and last. */
+  function downsample(
+    pts: [number, number, number][],
+    maxPts: number,
+  ): [number, number, number][] {
+    if (pts.length <= maxPts) return pts;
+    const step = (pts.length - 1) / (maxPts - 1);
+    const result: [number, number, number][] = [];
+    for (let i = 0; i < maxPts - 1; i++) {
+      result.push(pts[Math.round(i * step)]);
+    }
+    result.push(pts[pts.length - 1]);
+    return result;
+  }
+
   function decodeBase64Float32(b64: string): Float32Array {
     const binary = atob(b64);
     const bytes = new Uint8Array(binary.length);
@@ -177,6 +192,7 @@
   // ---- CPR Computation (debounced) ----
 
   let cprDebounce: ReturnType<typeof setTimeout> | undefined;
+  let computingCpr = false;
 
   $effect(() => {
     // Track reactive deps: centerline, rotation
@@ -190,11 +206,17 @@
 
     clearTimeout(cprDebounce);
     cprDebounce = setTimeout(async () => {
+      if (computingCpr) return;
+      computingCpr = true;
       loading = true;
       try {
         // The spline centerline is in cornerstone3D world coords [x, y, z]
         // Rust expects [z, y, x]
-        const centerlineZyx = cl.map(([x, y, z]) => [z, y, x] as [number, number, number]);
+        // Downsample to max 50 points to avoid slow IPC serialization
+        const sampled = downsample(cl, 50);
+        const centerlineZyx = sampled.map(
+          ([x, y, z]) => [z, y, x] as [number, number, number],
+        );
 
         const result = await invoke<CprCommandResult>('compute_cpr_image', {
           centerlineMm: centerlineZyx,
@@ -212,9 +234,10 @@
       } catch (e) {
         console.error('CprView: CPR computation failed', e);
       } finally {
+        computingCpr = false;
         loading = false;
       }
-    }, 150);
+    }, 300);
 
     return () => clearTimeout(cprDebounce);
   });
@@ -231,6 +254,35 @@
     void arclengths;
 
     repaintCanvas();
+  });
+
+  // ---- Seed selection → needle B navigation ----
+
+  $effect(() => {
+    const selectedIdx = seedStore.selectedSeedIndex;
+    if (selectedIdx === null) return;
+    const data = seedStore.activeVesselData;
+    if (!data || selectedIdx >= data.seeds.length || !data.centerline) return;
+
+    const seedPos = data.seeds[selectedIdx].position;
+    const cl = data.centerline;
+    if (cl.length < 2) return;
+
+    // Find closest centerline point to the selected seed
+    let minDist = Infinity;
+    let closestIdx = 0;
+    for (let i = 0; i < cl.length; i++) {
+      const dx = cl[i][0] - seedPos[0];
+      const dy = cl[i][1] - seedPos[1];
+      const dz = cl[i][2] - seedPos[2];
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d < minDist) {
+        minDist = d;
+        closestIdx = i;
+      }
+    }
+
+    needleBFraction = closestIdx / (cl.length - 1);
   });
 
   // ---- Needle dragging ----
@@ -360,7 +412,7 @@
         <canvas
           bind:this={cprCanvas}
           class="min-h-0 flex-1 cursor-crosshair"
-          style="image-rendering: pixelated; width: 100%; object-fit: contain;"
+          style="image-rendering: pixelated; width: 100%; height: 100%;"
           onmousedown={handleMouseDown}
           oncontextmenu={onCanvasContextMenu}
         ></canvas>
