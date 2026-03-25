@@ -1,0 +1,7 @@
+node_modules/
+dist/
+target/
+*.pyc
+__pycache__/
+.DS_Store
+app-icon.png
