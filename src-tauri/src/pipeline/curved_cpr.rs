@@ -467,7 +467,7 @@ pub(crate) fn render_curved_direct(
         if py < min_y { min_y = py; }
         if py > max_y { max_y = py; }
     }
-    let context_pad_mm = 80.0; // show bones, chambers, full context
+    let context_pad_mm = 35.0; // spine + 1 chamber, matching syngo.via FOV
     min_x -= context_pad_mm;
     max_x += context_pad_mm;
     min_y -= context_pad_mm;
