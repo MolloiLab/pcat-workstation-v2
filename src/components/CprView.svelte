@@ -31,6 +31,9 @@
   } from '$lib/cprProjection';
   import CrossSection from './CrossSection.svelte';
 
+  // ---- Constants ----
+  const CPR_WIDTH_MM = 40.0;
+
   // ---- Reactive state ----
   let cprCanvas: HTMLCanvasElement | undefined = $state();
   let rotationDeg = $state(0);
@@ -66,6 +69,9 @@
 
   // Current centerline from seed store
   let centerline = $derived(seedStore.activeVesselData?.centerline ?? null);
+
+  // Ostium fraction for the active vessel (used in overlays + toolbar)
+  let activeOstiumFrac = $derived(seedStore.getOstiumFraction(seedStore.activeVessel));
 
   // Batch cross-section results (one per needle: A, B, C)
   type BatchCrossSectionItem = {
@@ -277,9 +283,8 @@
     }
 
     // --- Ostium marker ---
-    const ostiumFrac = seedStore.getOstiumFraction(seedStore.activeVessel);
-    if (ostiumFrac !== null) {
-      const ox = Math.round(ostiumFrac * w);
+    if (activeOstiumFrac !== null) {
+      const ox = Math.round(activeOstiumFrac * w);
 
       // Dashed magenta vertical line
       ctx.beginPath();
@@ -458,7 +463,7 @@
       if (cprMode === 'curved') {
         buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
           rotationDeg,
-          widthMm: 40.0,
+          widthMm: CPR_WIDTH_MM,
           pixelsWide: 768,
           pixelsHigh: 384,
           slabMm: 1.0,
@@ -466,7 +471,7 @@
       } else {
         buffer = await invoke<ArrayBuffer>('render_cpr_image', {
           rotationDeg,
-          widthMm: 40.0,
+          widthMm: CPR_WIDTH_MM,
           pixelsHigh: 384,
           slabMm: 1.0,
         });
@@ -496,7 +501,7 @@
     try {
       projectionInfo = await invoke<CprProjectionInfo>('get_cpr_projection_info', {
         rotationDeg,
-        widthMm: 40.0,
+        widthMm: CPR_WIDTH_MM,
       });
     } catch (e) {
       console.error('CprView: get_cpr_projection_info failed', e);
@@ -519,7 +524,7 @@
     void seedStore.activeVesselData;
     void seedStore.selectedSeedIndex;
     // Track ostium for overlay update
-    void seedStore.getOstiumFraction(seedStore.activeVessel);
+    void activeOstiumFrac;
     // Track projection info for seed overlay
     void projectionInfo;
     void hoverSeedIndex;
@@ -628,6 +633,9 @@
     const data = seedStore.activeVesselData;
     const w = cprCanvas.width;
     const h = cprCanvas.height;
+    const rect = cprCanvas.getBoundingClientRect();
+    const scaleX = rect.width / w;
+    const scaleY = rect.height / h;
 
     let bestIdx: number | null = null;
     let bestDist = hitRadius * hitRadius;
@@ -640,10 +648,6 @@
         : worldToStraightenedCpr(seedZyx, projectionInfo, w, h);
       if (!projected) continue;
 
-      // Scale from canvas pixels to CSS pixels
-      const rect = cprCanvas.getBoundingClientRect();
-      const scaleX = rect.width / w;
-      const scaleY = rect.height / h;
       const dx = canvasX - projected[0] * scaleX;
       const dy = canvasY - projected[1] * scaleY;
       const d = dx * dx + dy * dy;
@@ -960,11 +964,11 @@
       {/if}
     </span>
 
-    {#if seedStore.getOstiumFraction(seedStore.activeVessel) !== null}
+    {#if activeOstiumFrac !== null}
       <span class="text-[10px] tabular-nums" style="color: #ff00ff;">
-        O: {((seedStore.getOstiumFraction(seedStore.activeVessel) ?? 0) * 100).toFixed(0)}%
+        O: {(activeOstiumFrac * 100).toFixed(0)}%
         {#if arclengths.length > 0}
-          ({((seedStore.getOstiumFraction(seedStore.activeVessel) ?? 0) * arclengths[arclengths.length - 1]).toFixed(1)} mm)
+          ({(activeOstiumFrac * arclengths[arclengths.length - 1]).toFixed(1)} mm)
         {/if}
       </span>
     {/if}
