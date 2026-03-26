@@ -4,6 +4,7 @@ use base64::Engine;
 use tauri::ipc::Response;
 
 use crate::pipeline::cpr::{self, CprFrame};
+use crate::pipeline::curved_cpr;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------

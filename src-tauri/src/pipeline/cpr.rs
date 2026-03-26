@@ -327,11 +327,19 @@ impl CprFrame {
         let sx = (pixels_wide as f64 - 1.0) / view_width;
         let sy = (pixels_high as f64 - 1.0) / view_height;
 
-        // For each centerline position, paint perpendicular strip
+        // For each centerline position, paint perpendicular strip.
+        // Track which centerline index painted each pixel to prevent
+        // distant curve sections from overwriting each other (fan artifacts).
         let mut image = vec![f32::NAN; pixels_wide * pixels_high];
+        let mut owner = vec![u32::MAX; pixels_wide * pixels_high];
 
-        // Number of lateral samples per centerline position
-        let n_lateral = pixels_high; // same density as straightened
+        // Dense lateral sampling: 2x the larger output dimension to ensure
+        // full sub-pixel coverage (no gaps between adjacent strips).
+        let n_lateral = 2 * pixels_wide.max(pixels_high);
+
+        // Taper zone: lateral width ramps from 0 to full over the
+        // first/last few centerline points to prevent endpoint fan spray.
+        let taper_count = (n_cols / 10).max(3).min(15);
 
         for j in 0..n_cols {
             let pos = Vector3::new(
@@ -341,11 +349,22 @@ impl CprFrame {
             );
             let n_vec = rot_normals[j];
             let b_vec = rot_binormals[j];
+            let j_u32 = j as u32;
+
+            // Taper lateral width at endpoints
+            let taper = if j < taper_count {
+                (j + 1) as f64 / taper_count as f64
+            } else if j >= n_cols - taper_count {
+                (n_cols - j) as f64 / taper_count as f64
+            } else {
+                1.0
+            };
+            let effective_width = width_mm * taper;
 
             for li in 0..n_lateral {
-                // Lateral offset: from +width_mm to -width_mm
+                // Lateral offset: from +effective_width to -effective_width
                 let lateral =
-                    width_mm * (1.0 - 2.0 * (li as f64) / ((n_lateral - 1) as f64));
+                    effective_width * (1.0 - 2.0 * (li as f64) / ((n_lateral - 1) as f64));
 
                 // 3D sample position
                 let sample_base = pos + lateral * n_vec;
@@ -363,29 +382,86 @@ impl CprFrame {
                     }
                 }
                 let val = if max_val == f32::NEG_INFINITY { f32::NAN } else { max_val };
+                if val.is_nan() {
+                    continue;
+                }
 
                 // Project this 3D position onto the 2D viewing plane
                 let offset_3d = sample_base - center_pos;
                 let proj_x = offset_3d.dot(&view_right);
                 let proj_y = offset_3d.dot(&view_up);
 
-                // Map to pixel coordinates
-                let out_col = ((proj_x - min_x) * sx).round() as isize;
-                let out_row = ((max_y - proj_y) * sy).round() as isize; // flip y: top=max_y
+                // Map to sub-pixel coordinates
+                let fc = (proj_x - min_x) * sx;
+                let fr = (max_y - proj_y) * sy;
 
-                if out_col >= 0 && out_col < pixels_wide as isize
-                    && out_row >= 0 && out_row < pixels_high as isize
-                {
-                    let idx = out_row as usize * pixels_wide + out_col as usize;
-                    // MIP compositing: keep the brightest value at each pixel
-                    if val.is_nan() {
-                        // skip
-                    } else if image[idx].is_nan() || val > image[idx] {
-                        image[idx] = val;
+                // Bilinear splatting: distribute value to 4 surrounding pixels
+                let c0 = fc.floor() as isize;
+                let r0 = fr.floor() as isize;
+                let wc = fc - c0 as f64;
+                let wr = fr - r0 as f64;
+
+                for (dr, wy) in [(0isize, 1.0 - wr), (1, wr)] {
+                    for (dc, wx) in [(0isize, 1.0 - wc), (1, wc)] {
+                        let r = r0 + dr;
+                        let c = c0 + dc;
+                        if r >= 0 && r < pixels_high as isize
+                            && c >= 0 && c < pixels_wide as isize
+                        {
+                            let w = wx * wy;
+                            if w < 0.01 { continue; }
+                            let idx = r as usize * pixels_wide + c as usize;
+
+                            if image[idx].is_nan() {
+                                // First write — take it
+                                image[idx] = val;
+                                owner[idx] = j_u32;
+                            } else if j_u32.abs_diff(owner[idx]) <= 3 {
+                                // Same or adjacent strip — MIP across slab
+                                if val > image[idx] {
+                                    image[idx] = val;
+                                    owner[idx] = j_u32;
+                                }
+                            }
+                            // else: distant strip — skip (prevents fan artifacts)
+                        }
                     }
                 }
             }
         }
+
+        // Gap fill: replace remaining NaN pixels that have valid neighbors
+        // with the average of their non-NaN neighbors (single pass).
+        let mut filled = image.clone();
+        for row in 0..pixels_high {
+            for col in 0..pixels_wide {
+                let idx = row * pixels_wide + col;
+                if !filled[idx].is_nan() { continue; }
+
+                let mut sum = 0.0f32;
+                let mut count = 0u32;
+                for dr in [-1isize, 0, 1] {
+                    for dc in [-1isize, 0, 1] {
+                        if dr == 0 && dc == 0 { continue; }
+                        let nr = row as isize + dr;
+                        let nc = col as isize + dc;
+                        if nr >= 0 && nr < pixels_high as isize
+                            && nc >= 0 && nc < pixels_wide as isize
+                        {
+                            let nv = image[nr as usize * pixels_wide + nc as usize];
+                            if !nv.is_nan() {
+                                sum += nv;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                if count >= 2 {
+                    filled[idx] = sum / count as f32;
+                }
+            }
+        }
+        let image = filled;
 
         CurvedCprResult {
             image,
@@ -456,7 +532,7 @@ impl CprFrame {
 
     /// Apply rotation around the tangent axis, returning rotated (normals, binormals).
     /// Does NOT mutate self — returns new vectors for the requested angle.
-    fn rotated_frame(
+    pub(crate) fn rotated_frame(
         &self,
         rotation_deg: f64,
     ) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
@@ -747,5 +823,247 @@ mod tests {
         // Arc-lengths should be increasing
         assert!(results[0].arc_mm < results[1].arc_mm);
         assert!(results[1].arc_mm < results[2].arc_mm);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: quarter-circle centerline in Z-Y plane, radius r, n_pts points
+    // Coordinates are [z, y, x]. Arc sweeps theta from 0 to pi/2.
+    //   z = r * sin(theta),  y = r * cos(theta),  x = 0
+    // -----------------------------------------------------------------------
+    fn quarter_circle(r: f64, n_pts: usize) -> Vec<[f64; 3]> {
+        (0..n_pts)
+            .map(|i| {
+                let theta = std::f64::consts::FRAC_PI_2 * (i as f64) / ((n_pts - 1) as f64);
+                [r * theta.sin(), r * theta.cos(), 0.0]
+            })
+            .collect()
+    }
+
+    // Helper: S-curve — two quarter-circles curving in opposite directions.
+    // First arc: center (0, r, 0), theta 0..pi/2  => z: 0..r,  y: r..0
+    // Second arc: center (2r, 0, 0), theta pi..pi/2 => z: r..2r, y: 0..r
+    // This produces an S-shape in the Z-Y plane.
+    fn s_curve(r: f64, n_pts_per_arc: usize) -> Vec<[f64; 3]> {
+        let mut pts = Vec::with_capacity(2 * n_pts_per_arc - 1);
+        // First quarter-circle: curving from (0, r, 0) toward (r, 0, 0)
+        for i in 0..n_pts_per_arc {
+            let theta = std::f64::consts::FRAC_PI_2 * (i as f64) / ((n_pts_per_arc - 1) as f64);
+            pts.push([r * theta.sin(), r * theta.cos(), 0.0]);
+        }
+        // Second quarter-circle: curving from (r, 0, 0) toward (2r, r, 0)
+        // This reverses the curvature direction.
+        for i in 1..n_pts_per_arc {
+            let theta = std::f64::consts::FRAC_PI_2 * (i as f64) / ((n_pts_per_arc - 1) as f64);
+            pts.push([r + r * theta.sin(), r * (1.0 - theta.cos()), 0.0]);
+        }
+        pts
+    }
+
+    #[test]
+    fn test_bishop_frame_orthogonality() {
+        let pts = quarter_circle(20.0, 20);
+        let frame = CprFrame::from_centerline(&pts, 20);
+        let tol = 1e-6;
+
+        for i in 0..frame.n_cols() {
+            let t = &frame.tangents[i];
+            let n = &frame.normals[i];
+            let b = &frame.binormals[i];
+
+            let tn = t.dot(n).abs();
+            let tb = t.dot(b).abs();
+            let nb = n.dot(b).abs();
+
+            assert!(
+                tn < tol,
+                "T.N not orthogonal at i={}: dot={:.2e}",
+                i, tn
+            );
+            assert!(
+                tb < tol,
+                "T.B not orthogonal at i={}: dot={:.2e}",
+                i, tb
+            );
+            assert!(
+                nb < tol,
+                "N.B not orthogonal at i={}: dot={:.2e}",
+                i, nb
+            );
+        }
+    }
+
+    #[test]
+    fn test_bishop_frame_unit_vectors() {
+        let pts = quarter_circle(20.0, 20);
+        let frame = CprFrame::from_centerline(&pts, 20);
+        let tol = 1e-6;
+
+        for i in 0..frame.n_cols() {
+            let n_len = frame.normals[i].norm();
+            let b_len = frame.binormals[i].norm();
+
+            assert!(
+                (n_len - 1.0).abs() < tol,
+                "|N[{}]| = {:.10}, expected 1.0",
+                i, n_len
+            );
+            assert!(
+                (b_len - 1.0).abs() < tol,
+                "|B[{}]| = {:.10}, expected 1.0",
+                i, b_len
+            );
+        }
+    }
+
+    #[test]
+    fn test_bishop_frame_right_hand_rule() {
+        let pts = quarter_circle(20.0, 20);
+        let frame = CprFrame::from_centerline(&pts, 20);
+        let tol = 1e-6;
+
+        for i in 0..frame.n_cols() {
+            let t = &frame.tangents[i];
+            let n = &frame.normals[i];
+            let b = &frame.binormals[i];
+
+            // B should equal T x N
+            let cross = t.cross(n);
+            let diff = (cross - b).norm();
+            assert!(
+                diff < tol,
+                "B[{}] != T[{}] x N[{}]: diff norm = {:.2e}, B={:?}, TxN={:?}",
+                i, i, i, diff, b, cross
+            );
+        }
+    }
+
+    #[test]
+    fn test_bishop_frame_no_flip() {
+        // Quarter-circle
+        let pts = quarter_circle(20.0, 30);
+        let frame = CprFrame::from_centerline(&pts, 30);
+
+        for i in 0..frame.n_cols() - 1 {
+            let dot = frame.normals[i].dot(&frame.normals[i + 1]);
+            assert!(
+                dot > 0.0,
+                "Normal flip detected (quarter-circle) at i={}: N[i].N[i+1] = {:.6}",
+                i, dot
+            );
+        }
+
+        // S-curve
+        let s_pts = s_curve(20.0, 20);
+        let s_frame = CprFrame::from_centerline(&s_pts, 40);
+
+        for i in 0..s_frame.n_cols() - 1 {
+            let dot = s_frame.normals[i].dot(&s_frame.normals[i + 1]);
+            assert!(
+                dot > 0.0,
+                "Normal flip detected (S-curve) at i={}: N[i].N[i+1] = {:.6}",
+                i, dot
+            );
+        }
+    }
+
+    #[test]
+    fn test_bishop_frame_smoothness() {
+        // Quarter-circle with 50+ samples — consecutive normals should differ by < 15 deg
+        let pts = quarter_circle(20.0, 60);
+        let frame = CprFrame::from_centerline(&pts, 60);
+        let max_angle_rad = 15.0_f64.to_radians();
+
+        for i in 0..frame.n_cols() - 1 {
+            let dot = frame.normals[i]
+                .dot(&frame.normals[i + 1])
+                .clamp(-1.0, 1.0);
+            let angle = dot.acos();
+            assert!(
+                angle < max_angle_rad,
+                "Angle between N[{}] and N[{}] = {:.2} deg, exceeds 15 deg",
+                i,
+                i + 1,
+                angle.to_degrees()
+            );
+        }
+    }
+
+    #[test]
+    fn test_frame_straight_line_constant() {
+        // Straight line along Z at (y=32, x=32)
+        let pts: Vec<[f64; 3]> = (0..60).map(|z| [z as f64, 32.0, 32.0]).collect();
+        let frame = CprFrame::from_centerline(&pts, 60);
+        let tol = 1e-6;
+
+        let n0 = &frame.normals[0];
+        let b0 = &frame.binormals[0];
+
+        for i in 1..frame.n_cols() {
+            let n_dot = frame.normals[i].dot(n0);
+            let b_dot = frame.binormals[i].dot(b0);
+
+            assert!(
+                (n_dot - 1.0).abs() < tol,
+                "N[{}] not parallel to N[0]: dot = {:.10}",
+                i, n_dot
+            );
+            assert!(
+                (b_dot - 1.0).abs() < tol,
+                "B[{}] not parallel to B[0]: dot = {:.10}",
+                i, b_dot
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_centerline_endpoints() {
+        let pts = quarter_circle(20.0, 25);
+        let frame = CprFrame::from_centerline(&pts, 50);
+        let tol = 1e-3;
+
+        let first = &frame.positions[0];
+        let last = &frame.positions[frame.n_cols() - 1];
+
+        let first_in = &pts[0];
+        let last_in = &pts[pts.len() - 1];
+
+        for d in 0..3 {
+            assert!(
+                (first[d] - first_in[d]).abs() < tol,
+                "First position mismatch in dim {}: got {}, expected {}",
+                d, first[d], first_in[d]
+            );
+            assert!(
+                (last[d] - last_in[d]).abs() < tol,
+                "Last position mismatch in dim {}: got {}, expected {}",
+                d, last[d], last_in[d]
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_centerline_uniform_spacing() {
+        let pts = quarter_circle(20.0, 30);
+        let frame = CprFrame::from_centerline(&pts, 100);
+
+        let n = frame.arclengths.len();
+        assert_eq!(n, 100);
+
+        // Compute spacings
+        let spacings: Vec<f64> = (0..n - 1)
+            .map(|i| frame.arclengths[i + 1] - frame.arclengths[i])
+            .collect();
+
+        let mean_spacing: f64 = spacings.iter().sum::<f64>() / spacings.len() as f64;
+        assert!(mean_spacing > 0.0, "Mean spacing must be positive");
+
+        for (i, &ds) in spacings.iter().enumerate() {
+            let rel_err = ((ds - mean_spacing) / mean_spacing).abs();
+            assert!(
+                rel_err < 0.01,
+                "Non-uniform spacing at i={}: ds={:.8}, mean={:.8}, rel_err={:.4}%",
+                i, ds, mean_spacing, rel_err * 100.0
+            );
+        }
     }
 }
