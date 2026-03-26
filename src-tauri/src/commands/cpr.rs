@@ -122,10 +122,12 @@ pub async fn render_cpr_image(
     Ok(Response::new(bytes))
 }
 
-/// Render a curved CPR image. Returns raw binary (same format as straightened):
+/// Render a curved CPR image. Returns raw binary:
 ///   [width: u32 LE][height: u32 LE][n_arclengths: u32 LE]
 ///   [arclengths: n * f64 LE]
 ///   [image: width*height * f32 LE]
+///   [n_projected: u32 LE]
+///   [projected_pixels: n_projected * 2 * f64 LE]  // (col, row) pairs
 #[tauri::command]
 pub async fn render_curved_cpr_image(
     rotation_deg: f64,
@@ -158,19 +160,29 @@ pub async fn render_curved_cpr_image(
     .await
     .map_err(|e| format!("render_curved_cpr_image task failed: {e}"))?;
 
-    // Same binary format as straightened CPR
+    // Binary format: header + arclengths + image + projected pixel coordinates
     let n_arc = result.arclengths.len();
     let n_pixels = result.image.len();
-    let header_size = 12;
-    let arc_size = n_arc * 8;
-    let img_size = n_pixels * 4;
-    let mut bytes = Vec::with_capacity(header_size + arc_size + img_size);
+    let n_projected = result.projected_pixels.len();
+    let header_size = 12; // 3 x u32
+    let arc_size = n_arc * 8; // f64
+    let img_size = n_pixels * 4; // f32
+    let proj_header_size = 4; // u32 for n_projected
+    let proj_size = n_projected * 2 * 8; // pairs of f64
+    let mut bytes = Vec::with_capacity(header_size + arc_size + img_size + proj_header_size + proj_size);
 
     bytes.extend_from_slice(&(result.pixels_wide as u32).to_le_bytes());
     bytes.extend_from_slice(&(result.pixels_high as u32).to_le_bytes());
     bytes.extend_from_slice(&(n_arc as u32).to_le_bytes());
     bytes.extend_from_slice(bytemuck::cast_slice::<f64, u8>(&result.arclengths));
     bytes.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&result.image));
+
+    // Pack projected pixel coordinates
+    bytes.extend_from_slice(&(n_projected as u32).to_le_bytes());
+    for &(col, row) in &result.projected_pixels {
+        bytes.extend_from_slice(&col.to_le_bytes());
+        bytes.extend_from_slice(&row.to_le_bytes());
+    }
 
     Ok(Response::new(bytes))
 }
