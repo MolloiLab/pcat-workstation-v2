@@ -114,53 +114,9 @@
     });
   });
 
-  // ---------- Navigate viewports when a seed is selected ----------
-  // ONLY re-run when selectedSeedIndex changes — use untrack() for seed data
-  // to prevent re-navigation on every seed add/move.
-  let lastNavigatedIdx: number | null = null;
-
-  $effect(() => {
-    const selectedIdx = seedStore.selectedSeedIndex;
-    if (selectedIdx === lastNavigatedIdx) return;
-    lastNavigatedIdx = selectedIdx;
-
-    if (selectedIdx === null || !engineReady) return;
-
-    // Read seed position without creating a reactive dependency on seed data
-    const pos = untrack(() => {
-      const data = seedStore.activeVesselData;
-      if (!data || selectedIdx >= data.seeds.length) return null;
-      return data.seeds[selectedIdx].position;
-    });
-
-    if (!pos || !isFinite(pos[0]) || !isFinite(pos[1]) || !isFinite(pos[2])) return;
-
-    const engine = getRenderingEngine();
-    for (const vpId of VIEWPORT_IDS) {
-      const vp = engine.getViewport(vpId);
-      if (!vp) continue;
-      const camera = vp.getCamera();
-      const oldFocal = camera.focalPoint as [number, number, number];
-      const oldPos = camera.position as [number, number, number];
-
-      const delta: [number, number, number] = [
-        pos[0] - oldFocal[0],
-        pos[1] - oldFocal[1],
-        pos[2] - oldFocal[2],
-      ];
-
-      vp.setCamera({
-        ...camera,
-        focalPoint: [pos[0], pos[1], pos[2]] as [number, number, number],
-        position: [
-          oldPos[0] + delta[0],
-          oldPos[1] + delta[1],
-          oldPos[2] + delta[2],
-        ] as [number, number, number],
-      });
-      vp.render();
-    }
-  });
+  // NOTE: Camera navigation on seed selection is disabled for now.
+  // The setCamera API was corrupting view orientation.
+  // TODO: Re-enable using cornerstone3D's scrollToSlice or jumpToWorld API.
 </script>
 
 <!--

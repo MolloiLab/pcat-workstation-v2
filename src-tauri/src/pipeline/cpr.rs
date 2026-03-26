@@ -27,6 +27,9 @@ pub struct CrossSectionResult {
 
 /// Uniformly resample a dense centerline (already at ~0.5mm spacing) to
 /// exactly `n` positions along arc length. Returns (positions, tangents, arclengths).
+///
+/// Tangents are computed using centered finite differences on the RESAMPLED
+/// positions for smoothness, not from the original polyline segments.
 pub fn resample_centerline(
     pts: &[[f64; 3]],
     n: usize,
@@ -49,7 +52,6 @@ pub fn resample_centerline(
     let total_arc = *cum_arc.last().unwrap();
 
     let mut positions = Vec::with_capacity(n);
-    let mut tangents = Vec::with_capacity(n);
     let mut arclengths = Vec::with_capacity(n);
 
     // Pointer into the source polyline for O(n+m) walk
@@ -74,17 +76,18 @@ pub fn resample_centerline(
 
         let p0 = Vector3::new(pts[seg][0], pts[seg][1], pts[seg][2]);
         let p1 = Vector3::new(pts[seg + 1][0], pts[seg + 1][1], pts[seg + 1][2]);
-        let pos = p0 + t * (p1 - p0);
-        positions.push(pos);
+        positions.push(p0 + t * (p1 - p0));
+    }
 
-        // Tangent: use neighboring samples for a smooth finite-difference estimate.
-        // For interior points of the source polyline, use a centered difference.
-        let tang = if seg + 1 < pts.len() {
-            (p1 - p0).normalize()
+    // Compute smooth tangents using centered finite differences on resampled positions
+    let mut tangents = Vec::with_capacity(n);
+    for j in 0..n {
+        let tang = if j == 0 {
+            (positions[1] - positions[0]).normalize()
+        } else if j == n - 1 {
+            (positions[n - 1] - positions[n - 2]).normalize()
         } else {
-            // Fallback: use previous tangent direction
-            let pp = Vector3::new(pts[seg - 1][0], pts[seg - 1][1], pts[seg - 1][2]);
-            (p0 - pp).normalize()
+            (positions[j + 1] - positions[j - 1]).normalize()
         };
         tangents.push(tang);
     }
