@@ -84,6 +84,7 @@ pub fn project_centerline_2d(
 // ---------------------------------------------------------------------------
 
 /// Result of nearest-segment lookup on the 2D projected centerline.
+#[allow(dead_code)]
 pub struct NearestResult {
     /// Index of the segment start point (0-based).
     pub segment_idx: usize,
@@ -99,6 +100,7 @@ pub struct NearestResult {
 /// For each consecutive pair `(P[j], P[j+1])`, the query is projected onto
 /// the line segment and the closest is kept. The signed distance uses the 2D
 /// perpendicular (segment direction rotated 90 degrees clockwise → right).
+#[allow(dead_code)]
 pub fn nearest_on_projected_centerline(
     projected: &[(f64, f64)],
     query_x: f64,
@@ -190,6 +192,7 @@ pub fn nearest_on_projected_centerline(
 /// - `arclengths`: cumulative arc-length at each centerline sample.
 /// - `width_mm`: half-width of the lateral extent around the centerline.
 /// - `slab_mm`: MIP slab thickness along the binormal (0 = single plane).
+#[allow(dead_code)]
 pub(crate) fn render_curved_cpr_pixeldriven(
     positions: &[[f64; 3]],
     normals: &[Vector3<f64>],
@@ -343,6 +346,7 @@ pub(crate) fn render_curved_cpr_pixeldriven(
 
 /// Linear interpolation between two `Vector3<f64>` values.
 #[inline]
+#[allow(dead_code)]
 fn lerp_vec3(a: &Vector3<f64>, b: &Vector3<f64>, t: f64) -> Vector3<f64> {
     a * (1.0 - t) + b * t
 }
