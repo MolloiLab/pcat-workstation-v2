@@ -30,6 +30,16 @@ export async function getRecentDicoms(): Promise<string[]> {
   return invoke<string[]>('get_recent_dicoms');
 }
 
+/** Save seeds JSON to app data directory. Returns the file path. */
+export async function saveSeeds(seedsJson: string): Promise<string> {
+  return invoke<string>('save_seeds', { seedsJson });
+}
+
+/** Load seeds JSON from app data directory. Returns null if no file. */
+export async function loadSeeds(): Promise<string | null> {
+  return invoke<string | null>('load_seeds');
+}
+
 /**
  * Get a single slice as raw i16 LE bytes from the Rust backend.
  * Tauri serializes Vec<u8> as a number[], so we convert back.

@@ -211,4 +211,40 @@ export const seedStore = {
     }
     selectedSeedIndex = null;
   },
+
+  // --- Export / Import ---
+
+  /** Export all seed data as a JSON string. */
+  exportJson(): string {
+    const data: Record<string, { seeds: [number, number, number][]; ostiumFraction: number | null }> = {};
+    for (const v of ALL_VESSELS) {
+      const vd = vesselData[v];
+      data[v] = {
+        seeds: vd.seeds.map((s) => s.position),
+        ostiumFraction: vd.ostiumFraction,
+      };
+    }
+    return JSON.stringify({ activeVessel, vessels: data }, null, 2);
+  },
+
+  /** Import seed data from a JSON string (exported by exportJson). */
+  importJson(json: string) {
+    const parsed = JSON.parse(json);
+    if (parsed.activeVessel) {
+      activeVessel = parsed.activeVessel;
+    }
+    if (parsed.vessels) {
+      for (const v of ALL_VESSELS) {
+        const vd = parsed.vessels[v];
+        if (!vd) continue;
+        const seeds = (vd.seeds ?? []).map((pos: [number, number, number]) => ({ position: pos }));
+        vesselData[v] = recomputeCenterline({
+          seeds,
+          centerline: null,
+          ostiumFraction: vd.ostiumFraction ?? null,
+        });
+      }
+    }
+    selectedSeedIndex = null;
+  },
 };

@@ -109,3 +109,26 @@ pub async fn load_dicom(
 pub async fn get_recent_dicoms(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     Ok(load_recent_list(&app))
 }
+
+/// Save seeds JSON to app data directory.
+#[tauri::command]
+pub async fn save_seeds(app: tauri::AppHandle, seeds_json: String) -> Result<String, String> {
+    let dir = app.path().app_data_dir().expect("app data dir");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("seeds.json");
+    std::fs::write(&path, &seeds_json).map_err(|e| format!("write failed: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Load seeds JSON from app data directory.
+#[tauri::command]
+pub async fn load_seeds(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let dir = app.path().app_data_dir().expect("app data dir");
+    let path = dir.join("seeds.json");
+    if path.exists() {
+        let data = std::fs::read_to_string(&path).map_err(|e| format!("read failed: {e}"))?;
+        Ok(Some(data))
+    } else {
+        Ok(None)
+    }
+}
