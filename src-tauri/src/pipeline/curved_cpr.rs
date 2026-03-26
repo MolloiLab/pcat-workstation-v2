@@ -306,6 +306,16 @@ pub(crate) fn render_curved_cpr_pixeldriven(
                 continue;
             }
 
+            // (h2) Reject mis-assigned pixels from projection fold-back.
+            // The depth component (along binormal / view_forward) of a
+            // correctly-assigned pixel on the viewing plane should be near
+            // zero. If it's large, the 2D lookup matched a distant segment
+            // that only appears close in projection.
+            let depth_offset = offset_3d.dot(&interp_binormal).abs();
+            if depth_offset > width_mm {
+                continue;
+            }
+
             // (i) 3D sample: centerline + lateral along normal
             let sample_base = interp_pos + lateral_offset * interp_normal;
 
