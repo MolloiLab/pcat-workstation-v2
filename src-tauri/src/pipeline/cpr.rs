@@ -41,10 +41,11 @@ pub struct CrossSectionResult {
 ///
 /// Built once when the centerline changes (~100ms), then reused for
 /// rotation/needle changes (<10ms per render).
+#[allow(dead_code)]
 pub struct CprFrame {
     pub positions: Vec<[f64; 3]>,    // [z,y,x] in mm, n_cols entries
     pub tangents: Vec<Vector3<f64>>,
-    pub normals: Vec<Vector3<f64>>,  // Bishop frame (parallel transport)
+    pub normals: Vec<Vector3<f64>>,  // RMF (Double Reflection Method)
     pub binormals: Vec<Vector3<f64>>,
     pub arclengths: Vec<f64>,
 }
