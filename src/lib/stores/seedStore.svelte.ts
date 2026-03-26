@@ -124,6 +124,8 @@ export const seedStore = {
       { position, type: 'waypoint' },
     ]);
     vesselData[v] = recomputeCenterline({ seeds: newSeeds, centerline: null });
+    // Auto-select the newly placed seed so navigation triggers
+    selectedSeedIndex = newSeeds.length - 1;
   },
 
   /**

@@ -46,6 +46,8 @@
   let projectedSeeds = $state<ProjectedSeed[]>([]);
   let projectedCenterlines = $state<ProjectedCenterline[]>([]);
   let projectedGhostDot = $state<{ cx: number; cy: number; color: string } | null>(null);
+  /** Crosshair position for the selected seed (projected onto this viewport). */
+  let crosshairPos = $state<{ cx: number; cy: number; width: number; height: number } | null>(null);
 
   /**
    * Trigger version: bumped on each cornerstone render event so the
@@ -158,9 +160,9 @@
       const data = vesselData[vessel];
       for (let i = 0; i < data.seeds.length; i++) {
         const seed = data.seeds[i];
-        // Depth filter: hide seeds not near the current slice (+/-1 slice)
+        // Depth filter: hide seeds not near the current slice (+/-3 slices)
         if (sliceInfo && focalPoint) {
-          const tolerance = sliceInfo.spacing * 1;
+          const tolerance = sliceInfo.spacing * 3;
           if (!isNearSlice(seed.position as [number, number, number], focalPoint, sliceInfo.axisIndex, tolerance)) {
             continue; // skip — not on this slice
           }
@@ -195,9 +197,9 @@
 
       const pts: string[] = [];
       for (const pt of data.centerline) {
-        // Depth filter: only draw centerline points within +/-2 slices
+        // Depth filter: only draw centerline points within +/-5 slices
         if (sliceInfo && focalPoint) {
-          const tolerance = sliceInfo.spacing * 2;
+          const tolerance = sliceInfo.spacing * 5;
           if (!isNearSlice(pt, focalPoint, sliceInfo.axisIndex, tolerance)) {
             // Break the polyline — push what we have so far
             if (pts.length >= 2) {
@@ -233,6 +235,24 @@
     } else {
       projectedGhostDot = null;
     }
+
+    // --- Crosshair lines at selected seed position ---
+    if (currentSelectedIndex !== null) {
+      const activeData = vesselData[currentActiveVessel];
+      if (activeData && currentSelectedIndex < activeData.seeds.length) {
+        const seedPos = activeData.seeds[currentSelectedIndex].position as [number, number, number];
+        const canvasPos = vp.worldToCanvas(seedPos);
+        if (canvasPos && isFinite(canvasPos[0]) && isFinite(canvasPos[1])) {
+          crosshairPos = { cx: canvasPos[0], cy: canvasPos[1], width, height };
+        } else {
+          crosshairPos = null;
+        }
+      } else {
+        crosshairPos = null;
+      }
+    } else {
+      crosshairPos = null;
+    }
   });
 </script>
 
@@ -240,6 +260,30 @@
   class="pointer-events-none absolute inset-0 z-20 h-full w-full"
   xmlns="http://www.w3.org/2000/svg"
 >
+  <!-- Crosshair lines at selected seed position -->
+  {#if crosshairPos}
+    <!-- Horizontal crosshair line -->
+    <line
+      x1="0"
+      y1={crosshairPos.cy}
+      x2={crosshairPos.width}
+      y2={crosshairPos.cy}
+      stroke="rgba(255,255,255,0.4)"
+      stroke-width="0.75"
+      stroke-dasharray="4,3"
+    />
+    <!-- Vertical crosshair line -->
+    <line
+      x1={crosshairPos.cx}
+      y1="0"
+      x2={crosshairPos.cx}
+      y2={crosshairPos.height}
+      stroke="rgba(255,255,255,0.4)"
+      stroke-width="0.75"
+      stroke-dasharray="4,3"
+    />
+  {/if}
+
   <!-- Centerline polylines (drawn first, behind markers) -->
   {#each projectedCenterlines as cl}
     <polyline

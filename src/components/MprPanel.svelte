@@ -114,9 +114,53 @@
     });
   });
 
-  // NOTE: Camera navigation on seed selection is disabled for now.
-  // The setCamera API was corrupting view orientation.
-  // TODO: Re-enable using cornerstone3D's scrollToSlice or jumpToWorld API.
+  // ---------- Navigate MPR views to selected seed position ----------
+  /**
+   * Safe navigation: only move the camera along the view's plane normal,
+   * preserving orientation. Projects the target position onto the normal
+   * and shifts focal + position by that distance.
+   */
+  function navigateToWorldPos(pos: [number, number, number]) {
+    const engine = getRenderingEngine();
+    for (const vpId of VIEWPORT_IDS) {
+      const vp = engine.getViewport(vpId);
+      if (!vp) continue;
+      const camera = vp.getCamera();
+      if (!camera.focalPoint || !camera.position || !camera.viewPlaneNormal) continue;
+      const focal = [...camera.focalPoint] as [number, number, number];
+      const position = [...camera.position] as [number, number, number];
+      const normal = camera.viewPlaneNormal as [number, number, number];
+
+      // Project the desired position onto the view plane normal
+      // to find how far to move along the normal
+      const dx = pos[0] - focal[0];
+      const dy = pos[1] - focal[1];
+      const dz = pos[2] - focal[2];
+      const dist = dx * normal[0] + dy * normal[1] + dz * normal[2];
+
+      // Move focal and position by same amount along normal
+      focal[0] += dist * normal[0];
+      focal[1] += dist * normal[1];
+      focal[2] += dist * normal[2];
+      position[0] += dist * normal[0];
+      position[1] += dist * normal[1];
+      position[2] += dist * normal[2];
+
+      vp.setCamera({ ...camera, focalPoint: focal, position });
+      vp.render();
+    }
+  }
+
+  // When a seed is selected (or placed, since addSeed auto-selects),
+  // navigate all MPR views to that seed's position.
+  $effect(() => {
+    const idx = seedStore.selectedSeedIndex;
+    if (idx === null || !engineReady) return;
+    const data = untrack(() => seedStore.activeVesselData);
+    if (!data || idx >= data.seeds.length) return;
+    const pos = data.seeds[idx].position;
+    untrack(() => navigateToWorldPos(pos));
+  });
 </script>
 
 <!--

@@ -152,6 +152,57 @@
     ctx.fillStyle = '#ffee00';
     ctx.fillText('C', xC, 14);
 
+    // --- Centerline: horizontal dashed line at vertical midpoint ---
+    const midY = Math.round(h / 2);
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.moveTo(0, midY);
+    ctx.lineTo(w, midY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // --- Seed dots along the centerline ---
+    const activeData = seedStore.activeVesselData;
+    if (activeData && activeData.centerline && activeData.centerline.length >= 2 && arclengths.length > 0) {
+      const cl = activeData.centerline;
+
+      for (let si = 0; si < activeData.seeds.length; si++) {
+        const seedPos = activeData.seeds[si].position;
+        // Find closest centerline point to this seed
+        let minDist = Infinity;
+        let closestIdx = 0;
+        for (let ci = 0; ci < cl.length; ci++) {
+          const dx = cl[ci][0] - seedPos[0];
+          const dy = cl[ci][1] - seedPos[1];
+          const dz = cl[ci][2] - seedPos[2];
+          const d = dx * dx + dy * dy + dz * dz;
+          if (d < minDist) {
+            minDist = d;
+            closestIdx = ci;
+          }
+        }
+        // Convert centerline index to arc-length fraction, then to pixel x
+        const frac = closestIdx / (cl.length - 1);
+        const sx = Math.round(frac * w);
+
+        // Draw seed dot on the centerline midline
+        ctx.beginPath();
+        const isSelected = si === seedStore.selectedSeedIndex;
+        ctx.fillStyle = isSelected ? '#ffffff' : 'rgba(255,255,255,0.6)';
+        ctx.arc(sx, midY, isSelected ? 4 : 3, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Outline
+        ctx.beginPath();
+        ctx.strokeStyle = isSelected ? '#00ffcc' : 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = isSelected ? 1.5 : 1;
+        ctx.arc(sx, midY, isSelected ? 4 : 3, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
+    }
+
     // Arclength ticks every 10mm along the bottom
     if (arclengths.length > 0) {
       const totalArc = arclengths[arclengths.length - 1];
@@ -242,7 +293,7 @@
     return () => clearTimeout(cprDebounce);
   });
 
-  // Re-render when image data, W/L, or needle positions change
+  // Re-render when image data, W/L, needle positions, or seed state change
   $effect(() => {
     // Touch reactive deps so Svelte tracks them for this effect
     void cprImageData;
@@ -252,6 +303,9 @@
     void needleBFraction;
     void needleCFraction;
     void arclengths;
+    // Track seed state for centerline overlay dots
+    void seedStore.activeVesselData;
+    void seedStore.selectedSeedIndex;
 
     repaintCanvas();
   });
@@ -316,6 +370,13 @@
 
   function onCanvasMouseUp() {
     dragging = false;
+  }
+
+  /** Scroll wheel moves needle B position by 2% per step. */
+  function onCanvasWheel(event: WheelEvent) {
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? 0.02 : -0.02;
+    needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
   }
 
   // ---- W/L adjustment via right-drag on CPR canvas ----
@@ -415,6 +476,7 @@
           style="image-rendering: pixelated; width: 100%; height: 100%;"
           onmousedown={handleMouseDown}
           oncontextmenu={onCanvasContextMenu}
+          onwheel={onCanvasWheel}
         ></canvas>
       {/if}
     </div>
@@ -494,7 +556,7 @@
     <span class="text-[10px] text-text-secondary/40">|</span>
 
     <span class="text-[10px] text-text-secondary/40">
-      Right-drag: W/L
+      Scroll: move B &middot; Right-drag: W/L
     </span>
   </div>
 </div>
