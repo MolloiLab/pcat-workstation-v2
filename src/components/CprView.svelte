@@ -248,7 +248,7 @@
       ctx.fillStyle = '#ffee00';
       ctx.fillText('C', xC, 14);
     } else if (projectionInfo) {
-      // Curved mode: draw needle markers at projected centerline positions
+      // Curved mode: draw needle lines perpendicular to vessel tangent
       const nPos = projectionInfo.positions.length;
       const drawCurvedNeedle = (frac: number, color: string, label: string, isDashed: boolean) => {
         const idx = Math.round(frac * (nPos - 1));
@@ -258,29 +258,40 @@
         if (!projected) return;
         const [cx, cy] = projected;
 
-        // Crosshair at needle position
-        ctx.strokeStyle = color;
-        ctx.lineWidth = isDashed ? 1 : 1.5;
-        ctx.setLineDash(isDashed ? [4, 3] : []);
+        // Compute tangent direction from adjacent projected points
+        const prevIdx = Math.max(0, clampedIdx - 1);
+        const nextIdx = Math.min(nPos - 1, clampedIdx + 1);
+        const prevPos = projectionInfo!.positions[prevIdx];
+        const nextPos = projectionInfo!.positions[nextIdx];
+        const prevProj = worldToCurvedCpr(prevPos, projectionInfo!, w, h);
+        const nextProj = worldToCurvedCpr(nextPos, projectionInfo!, w, h);
 
-        // Horizontal line through needle point
-        ctx.beginPath();
-        ctx.moveTo(cx - 12, cy);
-        ctx.lineTo(cx + 12, cy);
-        ctx.stroke();
+        if (prevProj && nextProj) {
+          const tx = nextProj[0] - prevProj[0];
+          const ty = nextProj[1] - prevProj[1];
+          const tlen = Math.sqrt(tx * tx + ty * ty);
+          if (tlen > 0.1) {
+            // Perpendicular to tangent (the needle line direction)
+            const px = -ty / tlen;
+            const py = tx / tlen;
+            const lineLen = h * 0.4; // extend across a good portion of the view
 
-        // Vertical line through needle point
-        ctx.beginPath();
-        ctx.moveTo(cx, cy - 12);
-        ctx.lineTo(cx, cy + 12);
-        ctx.stroke();
-        ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = isDashed ? 1 : 1.5;
+            ctx.setLineDash(isDashed ? [4, 3] : []);
+            ctx.moveTo(cx - px * lineLen, cy - py * lineLen);
+            ctx.lineTo(cx + px * lineLen, cy + py * lineLen);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
 
         // Label
         ctx.font = 'bold 11px -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillStyle = color;
-        ctx.fillText(label, cx, cy - 15);
+        ctx.fillText(label, cx, cy - 10);
       };
 
       drawCurvedNeedle(needleAFraction, '#ffee00', 'A', true);
@@ -724,16 +735,39 @@
       return;
     }
 
-    const fraction = x / rect.width;
+    if (cprMode === 'straightened') {
+      const fraction = x / rect.width;
+      // Check if click is near needle B (within ~8px)
+      const bPixel = needleBFraction * rect.width;
+      if (Math.abs(x - bPixel) < 8) {
+        dragging = true;
+        event.preventDefault();
+      } else {
+        needleBFraction = Math.max(0, Math.min(1, fraction));
+        navigateToNeedlePos();
+      }
+    } else if (projectionInfo && cprCanvas) {
+      // Curved mode: find nearest centerline point to click position
+      const canvasPixelX = (x / rect.width) * cprCanvas.width;
+      const canvasPixelY = (y / rect.height) * cprCanvas.height;
+      const nPos = projectionInfo.positions.length;
+      const w = cprCanvas.width;
+      const h = cprCanvas.height;
 
-    // Priority 3: Check if click is near needle B (within ~8px)
-    const bPixel = needleBFraction * rect.width;
-    if (Math.abs(x - bPixel) < 8) {
-      dragging = true;
-      event.preventDefault();
-    } else {
-      // Click elsewhere: snap B to that position
-      needleBFraction = Math.max(0, Math.min(1, fraction));
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      for (let j = 0; j < nPos; j++) {
+        const projected = worldToCurvedCpr(projectionInfo.positions[j], projectionInfo, w, h);
+        if (!projected) continue;
+        const dx = canvasPixelX - projected[0];
+        const dy = canvasPixelY - projected[1];
+        const d = dx * dx + dy * dy;
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = j;
+        }
+      }
+      needleBFraction = bestIdx / (nPos - 1);
       navigateToNeedlePos();
     }
   }
@@ -763,7 +797,10 @@
 
     // Needle B dragging
     if (dragging) {
-      needleBFraction = Math.max(0, Math.min(1, x / rect.width));
+      if (cprMode === 'straightened') {
+        needleBFraction = Math.max(0, Math.min(1, x / rect.width));
+      }
+      // In curved mode, needle dragging isn't supported (use scroll instead)
       navigateToNeedlePos();
       return;
     }

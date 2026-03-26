@@ -531,13 +531,17 @@ pub(crate) fn render_curved_direct(
             let offset = pixel_3d - interp_pos;
             let lateral = offset.dot(&interp_normal);
 
-            if lateral.abs() > width_mm {
-                continue;
-            }
-
-            // Sample volume at centerline + lateral * normal, MIP across slab
-            let sample_base = interp_pos + lateral * interp_normal;
-            let b_vec = interp_binormal;
+            // Sample point: if within lateral width, use CPR sampling
+            // (centerline + lateral along normal). Otherwise, sample the
+            // viewing plane directly — this shows surrounding context
+            // (bones, chambers) like syngo.via does.
+            let (sample_base, b_vec) = if lateral.abs() <= width_mm {
+                // CPR: sample perpendicular to vessel
+                (interp_pos + lateral * interp_normal, interp_binormal)
+            } else {
+                // Direct oblique: sample at the pixel's actual 3D position
+                (pixel_3d, interp_binormal)
+            };
 
             let mut max_val = f32::NEG_INFINITY;
             for &slab_off in &slab_offsets {
