@@ -253,7 +253,7 @@ pub fn load_dicom_directory(dir: &Path) -> Result<LoadedVolume, AppError> {
     })?;
 
     Ok(LoadedVolume {
-        data,
+        data: std::sync::Arc::new(data),
         spacing: [sz, sy, sx],
         origin,
         direction,

@@ -1,12 +1,15 @@
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::pipeline::cpr::CprFrame;
 
 /// CT volume loaded from DICOM, stored in Rust memory.
+/// `data` is wrapped in `Arc` so commands can share it without
+/// cloning ~300MB on every render call.
 pub struct LoadedVolume {
-    pub data: Array3<f32>,       // (Z, Y, X) HU values
+    pub data: Arc<Array3<f32>>,  // (Z, Y, X) HU values — shared, not cloned
     pub spacing: [f64; 3],       // [sz, sy, sx] mm
     pub origin: [f64; 3],        // [oz, oy, ox] mm
     pub direction: [f64; 9],     // row-major 3x3
@@ -44,7 +47,7 @@ pub struct VesselResult {
 /// Application state managed by Tauri.
 pub struct AppState {
     pub volume: Option<LoadedVolume>,
-    pub cpr_frame: Option<CprFrame>,
+    pub cpr_frame: Option<Arc<CprFrame>>,
     pub analysis_results: Option<AnalysisResults>,
 }
 
