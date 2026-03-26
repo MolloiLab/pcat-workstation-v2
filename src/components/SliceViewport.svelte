@@ -38,6 +38,51 @@
 
   const vesselNames: Vessel[] = ['RCA', 'LAD', 'LCx'];
 
+  // Slice index tracking
+  let sliceIndex = $state(0);
+  let sliceCount = $state(0);
+
+  function updateSliceInfo() {
+    const vp = getViewport();
+    if (!vp || !volumeStore.current) return;
+    const shape = volumeStore.current.shape; // [Z, Y, X]
+    const camera = vp.getCamera();
+    if (!camera.focalPoint || !camera.viewPlaneNormal) return;
+
+    const focal = camera.focalPoint as [number, number, number];
+    const origin = volumeStore.current.origin; // [oz, oy, ox]
+    const spacing = volumeStore.current.spacing; // [sz, sy, sx]
+
+    // Determine which axis this orientation slices along
+    if (orientation === 'axial') {
+      // Axial slices along Z: focalPoint Z → slice index
+      const voxelZ = (focal[2] - origin[0]) / spacing[0]; // cornerstone Z is our origin[0]
+      sliceIndex = Math.round(Math.abs(voxelZ));
+      sliceCount = shape[0];
+    } else if (orientation === 'coronal') {
+      const voxelY = (focal[1] - origin[1]) / spacing[1];
+      sliceIndex = Math.round(Math.abs(voxelY));
+      sliceCount = shape[1];
+    } else {
+      const voxelX = (focal[0] - origin[2]) / spacing[2];
+      sliceIndex = Math.round(Math.abs(voxelX));
+      sliceCount = shape[2];
+    }
+
+    // Clamp
+    sliceIndex = Math.max(0, Math.min(sliceCount - 1, sliceIndex));
+  }
+
+  // Listen for cornerstone camera changes to update slice info
+  $effect(() => {
+    if (!containerEl) return;
+    const handler = () => updateSliceInfo();
+    containerEl.addEventListener('CORNERSTONE_CAMERA_MODIFIED', handler);
+    // Also update on initial render
+    setTimeout(handler, 200);
+    return () => containerEl?.removeEventListener('CORNERSTONE_CAMERA_MODIFIED', handler);
+  });
+
   // --- Drag state ---
   let isDragging = $state(false);
   let dragSeedIndex = $state<number | null>(null);
@@ -305,11 +350,11 @@
 </script>
 
 <div class="relative h-full w-full overflow-hidden bg-black">
-  <!-- Orientation label overlay -->
+  <!-- Orientation label + slice number overlay -->
   <span
     class="pointer-events-none absolute left-2 top-1.5 z-10 text-[11px] font-medium text-text-secondary/80"
   >
-    {labels[orientation]}
+    {labels[orientation]}{#if sliceCount > 0}: {sliceIndex}/{sliceCount}{/if}
   </span>
 
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
