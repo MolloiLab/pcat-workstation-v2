@@ -16,11 +16,17 @@ use super::interp::trilinear;
 // 1. View basis from binormals
 // ---------------------------------------------------------------------------
 
-/// Compute an orthonormal view basis from the Bishop-frame binormals.
+/// Compute an orthonormal view basis using PCA on the centerline positions.
+///
+/// The best-fit plane of the centerline is found via PCA. The viewing
+/// direction is the normal to this plane (third principal component),
+/// which minimizes self-intersection of the projected curve.
 ///
 /// Returns `(view_forward, view_right, view_up)` where:
-/// - `view_forward` is the average binormal direction (into the screen),
+/// - `view_forward` points into the screen (normal to best-fit plane),
 /// - `view_right` and `view_up` span the viewing plane.
+///
+/// Falls back to average-binormal if PCA is degenerate.
 ///
 /// Coordinate convention: `[z, y, x]` — `Vector3::new(z, y, x)`.
 pub fn compute_view_basis(
@@ -28,14 +34,13 @@ pub fn compute_view_basis(
 ) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
     assert!(!binormals.is_empty(), "need at least one binormal");
 
-    // Average all binormals and normalise → view_forward (into screen)
+    // Fallback: average binormal
     let mut sum = Vector3::new(0.0, 0.0, 0.0);
     for b in binormals {
         sum += b;
     }
     let view_forward = (sum / binormals.len() as f64).normalize();
 
-    // world_up = z-axis in [z,y,x] coords
     let world_up = Vector3::new(1.0, 0.0, 0.0);
 
     let view_right = {
@@ -43,7 +48,70 @@ pub fn compute_view_basis(
         if candidate.norm() > 1e-6 {
             candidate.normalize()
         } else {
-            // view_forward ≈ world_up — use fallback seed
+            let fallback = Vector3::new(0.0, 1.0, 0.0);
+            fallback.cross(&view_forward).normalize()
+        }
+    };
+
+    let view_up = view_forward.cross(&view_right).normalize();
+
+    (view_forward, view_right, view_up)
+}
+
+/// Compute view basis using PCA on centerline positions.
+///
+/// The third principal component (direction of least spread) becomes the
+/// viewing direction, ensuring the projected 2D curve has minimal
+/// self-intersection.
+pub fn compute_view_basis_pca(
+    positions: &[[f64; 3]],
+) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+    let n = positions.len();
+    assert!(n >= 2, "need at least 2 positions");
+
+    // 1. Compute centroid
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+    let mut cz = 0.0;
+    for p in positions {
+        cx += p[0];
+        cy += p[1];
+        cz += p[2];
+    }
+    cx /= n as f64;
+    cy /= n as f64;
+    cz /= n as f64;
+
+    // 2. Compute 3x3 covariance matrix
+    let mut cov = nalgebra::Matrix3::<f64>::zeros();
+    for p in positions {
+        let d = Vector3::new(p[0] - cx, p[1] - cy, p[2] - cz);
+        cov += d * d.transpose();
+    }
+    cov /= n as f64;
+
+    // 3. Eigendecomposition — eigenvalues NOT sorted by nalgebra!
+    let eig = cov.symmetric_eigen();
+
+    // Find index of smallest eigenvalue (least variance = normal to curve's plane)
+    let mut min_idx = 0;
+    let mut min_val = eig.eigenvalues[0].abs();
+    for i in 1..3 {
+        if eig.eigenvalues[i].abs() < min_val {
+            min_val = eig.eigenvalues[i].abs();
+            min_idx = i;
+        }
+    }
+    let view_forward = eig.eigenvectors.column(min_idx).normalize();
+
+    // Use world_up to derive view_right
+    let world_up = Vector3::new(1.0, 0.0, 0.0);
+
+    let view_right = {
+        let candidate = world_up.cross(&view_forward);
+        if candidate.norm() > 1e-6 {
+            candidate.normalize()
+        } else {
             let fallback = Vector3::new(0.0, 1.0, 0.0);
             fallback.cross(&view_forward).normalize()
         }
@@ -339,6 +407,139 @@ pub(crate) fn render_curved_cpr_pixeldriven(
             } else {
                 max_val
             };
+        }
+    }
+
+    CurvedCprResult {
+        image,
+        pixels_wide,
+        pixels_high,
+        arclengths: arclengths.to_vec(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Warp-from-straightened curved CPR renderer
+// ---------------------------------------------------------------------------
+
+/// Render a curved CPR by warping a straightened CPR using 3D nearest-point lookup.
+///
+/// For each output pixel on the viewing plane, the nearest centerline point is
+/// found in 3D (not 2D). The arc-length fraction gives the straightened column,
+/// the perpendicular distance gives the row. This is immune to projection
+/// fold-back because the 3D distance is unambiguous.
+pub(crate) fn render_curved_from_straightened(
+    straight_image: &[f32],
+    straight_w: usize,
+    straight_h: usize,
+    positions: &[[f64; 3]],
+    normals: &[Vector3<f64>],
+    width_mm: f64,
+    pixels_wide: usize,
+    pixels_high: usize,
+    arclengths: &[f64],
+) -> CurvedCprResult {
+    let n = positions.len();
+    assert!(n >= 2);
+    assert_eq!(normals.len(), n);
+
+    // 1. View basis via PCA for the output viewing plane
+    let (_vf, view_right, view_up) = compute_view_basis_pca(positions);
+
+    // 2. Project centerline to 2D (only for bounding box + output layout)
+    let mid_idx = n / 2;
+    let center = positions[mid_idx];
+    let center_vec = Vector3::new(center[0], center[1], center[2]);
+    let projected = project_centerline_2d(positions, center, &view_right, &view_up);
+
+    // 3. Bounding box + padding
+    let mut min_x = f64::MAX;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::MAX;
+    let mut max_y = f64::NEG_INFINITY;
+    for &(px, py) in &projected {
+        if px < min_x { min_x = px; }
+        if px > max_x { max_x = px; }
+        if py < min_y { min_y = py; }
+        if py > max_y { max_y = py; }
+    }
+    min_x -= width_mm;
+    max_x += width_mm;
+    min_y -= width_mm;
+    max_y += width_mm;
+
+    let view_width = max_x - min_x;
+    let view_height = max_y - min_y;
+
+    // 4. Precompute position vectors for 3D distance search
+    let pos_vecs: Vec<Vector3<f64>> = positions.iter()
+        .map(|p| Vector3::new(p[0], p[1], p[2]))
+        .collect();
+
+    // 5. For each output pixel: find nearest centerline point in 3D,
+    // then look up the straightened CPR value.
+    let mut image = vec![f32::NAN; pixels_high * pixels_wide];
+
+    for row in 0..pixels_high {
+        for col in 0..pixels_wide {
+            // Pixel → 3D position on viewing plane
+            let x_mm = min_x + (col as f64) * view_width / ((pixels_wide - 1) as f64);
+            let y_mm = max_y - (row as f64) * view_height / ((pixels_high - 1) as f64);
+            let pixel_3d = center_vec + x_mm * view_right + y_mm * view_up;
+
+            // Find nearest centerline point in 3D (brute force)
+            let mut best_j = 0usize;
+            let mut best_dist_sq = f64::MAX;
+            for j in 0..n {
+                let d = (pixel_3d - pos_vecs[j]).norm_squared();
+                if d < best_dist_sq {
+                    best_dist_sq = d;
+                    best_j = j;
+                }
+            }
+
+            // Compute lateral offset along the normal at this point
+            let offset = pixel_3d - pos_vecs[best_j];
+            let lateral = offset.dot(&normals[best_j]);
+
+            if lateral.abs() > width_mm {
+                continue;
+            }
+
+            // Map to straightened CPR coordinates
+            let src_col = (best_j as f64 / (n - 1) as f64) * (straight_w - 1) as f64;
+            let src_row = (0.5 - lateral / (2.0 * width_mm)) * (straight_h - 1) as f64;
+
+            if src_col < 0.0 || src_col > (straight_w - 1) as f64
+                || src_row < 0.0 || src_row > (straight_h - 1) as f64
+            {
+                continue;
+            }
+
+            // Bilinear lookup in straightened image
+            let c0 = src_col.floor() as usize;
+            let r0 = src_row.floor() as usize;
+            let c1 = (c0 + 1).min(straight_w - 1);
+            let r1 = (r0 + 1).min(straight_h - 1);
+            let wc = (src_col - c0 as f64) as f32;
+            let wr = (src_row - r0 as f64) as f32;
+
+            let v00 = straight_image[r0 * straight_w + c0];
+            let v01 = straight_image[r0 * straight_w + c1];
+            let v10 = straight_image[r1 * straight_w + c0];
+            let v11 = straight_image[r1 * straight_w + c1];
+
+            if v00.is_nan() || v01.is_nan() || v10.is_nan() || v11.is_nan() {
+                let vals = [v00, v01, v10, v11];
+                let valid: Vec<f32> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
+                if !valid.is_empty() {
+                    image[row * pixels_wide + col] = valid.iter().sum::<f32>() / valid.len() as f32;
+                }
+            } else {
+                let top = v00 * (1.0 - wc) + v01 * wc;
+                let bot = v10 * (1.0 - wc) + v11 * wc;
+                image[row * pixels_wide + col] = top * (1.0 - wr) + bot * wr;
+            }
         }
     }
 

@@ -2,7 +2,7 @@ use nalgebra::Vector3;
 use ndarray::Array3;
 
 use super::interp::trilinear;
-use super::spline::CubicSpline3D;
+use crate::pipeline::spline::CubicSpline3D;
 
 /// Result of a CPR computation.
 #[derive(serde::Serialize)]
@@ -249,22 +249,28 @@ impl CprFrame {
         pixels_high: usize,
         slab_mm: f64,
     ) -> CurvedCprResult {
-        let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
+        let (rot_normals, _rot_binormals) = self.rotated_frame(rotation_deg);
 
-        // Delegate to the pixel-driven renderer which eliminates fan artifacts
-        // that plague strip-painting at wide FOV.
-        super::curved_cpr::render_curved_cpr_pixeldriven(
+        // Strategy: render a clean straightened CPR first, then warp it
+        // to follow the projected curve using the 3D normals for strip
+        // direction. This avoids artifacts from projection fold-back.
+        let straight = self.render_cpr(
+            volume, spacing, origin,
+            rotation_deg, width_mm,
+            pixels_high,
+            slab_mm,
+        );
+
+        super::curved_cpr::render_curved_from_straightened(
+            &straight.image,
+            straight.pixels_wide,
+            straight.pixels_high,
             &self.positions,
             &rot_normals,
-            &rot_binormals,
-            &self.arclengths,
-            volume,
-            spacing,
-            origin,
             width_mm,
             pixels_wide,
             pixels_high,
-            slab_mm,
+            &self.arclengths,
         )
     }
 
@@ -862,5 +868,69 @@ mod tests {
                 i, ds, mean_spacing, rel_err * 100.0
             );
         }
+    }
+
+    #[test]
+    #[ignore] // cargo test --lib -- --ignored --nocapture test_rca_reference
+    fn test_rca_reference() {
+        use std::path::Path;
+
+        let dicom_dir = Path::new("/Users/shunie/Developer/PCAT/Rahaf_Patients/1200.2");
+        if !dicom_dir.exists() {
+            eprintln!("DICOM dir not found, skipping");
+            return;
+        }
+
+        // Saved RCA seeds [x,y,z] → [z,y,x]
+        let seeds_zyx: Vec<[f64; 3]> = vec![
+            [1844.686, -177.084, 44.949], [1844.686, -183.413, 43.262],
+            [1844.686, -188.476, 40.730], [1844.686, -191.852, 36.089],
+            [1843.425, -192.696, 31.248], [1842.424, -193.118, 23.574],
+            [1842.424, -192.696, 17.235], [1840.923, -194.942, 12.564],
+            [1836.752, -194.942, 9.895],  [1830.079, -195.609, 10.228],
+            [1824.741, -194.942, 12.230], [1819.403, -194.942, 14.232],
+            [1814.898, -192.940, 15.900], [1811.729, -192.021, 18.569],
+            [1807.725, -188.780, 20.238], [1805.390, -180.677, 24.241],
+            [1806.724, -168.362, 28.579], [1806.391, -157.342, 37.587],
+            [1806.724, -150.861, 45.928], [1808.057, -148.813, 48.747],
+            [1811.395, -145.027, 49.932], [1818.068, -139.517, 54.603],
+            [1821.404, -139.517, 58.940], [1822.406, -134.332, 65.947],
+        ];
+
+        let vol = crate::pipeline::dicom_loader::load_dicom_directory(dicom_dir).unwrap();
+        eprintln!("Volume: {:?}, spacing: {:?}", vol.data.shape(), vol.spacing);
+
+        let spline = crate::pipeline::spline::CubicSpline3D::fit(&seeds_zyx);
+        let n = 768;
+        let cl: Vec<[f64; 3]> = (0..n)
+            .map(|i| spline.eval(spline.total_arc() * i as f64 / (n - 1) as f64))
+            .collect();
+
+        let frame = CprFrame::from_centerline(&cl, n);
+        let out_dir = Path::new("/Users/shunie/Developer/PCAT/pcat-workstation-v2/test_output");
+        std::fs::create_dir_all(out_dir).unwrap();
+
+        for rot in [0.0, 90.0, 180.0, 270.0] {
+            let result = frame.render_curved_cpr(
+                &vol.data, vol.spacing, vol.origin, rot, 40.0, 768, 384, 1.0,
+            );
+            let valid: Vec<f32> = result.image.iter().copied().filter(|v| !v.is_nan()).collect();
+            let nan_pct = 100.0 * (result.image.len() - valid.len()) as f64 / result.image.len() as f64;
+            eprintln!("Rot {:.0}°: {:.1}% NaN, range [{:.0}, {:.0}]",
+                rot, nan_pct,
+                valid.iter().copied().fold(f32::INFINITY, f32::min),
+                valid.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            );
+            let bytes: &[u8] = bytemuck::cast_slice(&result.image);
+            std::fs::write(out_dir.join(format!("rca_curved_rot{:.0}.raw", rot)), bytes).unwrap();
+        }
+
+        // Also straightened
+        let straight = frame.render_cpr(&vol.data, vol.spacing, vol.origin, 0.0, 40.0, 384, 1.0);
+        let bytes: &[u8] = bytemuck::cast_slice(&straight.image);
+        std::fs::write(out_dir.join("rca_straightened.raw"), bytes).unwrap();
+        eprintln!("Straightened: {}x{}", straight.pixels_wide, straight.pixels_high);
+
+        eprintln!("Output saved to {:?}", out_dir);
     }
 }
