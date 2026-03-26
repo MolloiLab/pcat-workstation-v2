@@ -11,7 +11,7 @@
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
-  import { openDicomDialog, loadDicom } from '$lib/api';
+  import { openDicomDialog, loadDicom, getRecentDicoms } from '$lib/api';
   import { loadVolume } from '$lib/cornerstone/volumeLoader';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
@@ -20,6 +20,13 @@
   import { navigateToWorldPos } from '$lib/navigation';
 
   let errorMessage = $state('');
+  let recentPaths = $state<string[]>([]);
+  let showRecent = $state(false);
+
+  // Load recent paths on mount
+  $effect(() => {
+    getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
+  });
 
   // ---- Keyboard shortcuts ----
   function handleKeydown(event: KeyboardEvent) {
@@ -88,23 +95,17 @@
     }
   }
 
-  /** Open DICOM folder, load into Rust backend, then into cornerstone3D. */
-  async function handleOpenDicom() {
+  /** Load DICOM from a specific folder path. */
+  async function loadFromPath(path: string) {
     errorMessage = '';
+    showRecent = false;
 
     try {
-      // 1. Native folder picker
-      const path = await openDicomDialog();
-      if (!path) return; // user cancelled
-
-      // 2. Begin loading
       volumeStore.setLoading(true);
       volumeStore.setLoadProgress(0);
 
-      // 3. Rust loads DICOM directory -> returns snake_case metadata
       const info = await loadDicom(path);
 
-      // 4. Map Rust snake_case -> TS camelCase and store metadata
       const meta: VolumeMetadata = {
         volumeId: 'vol-1',
         shape: info.shape,
@@ -118,23 +119,28 @@
       };
       volumeStore.set(meta);
 
-      // 5. Fetch all slices into cornerstone3D volume (with progress)
       const csId = await loadVolume(meta, (p) => volumeStore.setLoadProgress(p));
-
-      // 6. Set cornerstone volume ID -> triggers MprPanel $effect
       volumeStore.setCornerstoneVolumeId(csId);
-
-      // 7. Done
       volumeStore.setLoading(false);
+
+      // Refresh recent list
+      getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
     } catch (e) {
       volumeStore.setLoading(false);
       errorMessage = e instanceof Error ? e.message : String(e);
       console.error('Failed to load DICOM:', e);
     }
   }
+
+  /** Open DICOM folder picker, then load. */
+  async function handleOpenDicom() {
+    const path = await openDicomDialog();
+    if (!path) return;
+    loadFromPath(path);
+  }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showRecent = false; }} />
 
 <div class="flex h-screen flex-col">
   <!-- ===== Header toolbar ===== -->
@@ -174,18 +180,46 @@
         </button>
       {/if}
 
-      <button
-        class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
-        onclick={handleOpenDicom}
-        disabled={volumeStore.loading}
-      >
-        Open DICOM
-      </button>
-      <button
-        class="rounded px-3 py-1 text-xs text-text-secondary hover:bg-surface-tertiary hover:text-text-primary"
-      >
-        Settings
-      </button>
+      <div class="relative flex items-center">
+        <button
+          class="rounded-l px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+          onclick={handleOpenDicom}
+          disabled={volumeStore.loading}
+        >
+          Open DICOM
+        </button>
+        {#if recentPaths.length > 0}
+          <button
+            class="rounded-r border-l border-border px-1.5 py-1 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
+            onclick={(e: MouseEvent) => { e.stopPropagation(); showRecent = !showRecent; }}
+            disabled={volumeStore.loading}
+            title="Recent files"
+          >
+            &#9662;
+          </button>
+        {/if}
+
+        <!-- Recent files dropdown -->
+        {#if showRecent && recentPaths.length > 0}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="absolute right-0 top-full z-50 mt-1 max-h-64 w-80 overflow-y-auto rounded border border-border bg-surface-secondary shadow-lg"
+          >
+            <div class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary/60">
+              Recent
+            </div>
+            {#each recentPaths as rp}
+              <button
+                class="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-accent/10 truncate"
+                onclick={() => loadFromPath(rp)}
+                title={rp}
+              >
+                {rp.split('/').slice(-2).join('/')}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
 

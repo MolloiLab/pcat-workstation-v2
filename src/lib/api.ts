@@ -25,6 +25,11 @@ export async function loadDicom(path: string): Promise<VolumeInfo> {
   return invoke<VolumeInfo>('load_dicom', { path });
 }
 
+/** Get list of recently opened DICOM folder paths. */
+export async function getRecentDicoms(): Promise<string[]> {
+  return invoke<string[]>('get_recent_dicoms');
+}
+
 /**
  * Get a single slice as raw i16 LE bytes from the Rust backend.
  * Tauri serializes Vec<u8> as a number[], so we convert back.

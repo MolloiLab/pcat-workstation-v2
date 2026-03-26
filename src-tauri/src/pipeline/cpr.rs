@@ -249,226 +249,23 @@ impl CprFrame {
         pixels_high: usize,
         slab_mm: f64,
     ) -> CurvedCprResult {
-        let n_cols = self.n_cols();
         let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
-        let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
-        // MIP slab sampling parameters
-        let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
-        let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
-            (0..n_slab_steps)
-                .map(|k| {
-                    -slab_mm / 2.0
-                        + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64)
-                })
-                .collect()
-        } else {
-            vec![0.0]
-        };
-
-        // --- Project centerline onto a 2D viewing plane ---
-        // The viewing plane is defined by the average binormal as the "into-screen"
-        // direction. We compute a right/up basis from that.
-        let avg_binormal = {
-            let mut sum = Vector3::new(0.0, 0.0, 0.0);
-            for b in &rot_binormals {
-                sum += b;
-            }
-            sum / n_cols as f64
-        };
-        let view_in = avg_binormal.normalize();
-
-        // view_right: perpendicular to view_in, preferring the horizontal plane
-        let world_up = Vector3::new(1.0, 0.0, 0.0); // z-axis is "up" in [z,y,x] coords
-        let view_right = {
-            let candidate = world_up.cross(&view_in);
-            if candidate.norm() > 1e-6 {
-                candidate.normalize()
-            } else {
-                // view_in is nearly parallel to world_up, use fallback
-                let fallback = Vector3::new(0.0, 1.0, 0.0);
-                fallback.cross(&view_in).normalize()
-            }
-        };
-        let view_up = view_in.cross(&view_right).normalize();
-
-        // Project each centerline position onto the 2D plane
-        let center_pos = Vector3::new(
-            self.positions[n_cols / 2][0],
-            self.positions[n_cols / 2][1],
-            self.positions[n_cols / 2][2],
-        );
-        let projected: Vec<(f64, f64)> = self.positions.iter().map(|p| {
-            let v = Vector3::new(p[0], p[1], p[2]) - center_pos;
-            (v.dot(&view_right), v.dot(&view_up))
-        }).collect();
-
-        // Find bounding box of projected centerline + lateral extent
-        let mut min_x = f64::MAX;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::MAX;
-        let mut max_y = f64::NEG_INFINITY;
-        for &(px, py) in &projected {
-            if px < min_x { min_x = px; }
-            if px > max_x { max_x = px; }
-            if py < min_y { min_y = py; }
-            if py > max_y { max_y = py; }
-        }
-        // Add lateral padding
-        min_x -= width_mm;
-        max_x += width_mm;
-        min_y -= width_mm;
-        max_y += width_mm;
-
-        let view_width = max_x - min_x;
-        let view_height = max_y - min_y;
-
-        // Scale factors: mm -> pixel
-        let sx = (pixels_wide as f64 - 1.0) / view_width;
-        let sy = (pixels_high as f64 - 1.0) / view_height;
-
-        // For each centerline position, paint perpendicular strip.
-        // Track which centerline index painted each pixel to prevent
-        // distant curve sections from overwriting each other (fan artifacts).
-        let mut image = vec![f32::NAN; pixels_wide * pixels_high];
-        let mut owner = vec![u32::MAX; pixels_wide * pixels_high];
-
-        // Dense lateral sampling: 2x the larger output dimension to ensure
-        // full sub-pixel coverage (no gaps between adjacent strips).
-        let n_lateral = 2 * pixels_wide.max(pixels_high);
-
-        // Taper zone: lateral width ramps from 0 to full over the
-        // first/last few centerline points to prevent endpoint fan spray.
-        let taper_count = (n_cols / 10).max(3).min(15);
-
-        for j in 0..n_cols {
-            let pos = Vector3::new(
-                self.positions[j][0],
-                self.positions[j][1],
-                self.positions[j][2],
-            );
-            let n_vec = rot_normals[j];
-            let b_vec = rot_binormals[j];
-            let j_u32 = j as u32;
-
-            // Taper lateral width at endpoints
-            let taper = if j < taper_count {
-                (j + 1) as f64 / taper_count as f64
-            } else if j >= n_cols - taper_count {
-                (n_cols - j) as f64 / taper_count as f64
-            } else {
-                1.0
-            };
-            let effective_width = width_mm * taper;
-
-            for li in 0..n_lateral {
-                // Lateral offset: from +effective_width to -effective_width
-                let lateral =
-                    effective_width * (1.0 - 2.0 * (li as f64) / ((n_lateral - 1) as f64));
-
-                // 3D sample position
-                let sample_base = pos + lateral * n_vec;
-
-                // MIP across slab
-                let mut max_val = f32::NEG_INFINITY;
-                for &slab_off in &slab_offsets {
-                    let sample_mm = sample_base + slab_off * b_vec;
-                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
-                    let val = trilinear(volume, vz, vy, vx);
-                    if !val.is_nan() && val > max_val {
-                        max_val = val;
-                    }
-                }
-                let val = if max_val == f32::NEG_INFINITY { f32::NAN } else { max_val };
-                if val.is_nan() {
-                    continue;
-                }
-
-                // Project this 3D position onto the 2D viewing plane
-                let offset_3d = sample_base - center_pos;
-                let proj_x = offset_3d.dot(&view_right);
-                let proj_y = offset_3d.dot(&view_up);
-
-                // Map to sub-pixel coordinates
-                let fc = (proj_x - min_x) * sx;
-                let fr = (max_y - proj_y) * sy;
-
-                // Bilinear splatting: distribute value to 4 surrounding pixels
-                let c0 = fc.floor() as isize;
-                let r0 = fr.floor() as isize;
-                let wc = fc - c0 as f64;
-                let wr = fr - r0 as f64;
-
-                for (dr, wy) in [(0isize, 1.0 - wr), (1, wr)] {
-                    for (dc, wx) in [(0isize, 1.0 - wc), (1, wc)] {
-                        let r = r0 + dr;
-                        let c = c0 + dc;
-                        if r >= 0 && r < pixels_high as isize
-                            && c >= 0 && c < pixels_wide as isize
-                        {
-                            let w = wx * wy;
-                            if w < 0.01 { continue; }
-                            let idx = r as usize * pixels_wide + c as usize;
-
-                            if image[idx].is_nan() {
-                                // First write — take it
-                                image[idx] = val;
-                                owner[idx] = j_u32;
-                            } else if j_u32.abs_diff(owner[idx]) <= 3 {
-                                // Same or adjacent strip — MIP across slab
-                                if val > image[idx] {
-                                    image[idx] = val;
-                                    owner[idx] = j_u32;
-                                }
-                            }
-                            // else: distant strip — skip (prevents fan artifacts)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Gap fill: replace remaining NaN pixels that have valid neighbors
-        // with the average of their non-NaN neighbors (single pass).
-        let mut filled = image.clone();
-        for row in 0..pixels_high {
-            for col in 0..pixels_wide {
-                let idx = row * pixels_wide + col;
-                if !filled[idx].is_nan() { continue; }
-
-                let mut sum = 0.0f32;
-                let mut count = 0u32;
-                for dr in [-1isize, 0, 1] {
-                    for dc in [-1isize, 0, 1] {
-                        if dr == 0 && dc == 0 { continue; }
-                        let nr = row as isize + dr;
-                        let nc = col as isize + dc;
-                        if nr >= 0 && nr < pixels_high as isize
-                            && nc >= 0 && nc < pixels_wide as isize
-                        {
-                            let nv = image[nr as usize * pixels_wide + nc as usize];
-                            if !nv.is_nan() {
-                                sum += nv;
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-                if count >= 2 {
-                    filled[idx] = sum / count as f32;
-                }
-            }
-        }
-        let image = filled;
-
-        CurvedCprResult {
-            image,
+        // Delegate to the pixel-driven renderer which eliminates fan artifacts
+        // that plague strip-painting at wide FOV.
+        super::curved_cpr::render_curved_cpr_pixeldriven(
+            &self.positions,
+            &rot_normals,
+            &rot_binormals,
+            &self.arclengths,
+            volume,
+            spacing,
+            origin,
+            width_mm,
             pixels_wide,
             pixels_high,
-            arclengths: self.arclengths.clone(),
-        }
+            slab_mm,
+        )
     }
 
     /// Batch render multiple cross-sections efficiently.

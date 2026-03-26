@@ -41,7 +41,7 @@
   let windowWidth = $state(400);
 
   // CPR mode: straightened (classic) vs curved (natural vessel path)
-  let cprMode: 'straightened' | 'curved' = $state('straightened');
+  let cprMode: 'straightened' | 'curved' = $state('curved');
 
   // Needle B position as fraction (0..1); A and C are offset
   let needleBFraction = $state(0.5);
@@ -208,8 +208,8 @@
       ctx.stroke();
     };
 
-    // Only draw needle lines in straightened mode
     if (cprMode === 'straightened') {
+      // Straightened mode: vertical needle lines
       // A (yellow, dashed)
       const xA = Math.round(needleAFraction * w);
       ctx.beginPath();
@@ -247,6 +247,45 @@
 
       ctx.fillStyle = '#ffee00';
       ctx.fillText('C', xC, 14);
+    } else if (projectionInfo) {
+      // Curved mode: draw needle markers at projected centerline positions
+      const nPos = projectionInfo.positions.length;
+      const drawCurvedNeedle = (frac: number, color: string, label: string, isDashed: boolean) => {
+        const idx = Math.round(frac * (nPos - 1));
+        const clampedIdx = Math.min(idx, nPos - 1);
+        const pos = projectionInfo!.positions[clampedIdx];
+        const projected = worldToCurvedCpr(pos, projectionInfo!, w, h);
+        if (!projected) return;
+        const [cx, cy] = projected;
+
+        // Crosshair at needle position
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isDashed ? 1 : 1.5;
+        ctx.setLineDash(isDashed ? [4, 3] : []);
+
+        // Horizontal line through needle point
+        ctx.beginPath();
+        ctx.moveTo(cx - 12, cy);
+        ctx.lineTo(cx + 12, cy);
+        ctx.stroke();
+
+        // Vertical line through needle point
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 12);
+        ctx.lineTo(cx, cy + 12);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label
+        ctx.font = 'bold 11px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = color;
+        ctx.fillText(label, cx, cy - 15);
+      };
+
+      drawCurvedNeedle(needleAFraction, '#ffee00', 'A', true);
+      drawCurvedNeedle(needleBFraction, '#00ffcc', 'B', false);
+      drawCurvedNeedle(needleCFraction, '#ffee00', 'C', true);
     }
 
     // --- Centerline: subtle horizontal dashed line at vertical midpoint ---
@@ -844,7 +883,7 @@
       {#if !centerline || centerline.length < 2}
         <div class="flex flex-1 items-center justify-center">
           <p class="text-xs text-text-secondary/60">
-            Place 2+ seeds to generate CPR
+            Place seeds along the vessel (start in aorta, trace into coronary)
           </p>
         </div>
       {:else}
@@ -976,7 +1015,7 @@
     <span class="text-[10px] text-text-secondary/40">|</span>
 
     <span class="text-[10px] text-text-secondary/40">
-      Scroll: move B &middot; Shift+click: set ostium &middot; Right-drag: W/L
+      Scroll: move needle &middot; Shift+click: mark ostium &middot; Drag seed: refine path &middot; Right-drag: W/L
     </span>
   </div>
 </div>
