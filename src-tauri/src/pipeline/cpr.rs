@@ -166,6 +166,37 @@ fn rotate_frame(
 }
 
 // ---------------------------------------------------------------------------
+// Fixed up-vector frame (stable alternative to Bishop for CPR)
+// ---------------------------------------------------------------------------
+
+/// Compute a frame using a fixed world up-vector projected onto the plane
+/// perpendicular to each tangent. This avoids the error accumulation of
+/// parallel-transport (Bishop frame) and produces more stable CPR images.
+/// The tradeoff is slight twist along straight sections, but this is how
+/// Horos computes CPR and it works well in practice.
+fn fixed_up_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
+    let up = Vector3::new(0.0, 0.0, 1.0); // world Z up
+    let alt_up = Vector3::new(0.0, 1.0, 0.0); // fallback if tangent ~ parallel to Z
+
+    tangents
+        .iter()
+        .map(|t| {
+            // Project up onto plane perpendicular to tangent
+            let projected = up - up.dot(t) * t;
+            let n = if projected.norm() > 0.1 {
+                projected.normalize()
+            } else {
+                // Tangent nearly parallel to Z, use world Y instead
+                let alt_proj = alt_up - alt_up.dot(t) * t;
+                alt_proj.normalize()
+            };
+            let b = t.cross(&n).normalize();
+            (n, b)
+        })
+        .unzip()
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -195,14 +226,14 @@ pub fn compute_cpr(
     // 1. Resample centerline to pixels_wide uniform arc-length positions
     let (positions, tangents, arclengths) = resample_centerline(centerline_mm, pixels_wide);
 
-    // 2. Bishop frame
-    let (mut normals, mut binormals) = bishop_frame(&tangents);
+    // 2. Fixed up-vector frame (stable, no error accumulation)
+    let (mut normals, mut binormals) = fixed_up_frame(&tangents);
 
     // 3. Rotation
     rotate_frame(&mut normals, &mut binormals, rotation_deg);
 
-    // 4. MIP slab sampling parameters
-    let n_slab_steps = if slab_mm > 0.01 { 5usize } else { 1 };
+    // 4. MIP slab sampling parameters — 9 steps for smoother edges
+    let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
     let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
         (0..n_slab_steps)
             .map(|k| -slab_mm / 2.0 + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64))
@@ -320,6 +351,67 @@ pub fn compute_cross_section(
         pixels,
         arc_mm,
     }
+}
+
+/// Compute multiple cross-sections in a single call, sharing the centerline
+/// resampling and Bishop frame computation. Much faster than calling
+/// `compute_cross_section` separately for each position.
+pub fn compute_cross_sections_batch(
+    volume: &Array3<f32>,
+    centerline_mm: &[[f64; 3]],
+    spacing: [f64; 3],
+    origin: [f64; 3],
+    position_fracs: &[f64],
+    rotation_deg: f64,
+    width_mm: f64,
+    pixels: usize,
+) -> Vec<CrossSectionResult> {
+    // Resample + Bishop frame ONCE
+    let n_samples = centerline_mm.len().max(2);
+    let (positions, tangents, arclengths) = resample_centerline(centerline_mm, n_samples);
+    let (mut normals, mut binormals) = bishop_frame(&tangents);
+    rotate_frame(&mut normals, &mut binormals, rotation_deg);
+
+    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+    // Compute each cross-section using the shared precomputed frame
+    position_fracs
+        .iter()
+        .map(|&frac| {
+            let idx =
+                ((frac * (n_samples - 1) as f64).round() as usize).min(n_samples - 1);
+
+            let pos = positions[idx];
+            let n_vec = normals[idx];
+            let b_vec = binormals[idx];
+            let arc_mm = arclengths[idx];
+
+            let mut image = vec![f32::NAN; pixels * pixels];
+
+            for row in 0..pixels {
+                for col in 0..pixels {
+                    let offset_n =
+                        width_mm * (1.0 - 2.0 * (row as f64) / ((pixels - 1) as f64));
+                    let offset_b =
+                        width_mm * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
+
+                    let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
+
+                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+
+                    image[row * pixels + col] = trilinear(volume, vz, vy, vx);
+                }
+            }
+
+            CrossSectionResult {
+                image,
+                pixels,
+                arc_mm,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

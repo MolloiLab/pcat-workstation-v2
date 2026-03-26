@@ -2,8 +2,8 @@
   /**
    * Single cross-section canvas for a CPR needle position.
    *
-   * Calls Rust `compute_cross_section_image` when props change,
-   * decodes the base64 f32 result, and renders with W/L windowing.
+   * If `imageBase64` is provided (from parent batch computation), renders it
+   * directly. Otherwise falls back to invoking Rust individually.
    */
   import { invoke } from '@tauri-apps/api/core';
 
@@ -15,6 +15,10 @@
     color: string;
     windowCenter?: number;
     windowWidth?: number;
+    /** Pre-computed base64 f32 image data from batch call. */
+    imageBase64?: string | null;
+    /** Pre-computed arc-length in mm from batch call. */
+    arcMmProp?: number | null;
   };
 
   let {
@@ -25,6 +29,8 @@
     color,
     windowCenter = 40,
     windowWidth = 400,
+    imageBase64 = null,
+    arcMmProp = null,
   }: Props = $props();
 
   let canvas: HTMLCanvasElement | undefined = $state();
@@ -70,11 +76,29 @@
     ctx.putImageData(imgData, 0, 0);
   }
 
-  /** Debounce timer for cross-section computation. */
+  // --- Render pre-computed batch data when provided ---
+  $effect(() => {
+    const b64 = imageBase64;
+    const am = arcMmProp;
+    const wc = windowCenter;
+    const ww = windowWidth;
+
+    if (b64 && canvas) {
+      const data = decodeBase64Float32(b64);
+      const sz = Math.round(Math.sqrt(data.length));
+      pixels = sz;
+      arcMm = am;
+      renderToCanvas(canvas, data, sz, sz, wc, ww);
+    }
+  });
+
+  // --- Fallback: invoke individually if no batch data ---
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
   $effect(() => {
-    // Track all reactive deps
+    // Only self-invoke if no batch data provided
+    if (imageBase64) return;
+
     const cl = centerlineMm;
     const pf = positionFraction;
     const rd = rotationDeg;
@@ -85,8 +109,6 @@
     debounceTimer = setTimeout(async () => {
       loading = true;
       try {
-        // The spline centerline is in cornerstone3D world coords [x, y, z]
-        // Rust expects [z, y, x]
         const centerlineZyx = cl.map(([x, y, z]) => [z, y, x] as [number, number, number]);
 
         const result = await invoke<CrossSectionResult>(

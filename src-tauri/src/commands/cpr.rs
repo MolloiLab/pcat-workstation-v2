@@ -150,3 +150,74 @@ pub async fn compute_cross_section_image(
         arc_mm: result.arc_mm,
     })
 }
+
+/// Batch-compute multiple cross-sections in a single IPC call, sharing the
+/// centerline resampling and Bishop frame computation.
+///
+/// - `centerline_mm`: Dense centerline points in [z, y, x] mm.
+/// - `position_fractions`: Array of fractional positions along the centerline [0.0, 1.0].
+/// - `rotation_deg`: Rotational CPR angle in degrees.
+/// - `width_mm`: Half-width of each cross-section in mm.
+/// - `pixels`: Output square image size.
+#[tauri::command]
+pub async fn compute_cross_sections_batch(
+    centerline_mm: Vec<[f64; 3]>,
+    position_fractions: Vec<f64>,
+    rotation_deg: f64,
+    width_mm: f64,
+    pixels: usize,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Vec<CrossSectionCommandResult>, String> {
+    if centerline_mm.len() < 2 {
+        return Err("centerline must have at least 2 points".into());
+    }
+    if pixels < 2 {
+        return Err("output size must be at least 2".into());
+    }
+    for &frac in &position_fractions {
+        if !(0.0..=1.0).contains(&frac) {
+            return Err(format!(
+                "position_fraction must be in [0, 1], got {frac}"
+            ));
+        }
+    }
+
+    // Extract from state
+    let (volume_data, spacing, origin) = {
+        let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+        let vol = guard
+            .volume
+            .as_ref()
+            .ok_or_else(|| "no volume loaded".to_string())?;
+        (vol.data.clone(), vol.spacing, vol.origin)
+    };
+
+    let results = tokio::task::spawn_blocking(move || {
+        cpr::compute_cross_sections_batch(
+            &volume_data,
+            &centerline_mm,
+            spacing,
+            origin,
+            &position_fractions,
+            rotation_deg,
+            width_mm,
+            pixels,
+        )
+    })
+    .await
+    .map_err(|e| format!("batch cross-section task failed: {e}"))?;
+
+    // Encode each result
+    Ok(results
+        .into_iter()
+        .map(|r| {
+            let bytes: &[u8] = bytemuck::cast_slice(&r.image);
+            let image_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            CrossSectionCommandResult {
+                image_base64,
+                pixels: r.pixels,
+                arc_mm: r.arc_mm,
+            }
+        })
+        .collect())
+}

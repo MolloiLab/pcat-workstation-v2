@@ -14,7 +14,7 @@
    *            70%                  30%
    */
   import { invoke } from '@tauri-apps/api/core';
-  import { seedStore } from '$lib/stores/seedStore.svelte';
+  import { seedStore, VESSEL_COLORS } from '$lib/stores/seedStore.svelte';
   import CrossSection from './CrossSection.svelte';
 
   // ---- Types ----
@@ -44,8 +44,28 @@
   let cprImageData = $state<Float32Array | null>(null);
   let loading = $state(false);
 
+  // Track rotation interaction for lower-res preview during drag
+  let rotationActive = $state(false);
+  let rotationTimer: ReturnType<typeof setTimeout>;
+
+  function onRotationInput() {
+    rotationActive = true;
+    clearTimeout(rotationTimer);
+    rotationTimer = setTimeout(() => { rotationActive = false; }, 500);
+  }
+
   // Current centerline from seed store
   let centerline = $derived(seedStore.activeVesselData?.centerline ?? null);
+
+  // Batch cross-section results (one per needle: A, B, C)
+  type BatchCrossSectionItem = {
+    image_base64: string;
+    pixels: number;
+    arc_mm: number;
+  };
+  let batchXsA = $state<BatchCrossSectionItem | null>(null);
+  let batchXsB = $state<BatchCrossSectionItem | null>(null);
+  let batchXsC = $state<BatchCrossSectionItem | null>(null);
 
   // ---- Helpers ----
 
@@ -152,24 +172,28 @@
     ctx.fillStyle = '#ffee00';
     ctx.fillText('C', xC, 14);
 
-    // --- Centerline: horizontal dashed line at vertical midpoint ---
+    // --- Centerline: horizontal dashed line at vertical midpoint (vessel color) ---
     const midY = Math.round(h / 2);
+    const vesselColor = VESSEL_COLORS[seedStore.activeVessel] ?? '#ffffff';
     ctx.beginPath();
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = vesselColor;
+    ctx.globalAlpha = 0.4;
     ctx.lineWidth = 1;
     ctx.setLineDash([6, 4]);
     ctx.moveTo(0, midY);
     ctx.lineTo(w, midY);
     ctx.stroke();
     ctx.setLineDash([]);
+    ctx.globalAlpha = 1.0;
 
-    // --- Seed dots along the centerline ---
+    // --- Seed markers along the centerline ---
     const activeData = seedStore.activeVesselData;
     if (activeData && activeData.centerline && activeData.centerline.length >= 2 && arclengths.length > 0) {
       const cl = activeData.centerline;
 
       for (let si = 0; si < activeData.seeds.length; si++) {
-        const seedPos = activeData.seeds[si].position;
+        const seed = activeData.seeds[si];
+        const seedPos = seed.position;
         // Find closest centerline point to this seed
         let minDist = Infinity;
         let closestIdx = 0;
@@ -187,19 +211,32 @@
         const frac = closestIdx / (cl.length - 1);
         const sx = Math.round(frac * w);
 
-        // Draw seed dot on the centerline midline
-        ctx.beginPath();
         const isSelected = si === seedStore.selectedSeedIndex;
-        ctx.fillStyle = isSelected ? '#ffffff' : 'rgba(255,255,255,0.6)';
-        ctx.arc(sx, midY, isSelected ? 4 : 3, 0, 2 * Math.PI);
-        ctx.fill();
+        const isOstium = seed.type === 'ostium';
+        const r = isSelected ? 4.5 : 3.5;
 
-        // Outline
-        ctx.beginPath();
-        ctx.strokeStyle = isSelected ? '#00ffcc' : 'rgba(255,255,255,0.3)';
-        ctx.lineWidth = isSelected ? 1.5 : 1;
-        ctx.arc(sx, midY, isSelected ? 4 : 3, 0, 2 * Math.PI);
-        ctx.stroke();
+        // Draw seed marker: square for ostium (index 0), circle for waypoints
+        if (isOstium) {
+          // Ostium = filled square
+          ctx.fillStyle = isSelected ? '#ffffff' : vesselColor;
+          ctx.fillRect(sx - r, midY - r, r * 2, r * 2);
+          // Outline
+          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.5)';
+          ctx.lineWidth = isSelected ? 2 : 1;
+          ctx.strokeRect(sx - r, midY - r, r * 2, r * 2);
+        } else {
+          // Waypoint = filled circle
+          ctx.beginPath();
+          ctx.fillStyle = isSelected ? '#ffffff' : vesselColor;
+          ctx.arc(sx, midY, r, 0, 2 * Math.PI);
+          ctx.fill();
+          // Outline
+          ctx.beginPath();
+          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.5)';
+          ctx.lineWidth = isSelected ? 2 : 1;
+          ctx.arc(sx, midY, r, 0, 2 * Math.PI);
+          ctx.stroke();
+        }
       }
     }
 
@@ -246,9 +283,10 @@
   let computingCpr = false;
 
   $effect(() => {
-    // Track reactive deps: centerline, rotation
+    // Track reactive deps: centerline, rotation, rotationActive
     const cl = centerline;
     const rot = rotationDeg;
+    const isRotating = rotationActive;
 
     if (!cl || cl.length < 2) {
       cprImageData = null;
@@ -269,13 +307,17 @@
           ([x, y, z]) => [z, y, x] as [number, number, number],
         );
 
+        // Use lower resolution during rotation interaction for faster feedback
+        const pw = isRotating ? 256 : 512;
+        const ph = isRotating ? 128 : 256;
+
         const result = await invoke<CprCommandResult>('compute_cpr_image', {
           centerlineMm: centerlineZyx,
           rotationDeg: rot,
           widthMm: 25.0,
           slabMm: 3.0,
-          pixelsWide: 512,
-          pixelsHigh: 256,
+          pixelsWide: pw,
+          pixelsHigh: ph,
         });
 
         cprWidth = result.shape[1];
@@ -308,6 +350,61 @@
     void seedStore.selectedSeedIndex;
 
     repaintCanvas();
+  });
+
+  // ---- Batch cross-section computation (single IPC call for all 3) ----
+
+  let xsDebounce: ReturnType<typeof setTimeout> | undefined;
+  let computingXs = false;
+
+  $effect(() => {
+    // Track deps: centerline, needle fractions, rotation
+    const cl = centerline;
+    const fracA = needleAFraction;
+    const fracB = needleBFraction;
+    const fracC = needleCFraction;
+    const rot = rotationDeg;
+
+    if (!cl || cl.length < 2) {
+      batchXsA = null;
+      batchXsB = null;
+      batchXsC = null;
+      return;
+    }
+
+    clearTimeout(xsDebounce);
+    xsDebounce = setTimeout(async () => {
+      if (computingXs) return;
+      computingXs = true;
+      try {
+        const centerlineZyx = cl.map(
+          ([x, y, z]) => [z, y, x] as [number, number, number],
+        );
+
+        const results = await invoke<BatchCrossSectionItem[]>(
+          'compute_cross_sections_batch',
+          {
+            centerlineMm: centerlineZyx,
+            positionFractions: [fracA, fracB, fracC],
+            rotationDeg: rot,
+            widthMm: 15.0,
+            pixels: 128,
+          },
+        );
+
+        if (results.length === 3) {
+          batchXsA = results[0];
+          batchXsB = results[1];
+          batchXsC = results[2];
+        }
+      } catch (e) {
+        console.error('CprView: batch cross-section failed', e);
+      } finally {
+        computingXs = false;
+      }
+    }, 150);
+
+    return () => clearTimeout(xsDebounce);
   });
 
   // ---- Seed selection → needle B navigation ----
@@ -372,10 +469,12 @@
     dragging = false;
   }
 
-  /** Scroll wheel moves needle B position by 2% per step. */
+  /** Scroll wheel moves needle B position — scales with deltaY magnitude
+   *  so both mouse wheels (large deltaY) and touchpads (small deltaY) work. */
   function onCanvasWheel(event: WheelEvent) {
     event.preventDefault();
-    const delta = event.deltaY > 0 ? 0.005 : -0.005;
+    const sensitivity = 0.0003;
+    const delta = -event.deltaY * sensitivity;
     needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
   }
 
@@ -495,6 +594,8 @@
             color="#ffee00"
             {windowCenter}
             {windowWidth}
+            imageBase64={batchXsA?.image_base64 ?? null}
+            arcMmProp={batchXsA?.arc_mm ?? null}
           />
         </div>
         <div class="flex min-h-0 flex-1 flex-col bg-black">
@@ -506,6 +607,8 @@
             color="#00ffcc"
             {windowCenter}
             {windowWidth}
+            imageBase64={batchXsB?.image_base64 ?? null}
+            arcMmProp={batchXsB?.arc_mm ?? null}
           />
         </div>
         <div class="flex min-h-0 flex-1 flex-col bg-black">
@@ -517,6 +620,8 @@
             color="#ffee00"
             {windowCenter}
             {windowWidth}
+            imageBase64={batchXsC?.image_base64 ?? null}
+            arcMmProp={batchXsC?.arc_mm ?? null}
           />
         </div>
       {:else}
@@ -539,6 +644,7 @@
         max="360"
         step="1"
         bind:value={rotationDeg}
+        oninput={onRotationInput}
         class="h-1 w-24 cursor-pointer accent-accent"
       />
       <span class="w-7 text-right tabular-nums">{rotationDeg}&deg;</span>

@@ -21,6 +21,7 @@ pub fn run() {
             commands::volume::get_slice,
             commands::cpr::compute_cpr_image,
             commands::cpr::compute_cross_section_image,
+            commands::cpr::compute_cross_sections_batch,
             commands::pipeline::run_pipeline,
         ])
         .run(tauri::generate_context!())
