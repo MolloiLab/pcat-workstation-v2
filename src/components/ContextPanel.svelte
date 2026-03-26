@@ -14,9 +14,10 @@
 
   type Props = {
     phase: 'empty' | 'dicom' | 'seeds' | 'analysis';
+    onNeedleMove?: (pos: [number, number, number]) => void;
   };
 
-  let { phase }: Props = $props();
+  let { phase, onNeedleMove }: Props = $props();
 
   let meta = $derived(volumeStore.current);
 </script>
@@ -97,7 +98,7 @@
       </div>
     </div>
   {:else if phase === 'seeds'}
-    <CprView />
+    <CprView {onNeedleMove} />
   {:else if phase === 'analysis'}
     <AnalysisDashboard />
   {:else}

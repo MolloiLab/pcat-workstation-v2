@@ -17,6 +17,8 @@
   import { seedStore, VESSEL_COLORS } from '$lib/stores/seedStore.svelte';
   import CrossSection from './CrossSection.svelte';
 
+  let { onNeedleMove }: { onNeedleMove?: (pos: [number, number, number]) => void } = $props();
+
   // ---- Types ----
   type CprCommandResult = {
     image_base64: string;
@@ -172,73 +174,16 @@
     ctx.fillStyle = '#ffee00';
     ctx.fillText('C', xC, 14);
 
-    // --- Centerline: horizontal dashed line at vertical midpoint (vessel color) ---
+    // --- Centerline: subtle horizontal dashed line at vertical midpoint ---
     const midY = Math.round(h / 2);
-    const vesselColor = VESSEL_COLORS[seedStore.activeVessel] ?? '#ffffff';
     ctx.beginPath();
-    ctx.strokeStyle = vesselColor;
-    ctx.globalAlpha = 0.4;
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 0.5;
     ctx.setLineDash([6, 4]);
     ctx.moveTo(0, midY);
     ctx.lineTo(w, midY);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.globalAlpha = 1.0;
-
-    // --- Seed markers along the centerline ---
-    const activeData = seedStore.activeVesselData;
-    if (activeData && activeData.centerline && activeData.centerline.length >= 2 && arclengths.length > 0) {
-      const cl = activeData.centerline;
-
-      for (let si = 0; si < activeData.seeds.length; si++) {
-        const seed = activeData.seeds[si];
-        const seedPos = seed.position;
-        // Find closest centerline point to this seed
-        let minDist = Infinity;
-        let closestIdx = 0;
-        for (let ci = 0; ci < cl.length; ci++) {
-          const dx = cl[ci][0] - seedPos[0];
-          const dy = cl[ci][1] - seedPos[1];
-          const dz = cl[ci][2] - seedPos[2];
-          const d = dx * dx + dy * dy + dz * dz;
-          if (d < minDist) {
-            minDist = d;
-            closestIdx = ci;
-          }
-        }
-        // Convert centerline index to arc-length fraction, then to pixel x
-        const frac = closestIdx / (cl.length - 1);
-        const sx = Math.round(frac * w);
-
-        const isSelected = si === seedStore.selectedSeedIndex;
-        const isOstium = seed.type === 'ostium';
-        const r = isSelected ? 4.5 : 3.5;
-
-        // Draw seed marker: square for ostium (index 0), circle for waypoints
-        if (isOstium) {
-          // Ostium = filled square
-          ctx.fillStyle = isSelected ? '#ffffff' : vesselColor;
-          ctx.fillRect(sx - r, midY - r, r * 2, r * 2);
-          // Outline
-          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.5)';
-          ctx.lineWidth = isSelected ? 2 : 1;
-          ctx.strokeRect(sx - r, midY - r, r * 2, r * 2);
-        } else {
-          // Waypoint = filled circle
-          ctx.beginPath();
-          ctx.fillStyle = isSelected ? '#ffffff' : vesselColor;
-          ctx.arc(sx, midY, r, 0, 2 * Math.PI);
-          ctx.fill();
-          // Outline
-          ctx.beginPath();
-          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.5)';
-          ctx.lineWidth = isSelected ? 2 : 1;
-          ctx.arc(sx, midY, r, 0, 2 * Math.PI);
-          ctx.stroke();
-        }
-      }
-    }
 
     // Arclength ticks every 10mm along the bottom
     if (arclengths.length > 0) {
@@ -293,11 +238,14 @@
       return;
     }
 
+    loading = true;
     clearTimeout(cprDebounce);
     cprDebounce = setTimeout(async () => {
-      if (computingCpr) return;
+      if (computingCpr) {
+        loading = false;
+        return;
+      }
       computingCpr = true;
-      loading = true;
       try {
         // The spline centerline is in cornerstone3D world coords [x, y, z]
         // Rust expects [z, y, x]
@@ -434,6 +382,18 @@
     }
 
     needleBFraction = closestIdx / (cl.length - 1);
+  });
+
+  // ---- Needle B → MPR navigation ----
+  // Whenever needleBFraction changes, compute the world position on the
+  // centerline and notify the parent so MPR views can navigate there.
+  $effect(() => {
+    const frac = needleBFraction;
+    const cl = seedStore.activeVesselData?.centerline;
+    if (!cl || cl.length < 2 || !onNeedleMove) return;
+    const idx = Math.round(frac * (cl.length - 1));
+    const pos = cl[Math.min(idx, cl.length - 1)];
+    onNeedleMove(pos);
   });
 
   // ---- Needle dragging ----

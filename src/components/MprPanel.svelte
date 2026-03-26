@@ -191,5 +191,5 @@
   />
 
   <!-- [1,1] Context panel -->
-  <ContextPanel {phase} />
+  <ContextPanel {phase} onNeedleMove={navigateToWorldPos} />
 </div>

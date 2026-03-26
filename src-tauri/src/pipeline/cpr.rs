@@ -175,21 +175,23 @@ fn rotate_frame(
 /// The tradeoff is slight twist along straight sections, but this is how
 /// Horos computes CPR and it works well in practice.
 fn fixed_up_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
-    let up = Vector3::new(0.0, 0.0, 1.0); // world Z up
-    let alt_up = Vector3::new(0.0, 1.0, 0.0); // fallback if tangent ~ parallel to Z
+    // Choose a single up vector for the entire vessel based on average tangent.
+    // This avoids per-point switching that causes discontinuities (vertical striping).
+    let avg_tangent = tangents.iter()
+        .fold(Vector3::zeros(), |a, t| a + t)
+        .normalize();
+
+    let up = if avg_tangent.dot(&Vector3::new(0.0, 0.0, 1.0)).abs() < 0.85 {
+        Vector3::new(0.0, 0.0, 1.0) // world Z
+    } else {
+        Vector3::new(0.0, 1.0, 0.0) // world Y (when vessel runs mostly vertical)
+    };
 
     tangents
         .iter()
         .map(|t| {
-            // Project up onto plane perpendicular to tangent
             let projected = up - up.dot(t) * t;
-            let n = if projected.norm() > 0.1 {
-                projected.normalize()
-            } else {
-                // Tangent nearly parallel to Z, use world Y instead
-                let alt_proj = alt_up - alt_up.dot(t) * t;
-                alt_proj.normalize()
-            };
+            let n = projected.normalize();
             let b = t.cross(&n).normalize();
             (n, b)
         })
