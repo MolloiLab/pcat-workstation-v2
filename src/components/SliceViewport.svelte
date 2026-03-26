@@ -346,6 +346,27 @@
   }
 
   /**
+   * Pinch-to-zoom: trackpad pinch generates wheel events with ctrlKey=true.
+   * Zoom toward the cursor position.
+   */
+  function handleWheel(event: WheelEvent) {
+    if (!event.ctrlKey || !containerEl) return;
+    event.preventDefault();
+
+    let engine;
+    try { engine = getRenderingEngine(); } catch { return; }
+    const vp = engine.getViewport(viewportId) as any;
+    if (!vp) return;
+
+    const zoomFactor = 1 - event.deltaY * 0.01;
+    const camera = vp.getCamera();
+    if (camera?.parallelScale != null) {
+      vp.setCamera({ parallelScale: camera.parallelScale / zoomFactor });
+      vp.render();
+    }
+  }
+
+  /**
    * Clear hover state when mouse leaves the viewport.
    */
   function handleMouseLeave() {
@@ -374,6 +395,7 @@
     onmousedown={handleMouseDown}
     onmousemove={handleMouseMove}
     onmouseleave={handleMouseLeave}
+    onwheel={handleWheel}
     oncontextmenu={(e) => e.preventDefault()}
   ></div>
 

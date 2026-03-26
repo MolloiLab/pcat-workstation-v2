@@ -45,7 +45,7 @@
 
   // Needle B position as fraction (0..1); A and C are offset
   let needleBFraction = $state(0.5);
-  const needleOffset = 0.05; // 5% of total arc
+  let needleOffset = $state(0.05); // adjustable A-C spread (fraction of total arc)
 
   let needleAFraction = $derived(Math.max(0, needleBFraction - needleOffset));
   let needleCFraction = $derived(Math.min(1, needleBFraction + needleOffset));
@@ -66,6 +66,11 @@
   // Seed dragging state on CPR canvas
   let draggingSeedIndex = $state<number | null>(null);
   let hoverSeedIndex = $state<number | null>(null);
+
+  // Zoom state for CPR canvas
+  let cprZoom = $state(1);
+  let cprPanX = $state(0);
+  let cprPanY = $state(0);
 
   // Current centerline from seed store
   let centerline = $derived(seedStore.activeVesselData?.centerline ?? null);
@@ -844,14 +849,34 @@
     dragging = false;
   }
 
-  /** Scroll wheel moves needle B position -- scales with deltaY magnitude
-   *  so both mouse wheels (large deltaY) and touchpads (small deltaY) work. */
+  /** Scroll/pinch on CPR canvas.
+   *  Pinch (ctrlKey): zoom toward cursor.
+   *  Scroll: move needle B position. */
   function onCanvasWheel(event: WheelEvent) {
     event.preventDefault();
-    const sensitivity = 0.0003;
-    const delta = -event.deltaY * sensitivity;
-    needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
-    navigateToNeedlePos();
+
+    if (event.ctrlKey) {
+      // Pinch-to-zoom toward cursor
+      const zoomFactor = 1 - event.deltaY * 0.01;
+      const newZoom = Math.max(1, Math.min(8, cprZoom * zoomFactor));
+      if (cprCanvas) {
+        const rect = cprCanvas.getBoundingClientRect();
+        const cursorX = event.clientX - rect.left;
+        const cursorY = event.clientY - rect.top;
+        // Zoom toward cursor: adjust pan so cursor stays at same position
+        const cx = cursorX / rect.width;
+        const cy = cursorY / rect.height;
+        cprPanX = cx - (cx - cprPanX) * (newZoom / cprZoom);
+        cprPanY = cy - (cy - cprPanY) * (newZoom / cprZoom);
+      }
+      cprZoom = newZoom;
+    } else {
+      // Scroll: move needle B
+      const sensitivity = 0.0003;
+      const delta = -event.deltaY * sensitivity;
+      needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
+      navigateToNeedlePos();
+    }
   }
 
   // ---- W/L adjustment via right-drag on CPR canvas ----
@@ -950,7 +975,7 @@
           bind:this={cprCanvas}
           class="min-h-0 flex-1"
           style:cursor={draggingSeedIndex !== null ? 'grabbing' : hoverSeedIndex !== null ? 'grab' : 'crosshair'}
-          style="image-rendering: pixelated; width: 100%; height: 100%;"
+          style="image-rendering: pixelated; width: 100%; height: 100%; transform: scale({cprZoom}) translate({cprPanX * 100}%, {cprPanY * 100}%); transform-origin: 0 0;"
           onmousedown={handleMouseDown}
           oncontextmenu={onCanvasContextMenu}
           onwheel={onCanvasWheel}
@@ -1060,6 +1085,19 @@
         ({(needleBFraction * arclengths[arclengths.length - 1]).toFixed(1)} mm)
       {/if}
     </span>
+
+    <label class="flex items-center gap-1 text-[10px] text-text-secondary">
+      <span>A-C</span>
+      <input
+        type="range"
+        min="0.01"
+        max="0.20"
+        step="0.01"
+        bind:value={needleOffset}
+        class="h-1 w-16 cursor-pointer accent-accent"
+      />
+      <span class="w-6 text-right tabular-nums">{(needleOffset * 100).toFixed(0)}%</span>
+    </label>
 
     {#if activeOstiumFrac !== null}
       <span class="text-[10px] tabular-nums" style="color: #ff00ff;">

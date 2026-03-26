@@ -41,6 +41,7 @@
   let arcMm = $state<number | null>(null);
   let loading = $state(false);
   let pixels = $state(128);
+  let vesselDiameterMm = $state<number | null>(null);
 
   type CrossSectionResult = {
     image_base64: string;
@@ -80,6 +81,39 @@
     ctx.putImageData(imgData, 0, 0);
   }
 
+  /**
+   * Measure vessel diameter from cross-section image.
+   * Finds the bright lumen (HU > 150) region passing through the center
+   * and returns the diameter in mm.
+   * widthMm is the physical half-width of the cross-section (15mm).
+   */
+  function measureVesselDiameter(data: Float32Array, sz: number): number | null {
+    const widthMm = 15.0; // matches the render_cross_sections widthMm
+    const lumenThreshold = 150; // HU threshold for contrast-enhanced lumen
+    const center = Math.floor(sz / 2);
+
+    // Measure horizontal diameter through center
+    let left = center;
+    let right = center;
+    while (left > 0 && data[center * sz + left] > lumenThreshold) left--;
+    while (right < sz - 1 && data[center * sz + right] > lumenThreshold) right++;
+    const hDiamPx = right - left;
+
+    // Measure vertical diameter through center
+    let top = center;
+    let bottom = center;
+    while (top > 0 && data[top * sz + center] > lumenThreshold) top--;
+    while (bottom < sz - 1 && data[bottom * sz + center] > lumenThreshold) bottom++;
+    const vDiamPx = bottom - top;
+
+    // Average of horizontal and vertical, convert to mm
+    const avgDiamPx = (hDiamPx + vDiamPx) / 2;
+    if (avgDiamPx < 2) return null; // no vessel detected
+
+    const mmPerPixel = (2 * widthMm) / sz;
+    return avgDiamPx * mmPerPixel;
+  }
+
   // --- Render pre-computed batch data when provided ---
   $effect(() => {
     const imgData = batchImageData;
@@ -92,6 +126,7 @@
       pixels = sz;
       arcMm = am;
       renderToCanvas(canvas, imgData, sz, sz, wc, ww);
+      vesselDiameterMm = measureVesselDiameter(imgData, sz);
     }
   });
 
@@ -157,6 +192,11 @@
     {#if arcMm !== null}
       <span class="text-[10px] tabular-nums text-text-secondary">
         {arcMm.toFixed(1)} mm
+      </span>
+    {/if}
+    {#if vesselDiameterMm !== null}
+      <span class="text-[10px] tabular-nums text-accent">
+        &empty;{vesselDiameterMm.toFixed(1)}
       </span>
     {/if}
   </div>
