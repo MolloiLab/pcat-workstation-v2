@@ -47,9 +47,6 @@
   let cprImageData = $state<Float32Array | null>(null);
   let loading = $state(false);
 
-  // Projected centerline pixel coordinates for curved mode (from Rust)
-  let projectedPixels = $state<Array<{ col: number; row: number }>>([]);
-
   // Phase 1: frame readiness
   let frameReady = $state(false);
 
@@ -109,49 +106,6 @@
     const imgOffset = arcOffset + nArc * 8;
     const image = new Float32Array(buffer, imgOffset, width * height);
     return { width, height, arclengths, image };
-  }
-
-  /**
-   * Decode the raw binary curved CPR response (extended format):
-   *   [width: u32 LE][height: u32 LE][n_arclengths: u32 LE]
-   *   [arclengths: n * f64 LE]
-   *   [image: width*height * f32 LE]
-   *   [n_projected: u32 LE]
-   *   [projected_pixels: n_projected * 2 * f64 LE]  // (col, row) pairs
-   */
-  function decodeCurvedCprBinary(buffer: ArrayBuffer): {
-    width: number;
-    height: number;
-    arclengths: number[];
-    image: Float32Array;
-    projectedPixels: Array<{ col: number; row: number }>;
-  } {
-    const view = new DataView(buffer);
-    const width = view.getUint32(0, true);
-    const height = view.getUint32(4, true);
-    const nArc = view.getUint32(8, true);
-
-    const arcOffset = 12;
-    const arclengths: number[] = [];
-    for (let i = 0; i < nArc; i++) {
-      arclengths.push(view.getFloat64(arcOffset + i * 8, true));
-    }
-
-    const imgOffset = arcOffset + nArc * 8;
-    const image = new Float32Array(buffer, imgOffset, width * height);
-
-    // Decode projected pixel coordinates
-    const projOffset = imgOffset + width * height * 4;
-    const nProjected = view.getUint32(projOffset, true);
-    const projDataOffset = projOffset + 4;
-    const projectedPixels: Array<{ col: number; row: number }> = [];
-    for (let i = 0; i < nProjected; i++) {
-      const col = view.getFloat64(projDataOffset + i * 16, true);
-      const row = view.getFloat64(projDataOffset + i * 16 + 8, true);
-      projectedPixels.push({ col, row });
-    }
-
-    return { width, height, arclengths, image, projectedPixels };
   }
 
   /**
@@ -234,8 +188,8 @@
       ctx.stroke();
     };
 
+    // Only draw needle lines in straightened mode
     if (cprMode === 'straightened') {
-      // Straightened mode: vertical needle lines
       // A (yellow, dashed)
       const xA = Math.round(needleAFraction * w);
       ctx.beginPath();
@@ -273,54 +227,6 @@
 
       ctx.fillStyle = '#ffee00';
       ctx.fillText('C', xC, 14);
-    } else if (cprMode === 'curved' && projectedPixels.length > 0) {
-      // Curved mode: draw needle markers at projected centerline positions
-      const nPts = projectedPixels.length;
-
-      // Helper to get projected pixel position for a fraction
-      const getProjectedPos = (frac: number): { col: number; row: number } => {
-        const idx = Math.round(frac * (nPts - 1));
-        const clamped = Math.max(0, Math.min(nPts - 1, idx));
-        return projectedPixels[clamped];
-      };
-
-      const posA = getProjectedPos(needleAFraction);
-      const posB = getProjectedPos(needleBFraction);
-      const posC = getProjectedPos(needleCFraction);
-
-      // Draw marker circles and labels
-      const drawMarker = (
-        pos: { col: number; row: number },
-        color: string,
-        label: string,
-        radius: number,
-      ) => {
-        ctx.beginPath();
-        ctx.arc(pos.col, pos.row, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // Small crosshair inside
-        ctx.beginPath();
-        ctx.moveTo(pos.col - radius * 0.5, pos.row);
-        ctx.lineTo(pos.col + radius * 0.5, pos.row);
-        ctx.moveTo(pos.col, pos.row - radius * 0.5);
-        ctx.lineTo(pos.col, pos.row + radius * 0.5);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        // Label
-        ctx.font = 'bold 11px -apple-system, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillStyle = color;
-        ctx.fillText(label, pos.col, pos.row - radius - 4);
-      };
-
-      drawMarker(posA, '#ffee00', 'A', 5);
-      drawMarker(posB, '#00ffcc', 'B', 7);
-      drawMarker(posC, '#ffee00', 'C', 5);
     }
 
     // --- Centerline: subtle horizontal dashed line at vertical midpoint ---
@@ -456,36 +362,30 @@
     if (!frameReady || renderingCpr) return;
     renderingCpr = true;
     try {
+      let buffer: ArrayBuffer;
+
       if (cprMode === 'curved') {
-        const buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
+        buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
           rotationDeg,
           widthMm: 25.0,
           pixelsWide: 768,
           pixelsHigh: 384,
           slabMm: 1.0,
         });
-
-        const decoded = decodeCurvedCprBinary(buffer);
-        cprWidth = decoded.width;
-        cprHeight = decoded.height;
-        arclengths = decoded.arclengths;
-        cprImageData = decoded.image;
-        projectedPixels = decoded.projectedPixels;
       } else {
-        const buffer = await invoke<ArrayBuffer>('render_cpr_image', {
+        buffer = await invoke<ArrayBuffer>('render_cpr_image', {
           rotationDeg,
           widthMm: 25.0,
           pixelsHigh: 384,
-          slabMm: 0.0,
+          slabMm: 1.0,
         });
-
-        const decoded = decodeCprBinary(buffer);
-        cprWidth = decoded.width;
-        cprHeight = decoded.height;
-        arclengths = decoded.arclengths;
-        cprImageData = decoded.image;
-        projectedPixels = [];
       }
+
+      const decoded = decodeCprBinary(buffer);
+      cprWidth = decoded.width;
+      cprHeight = decoded.height;
+      arclengths = decoded.arclengths;
+      cprImageData = decoded.image;
     } catch (e) {
       console.error('CprView: render CPR failed', e);
     } finally {
@@ -504,7 +404,6 @@
     void needleCFraction;
     void arclengths;
     void cprMode;
-    void projectedPixels;
     // Track seed state for centerline overlay dots
     void seedStore.activeVesselData;
     void seedStore.selectedSeedIndex;

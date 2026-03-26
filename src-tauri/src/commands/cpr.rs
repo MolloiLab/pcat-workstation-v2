@@ -1,9 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use base64::Engine;
 use tauri::ipc::Response;
 
-use crate::pipeline::cpr::{self, CprFrame, CprResult, CrossSectionResult, CurvedCprResult};
+use crate::pipeline::cpr::{self, CprFrame};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -34,7 +34,15 @@ pub struct CrossSectionCommandResult {
 // Helper: clone CprFrame out of AppState for use on a blocking thread
 // ---------------------------------------------------------------------------
 
-// No clone needed — we use Arc for both volume data and CprFrame
+fn clone_frame(frame_ref: &CprFrame) -> CprFrame {
+    CprFrame {
+        positions: frame_ref.positions.clone(),
+        tangents: frame_ref.tangents.clone(),
+        normals: frame_ref.normals.clone(),
+        binormals: frame_ref.binormals.clone(),
+        arclengths: frame_ref.arclengths.clone(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Phase 1: Build frame
@@ -65,7 +73,7 @@ pub async fn build_cpr_frame(
     .map_err(|e| format!("build_cpr_frame task failed: {e}"))?;
 
     let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
-    guard.cpr_frame = Some(Arc::new(frame));
+    guard.cpr_frame = Some(std::sync::Arc::new(frame));
 
     Ok(())
 }
@@ -96,11 +104,11 @@ pub async fn render_cpr_image(
             .ok_or_else(|| "no volume loaded".to_string())?;
         let frame_ref = guard.cpr_frame.as_ref()
             .ok_or_else(|| "no CPR frame built -- call build_cpr_frame first".to_string())?;
-        (Arc::clone(&vol.data), vol.spacing, vol.origin, Arc::clone(frame_ref))
+        (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
     };
 
-    let result: CprResult = tokio::task::spawn_blocking(move || {
-        frame.render_cpr(&*volume_data, spacing, origin, rotation_deg, width_mm, pixels_high, slab_mm)
+    let result = tokio::task::spawn_blocking(move || {
+        frame.render_cpr(&volume_data, spacing, origin, rotation_deg, width_mm, pixels_high, slab_mm)
     })
     .await
     .map_err(|e| format!("render_cpr_image task failed: {e}"))?;
@@ -122,12 +130,10 @@ pub async fn render_cpr_image(
     Ok(Response::new(bytes))
 }
 
-/// Render a curved CPR image. Returns raw binary:
+/// Render a curved CPR image. Returns raw binary (same format as straightened):
 ///   [width: u32 LE][height: u32 LE][n_arclengths: u32 LE]
 ///   [arclengths: n * f64 LE]
 ///   [image: width*height * f32 LE]
-///   [n_projected: u32 LE]
-///   [projected_pixels: n_projected * 2 * f64 LE]  // (col, row) pairs
 #[tauri::command]
 pub async fn render_curved_cpr_image(
     rotation_deg: f64,
@@ -147,12 +153,12 @@ pub async fn render_curved_cpr_image(
             .ok_or_else(|| "no volume loaded".to_string())?;
         let frame_ref = guard.cpr_frame.as_ref()
             .ok_or_else(|| "no CPR frame built -- call build_cpr_frame first".to_string())?;
-        (Arc::clone(&vol.data), vol.spacing, vol.origin, Arc::clone(frame_ref))
+        (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
     };
 
-    let result: CurvedCprResult = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         frame.render_curved_cpr(
-            &*volume_data, spacing, origin,
+            &volume_data, spacing, origin,
             rotation_deg, width_mm,
             pixels_wide, pixels_high, slab_mm,
         )
@@ -160,29 +166,19 @@ pub async fn render_curved_cpr_image(
     .await
     .map_err(|e| format!("render_curved_cpr_image task failed: {e}"))?;
 
-    // Binary format: header + arclengths + image + projected pixel coordinates
+    // Same binary format as straightened CPR
     let n_arc = result.arclengths.len();
     let n_pixels = result.image.len();
-    let n_projected = result.projected_pixels.len();
-    let header_size = 12; // 3 x u32
-    let arc_size = n_arc * 8; // f64
-    let img_size = n_pixels * 4; // f32
-    let proj_header_size = 4; // u32 for n_projected
-    let proj_size = n_projected * 2 * 8; // pairs of f64
-    let mut bytes = Vec::with_capacity(header_size + arc_size + img_size + proj_header_size + proj_size);
+    let header_size = 12;
+    let arc_size = n_arc * 8;
+    let img_size = n_pixels * 4;
+    let mut bytes = Vec::with_capacity(header_size + arc_size + img_size);
 
     bytes.extend_from_slice(&(result.pixels_wide as u32).to_le_bytes());
     bytes.extend_from_slice(&(result.pixels_high as u32).to_le_bytes());
     bytes.extend_from_slice(&(n_arc as u32).to_le_bytes());
     bytes.extend_from_slice(bytemuck::cast_slice::<f64, u8>(&result.arclengths));
     bytes.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&result.image));
-
-    // Pack projected pixel coordinates
-    bytes.extend_from_slice(&(n_projected as u32).to_le_bytes());
-    for &(col, row) in &result.projected_pixels {
-        bytes.extend_from_slice(&col.to_le_bytes());
-        bytes.extend_from_slice(&row.to_le_bytes());
-    }
 
     Ok(Response::new(bytes))
 }
@@ -215,12 +211,12 @@ pub async fn render_cross_sections(
             .ok_or_else(|| "no volume loaded".to_string())?;
         let frame_ref = guard.cpr_frame.as_ref()
             .ok_or_else(|| "no CPR frame built -- call build_cpr_frame first".to_string())?;
-        (Arc::clone(&vol.data), vol.spacing, vol.origin, Arc::clone(frame_ref))
+        (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
     };
 
-    let results: Vec<CrossSectionResult> = tokio::task::spawn_blocking(move || {
+    let results = tokio::task::spawn_blocking(move || {
         frame.render_cross_sections(
-            &*volume_data, spacing, origin,
+            &volume_data, spacing, origin,
             &position_fractions, rotation_deg, width_mm, pixels,
         )
     })

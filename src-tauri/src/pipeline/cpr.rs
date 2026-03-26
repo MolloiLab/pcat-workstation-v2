@@ -22,9 +22,6 @@ pub struct CurvedCprResult {
     pub pixels_wide: usize,
     pub pixels_high: usize,
     pub arclengths: Vec<f64>,
-    /// 2D pixel coordinates of each centerline position in the output image.
-    /// Length = n_cols, each entry is (pixel_col, pixel_row).
-    pub projected_pixels: Vec<(f64, f64)>,
 }
 
 /// Result of a cross-section computation.
@@ -172,8 +169,6 @@ impl CprFrame {
             }
         }
 
-        fill_nan(&mut image, -1024.0);
-
         CprResult {
             image,
             pixels_wide: n_cols,
@@ -235,16 +230,14 @@ impl CprFrame {
         }
     }
 
-    /// Render curved CPR using Horos "stretched" mode with fixed projection normal.
+    /// Render curved CPR: the vessel follows its natural projected path on screen.
     ///
-    /// Instead of using rotating frame normals per column (which creates fan artifacts),
-    /// this uses a FIXED projection direction -- the average binormal as the "into-screen"
-    /// direction. Every column samples in the same physical direction.
+    /// Instead of straightening the vessel into columns, each centerline position
+    /// is projected onto a 2D viewing plane, and perpendicular strips are painted
+    /// at the projected location.
     ///
-    /// Pixel-driven: for each output pixel, find the nearest centerline point and
-    /// sample the volume at the corresponding 3D position.
-    ///
-    /// Returns projected pixel coordinates of each centerline point for overlay drawing.
+    /// - `view_width_mm`, `view_height_mm`: physical size of the output viewport.
+    /// - `pixels_wide`, `pixels_high`: output image dimensions.
     pub fn render_curved_cpr(
         &self,
         volume: &Array3<f32>,
@@ -260,33 +253,46 @@ impl CprFrame {
         let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
         let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
-        // Horos "stretched" mode: use a FIXED projection normal.
-        // The projection normal is the average binormal direction (into-screen).
-        let avg_binormal = {
-            let sum: Vector3<f64> = rot_binormals.iter().copied().fold(
-                Vector3::new(0.0, 0.0, 0.0),
-                |acc, b| acc + b,
-            );
-            (sum / n_cols as f64).normalize()
+        // MIP slab sampling parameters
+        let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
+        let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
+            (0..n_slab_steps)
+                .map(|k| {
+                    -slab_mm / 2.0
+                        + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64)
+                })
+                .collect()
+        } else {
+            vec![0.0]
         };
 
-        // The "up" direction in the output image is FIXED (not rotating).
-        // Choose a direction perpendicular to avg_binormal that's most "vertical".
-        let world_z = Vector3::new(1.0, 0.0, 0.0); // z-up in [z,y,x] coords
-        let fixed_up = {
-            let projected = world_z - world_z.dot(&avg_binormal) * avg_binormal;
-            if projected.norm() > 0.1 {
-                projected.normalize()
+        // --- Project centerline onto a 2D viewing plane ---
+        // The viewing plane is defined by the average binormal as the "into-screen"
+        // direction. We compute a right/up basis from that.
+        let avg_binormal = {
+            let mut sum = Vector3::new(0.0, 0.0, 0.0);
+            for b in &rot_binormals {
+                sum += b;
+            }
+            sum / n_cols as f64
+        };
+        let view_in = avg_binormal.normalize();
+
+        // view_right: perpendicular to view_in, preferring the horizontal plane
+        let world_up = Vector3::new(1.0, 0.0, 0.0); // z-axis is "up" in [z,y,x] coords
+        let view_right = {
+            let candidate = world_up.cross(&view_in);
+            if candidate.norm() > 1e-6 {
+                candidate.normalize()
             } else {
+                // view_in is nearly parallel to world_up, use fallback
                 let fallback = Vector3::new(0.0, 1.0, 0.0);
-                (fallback - fallback.dot(&avg_binormal) * avg_binormal).normalize()
+                fallback.cross(&view_in).normalize()
             }
         };
+        let view_up = view_in.cross(&view_right).normalize();
 
-        // "right" direction: perpendicular to both
-        let fixed_right = avg_binormal.cross(&fixed_up).normalize();
-
-        // Project each centerline position onto the 2D plane (right, up)
+        // Project each centerline position onto the 2D plane
         let center_pos = Vector3::new(
             self.positions[n_cols / 2][0],
             self.positions[n_cols / 2][1],
@@ -294,133 +300,98 @@ impl CprFrame {
         );
         let projected: Vec<(f64, f64)> = self.positions.iter().map(|p| {
             let v = Vector3::new(p[0], p[1], p[2]) - center_pos;
-            (v.dot(&fixed_right), v.dot(&fixed_up))
+            (v.dot(&view_right), v.dot(&view_up))
         }).collect();
 
-        // Bounding box with padding
-        let (mut min_x, mut max_x, mut min_y, mut max_y) =
-            (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        // Find bounding box of projected centerline + lateral extent
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::MAX;
+        let mut max_y = f64::NEG_INFINITY;
         for &(px, py) in &projected {
-            min_x = min_x.min(px);
-            max_x = max_x.max(px);
-            min_y = min_y.min(py);
-            max_y = max_y.max(py);
+            if px < min_x { min_x = px; }
+            if px > max_x { max_x = px; }
+            if py < min_y { min_y = py; }
+            if py > max_y { max_y = py; }
         }
+        // Add lateral padding
         min_x -= width_mm;
         max_x += width_mm;
         min_y -= width_mm;
         max_y += width_mm;
 
-        let view_w = max_x - min_x;
-        let view_h = max_y - min_y;
-        let sx = (pixels_wide as f64 - 1.0) / view_w;
-        let sy = (pixels_high as f64 - 1.0) / view_h;
+        let view_width = max_x - min_x;
+        let view_height = max_y - min_y;
 
-        // MIP slab
-        let n_slab = if slab_mm > 0.01 { 5usize } else { 1 };
-        let slab_offsets: Vec<f64> = if n_slab > 1 {
-            (0..n_slab)
-                .map(|k| -slab_mm / 2.0 + slab_mm * (k as f64) / ((n_slab - 1) as f64))
-                .collect()
-        } else {
-            vec![0.0]
-        };
+        // Scale factors: mm -> pixel
+        let sx = (pixels_wide as f64 - 1.0) / view_width;
+        let sy = (pixels_high as f64 - 1.0) / view_height;
 
+        // For each centerline position, paint perpendicular strip
         let mut image = vec![f32::NAN; pixels_wide * pixels_high];
 
-        // PIXEL-DRIVEN: for each output pixel, find nearest centerline point
-        for row in 0..pixels_high {
-            let py_mm = max_y - (row as f64) / sy;
+        // Number of lateral samples per centerline position
+        let n_lateral = pixels_high; // same density as straightened
 
-            // Track best index from previous column for locality
-            let mut hint = 0usize;
+        for j in 0..n_cols {
+            let pos = Vector3::new(
+                self.positions[j][0],
+                self.positions[j][1],
+                self.positions[j][2],
+            );
+            let n_vec = rot_normals[j];
+            let b_vec = rot_binormals[j];
 
-            for col in 0..pixels_wide {
-                let px_mm = min_x + (col as f64) / sx;
+            for li in 0..n_lateral {
+                // Lateral offset: from +width_mm to -width_mm
+                let lateral =
+                    width_mm * (1.0 - 2.0 * (li as f64) / ((n_lateral - 1) as f64));
 
-                // Find nearest projected centerline point (with locality hint)
-                let mut best_idx = hint;
-                let mut best_d2 = f64::MAX;
+                // 3D sample position
+                let sample_base = pos + lateral * n_vec;
 
-                // Search around the hint first
-                let search_start = if hint > 30 { hint - 30 } else { 0 };
-                let search_end = (hint + 30).min(n_cols);
-                for k in search_start..search_end {
-                    let dx = projected[k].0 - px_mm;
-                    let dy = projected[k].1 - py_mm;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 < best_d2 {
-                        best_d2 = d2;
-                        best_idx = k;
-                    }
-                }
-                // If the local search didn't find something close, search globally
-                if best_d2 > (width_mm * 1.5) * (width_mm * 1.5) {
-                    for k in 0..n_cols {
-                        let dx = projected[k].0 - px_mm;
-                        let dy = projected[k].1 - py_mm;
-                        let d2 = dx * dx + dy * dy;
-                        if d2 < best_d2 {
-                            best_d2 = d2;
-                            best_idx = k;
-                        }
-                    }
-                }
-
-                hint = best_idx;
-                let dist = best_d2.sqrt();
-                if dist > width_mm {
-                    continue;
-                }
-
-                // KEY DIFFERENCE from strip-painting:
-                // The perpendicular distance from centerline in the fixed_up direction
-                let centerline_3d = Vector3::new(
-                    self.positions[best_idx][0],
-                    self.positions[best_idx][1],
-                    self.positions[best_idx][2],
-                );
-                let pixel_offset_mm = py_mm - projected[best_idx].1;
-
-                // Sample 3D: centerline + offset in the per-column normal direction
-                let sample_base = centerline_3d + pixel_offset_mm * rot_normals[best_idx];
-
-                // MIP slab along binormal
+                // MIP across slab
                 let mut max_val = f32::NEG_INFINITY;
                 for &slab_off in &slab_offsets {
-                    let s = sample_base + slab_off * rot_binormals[best_idx];
-                    let vz = (s[0] - origin[0]) * inv_spacing[0];
-                    let vy = (s[1] - origin[1]) * inv_spacing[1];
-                    let vx = (s[2] - origin[2]) * inv_spacing[2];
+                    let sample_mm = sample_base + slab_off * b_vec;
+                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
                     let val = trilinear(volume, vz, vy, vx);
                     if !val.is_nan() && val > max_val {
                         max_val = val;
                     }
                 }
+                let val = if max_val == f32::NEG_INFINITY { f32::NAN } else { max_val };
 
-                image[row * pixels_wide + col] = if max_val == f32::NEG_INFINITY {
-                    f32::NAN
-                } else {
-                    max_val
-                };
+                // Project this 3D position onto the 2D viewing plane
+                let offset_3d = sample_base - center_pos;
+                let proj_x = offset_3d.dot(&view_right);
+                let proj_y = offset_3d.dot(&view_up);
+
+                // Map to pixel coordinates
+                let out_col = ((proj_x - min_x) * sx).round() as isize;
+                let out_row = ((max_y - proj_y) * sy).round() as isize; // flip y: top=max_y
+
+                if out_col >= 0 && out_col < pixels_wide as isize
+                    && out_row >= 0 && out_row < pixels_high as isize
+                {
+                    let idx = out_row as usize * pixels_wide + out_col as usize;
+                    // MIP compositing: keep the brightest value at each pixel
+                    if val.is_nan() {
+                        // skip
+                    } else if image[idx].is_nan() || val > image[idx] {
+                        image[idx] = val;
+                    }
+                }
             }
         }
-
-        fill_nan(&mut image, -1024.0);
-
-        // Compute projected pixel coordinates for each centerline point (for overlays)
-        let projected_pixels: Vec<(f64, f64)> = projected.iter().map(|&(px, py)| {
-            let pixel_col = (px - min_x) * sx;
-            let pixel_row = (max_y - py) * sy;
-            (pixel_col, pixel_row)
-        }).collect();
 
         CurvedCprResult {
             image,
             pixels_wide,
             pixels_high,
             arclengths: self.arclengths.clone(),
-            projected_pixels,
         }
     }
 
@@ -516,25 +487,18 @@ impl CprFrame {
 // Bishop frame (parallel transport)
 // ---------------------------------------------------------------------------
 
-/// Horos-style Rotation Minimizing Frame using axis-angle rotation.
-/// Instead of projecting the previous normal (which accumulates drift),
-/// compute the rotation that maps T[i] to T[i+1] and apply that same
-/// rotation to N[i]. Then re-project to ensure strict orthogonality.
-///
-/// Based on N3VectorBend() from Horos/Nitrogen/Sources/N3Geometry.m
+/// Compute Bishop (parallel-transport) frame along a sequence of tangent
+/// vectors. Returns (normals, binormals).
 fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
     let n = tangents.len();
-    if n == 0 {
-        return (vec![], vec![]);
-    }
-
     let mut normals = Vec::with_capacity(n);
     let mut binormals = Vec::with_capacity(n);
 
-    // Initial normal: perpendicular to T[0]
+    // Choose initial normal perpendicular to T[0]
     let t0 = tangents[0];
     let world_y = Vector3::new(0.0, 1.0, 0.0);
     let world_x = Vector3::new(1.0, 0.0, 0.0);
+
     let seed = if t0.cross(&world_y).norm() > 0.1 {
         world_y
     } else {
@@ -545,91 +509,31 @@ fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f6
     normals.push(n0);
     binormals.push(b0);
 
-    for i in 0..n - 1 {
-        let ti = tangents[i];
-        let ti1 = tangents[i + 1];
-        let ni = normals[i];
+    // Parallel transport: project previous normal onto the plane perp to current tangent
+    for i in 1..n {
+        let t = tangents[i];
+        let prev_n = normals[i - 1];
 
-        // Horos N3VectorBend: rotate ni by the same rotation that maps ti -> ti1
-        let bent = vector_bend(ni, ti, ti1);
-
-        // Re-project to ensure strict orthogonality (Horos does this too)
-        let projected = bent - bent.dot(&ti1) * ti1;
-        let ni1 = if projected.norm() > 1e-12 {
-            projected.normalize()
+        // Remove component along T[i]
+        let projected = prev_n - prev_n.dot(&t) * t;
+        let pn = projected.norm();
+        let ni = if pn > 1e-12 {
+            projected / pn
         } else {
-            // Degenerate -- re-seed
-            let s = if ti1.cross(&world_y).norm() > 0.1 {
+            // Degenerate: tangent changed drastically, re-seed
+            let s = if t.cross(&world_y).norm() > 0.1 {
                 world_y
             } else {
                 world_x
             };
-            ti1.cross(&s).normalize()
+            t.cross(&s).normalize()
         };
-        let bi1 = ti1.cross(&ni1).normalize();
-        normals.push(ni1);
-        binormals.push(bi1);
+        let bi = t.cross(&ni).normalize();
+        normals.push(ni);
+        binormals.push(bi);
     }
 
     (normals, binormals)
-}
-
-/// Port of Horos N3VectorBend (N3Geometry.m line 333).
-/// Computes the minimum rotation that maps `original_dir` to `new_dir`
-/// and applies that same rotation to `vector_to_bend`.
-fn vector_bend(
-    vector_to_bend: Vector3<f64>,
-    original_dir: Vector3<f64>,
-    new_dir: Vector3<f64>,
-) -> Vector3<f64> {
-    let orig_n = original_dir.normalize();
-    let new_n = new_dir.normalize();
-
-    let rotation_axis = orig_n.cross(&new_n);
-    let axis_len = rotation_axis.norm();
-
-    if axis_len < 1e-15 {
-        // Directions are parallel (or anti-parallel)
-        if orig_n.dot(&new_n) >= 0.0 {
-            return vector_to_bend; // same direction, no rotation
-        } else {
-            // 180-degree rotation -- pick any perpendicular axis
-            let perp = if orig_n.cross(&Vector3::new(1.0, 0.0, 0.0)).norm() > 0.1 {
-                orig_n.cross(&Vector3::new(1.0, 0.0, 0.0)).normalize()
-            } else {
-                orig_n.cross(&Vector3::new(0.0, 1.0, 0.0)).normalize()
-            };
-            // Rotate 180 degrees around perp: v -> 2*(v.perp)*perp - v
-            return 2.0 * vector_to_bend.dot(&perp) * perp - vector_to_bend;
-        }
-    }
-
-    // Compute angle using asin (matching Horos)
-    let sin_angle = axis_len.min(1.0); // clamp for numerical safety
-    let mut angle = sin_angle.asin();
-    if orig_n.dot(&new_n) < 0.0 {
-        angle = std::f64::consts::PI - angle;
-    }
-
-    // Apply axis-angle rotation using Rodrigues' formula:
-    // v_rot = v*cos(a) + (k x v)*sin(a) + k*(k.v)*(1-cos(a))
-    let k = rotation_axis.normalize();
-    let cos_a = angle.cos();
-    let sin_a = angle.sin();
-
-    vector_to_bend * cos_a
-        + k.cross(&vector_to_bend) * sin_a
-        + k * k.dot(&vector_to_bend) * (1.0 - cos_a)
-}
-
-/// Fill NaN pixels with a constant value. Horos uses nearest-neighbor fill,
-/// but simple constant fill is faster and sufficient for display.
-fn fill_nan(image: &mut [f32], fill_value: f32) {
-    for v in image.iter_mut() {
-        if v.is_nan() {
-            *v = fill_value;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
