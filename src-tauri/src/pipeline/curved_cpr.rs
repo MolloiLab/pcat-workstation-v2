@@ -422,37 +422,40 @@ pub(crate) fn render_curved_cpr_pixeldriven(
 // 5. Warp-from-straightened curved CPR renderer
 // ---------------------------------------------------------------------------
 
-/// Render a curved CPR by warping a straightened CPR using 3D nearest-point lookup.
+/// Render curved CPR by direct volume sampling with PCA plane + 3D nearest-point.
 ///
-/// For each output pixel on the viewing plane, the nearest centerline point is
-/// found in 3D (not 2D). The arc-length fraction gives the straightened column,
-/// the perpendicular distance gives the row. This is immune to projection
-/// fold-back because the 3D distance is unambiguous.
-pub(crate) fn render_curved_from_straightened(
-    straight_image: &[f32],
-    straight_w: usize,
-    straight_h: usize,
+/// For each output pixel on the PCA-derived viewing plane:
+/// 1. Find nearest centerline point in 3D (brute force — immune to fold-back)
+/// 2. Compute lateral offset along the rotated normal
+/// 3. Sample the volume at centerline + lateral * normal (with MIP slab)
+///
+/// This avoids all 2D projection artifacts and all texture-warp artifacts.
+pub(crate) fn render_curved_direct(
     positions: &[[f64; 3]],
     normals: &[Vector3<f64>],
+    binormals: &[Vector3<f64>],
+    arclengths: &[f64],
+    volume: &Array3<f32>,
+    spacing: [f64; 3],
+    origin: [f64; 3],
     width_mm: f64,
     pixels_wide: usize,
     pixels_high: usize,
-    arclengths: &[f64],
+    slab_mm: f64,
 ) -> CurvedCprResult {
     let n = positions.len();
     assert!(n >= 2);
-    assert_eq!(normals.len(), n);
 
-    // 1. View basis via PCA for the output viewing plane
-    let (_vf, view_right, view_up) = compute_view_basis_pca(positions);
+    // 1. Viewing plane from rotated binormals (rotates with the slider).
+    // Safe to use because 3D nearest-point lookup is immune to fold-back.
+    let (_vf, view_right, view_up) = compute_view_basis(binormals);
 
-    // 2. Project centerline to 2D (only for bounding box + output layout)
+    // 2. Project centerline for bounding box
     let mid_idx = n / 2;
     let center = positions[mid_idx];
     let center_vec = Vector3::new(center[0], center[1], center[2]);
     let projected = project_centerline_2d(positions, center, &view_right, &view_up);
 
-    // 3. Bounding box + padding
     let mut min_x = f64::MAX;
     let mut max_x = f64::NEG_INFINITY;
     let mut min_y = f64::MAX;
@@ -467,79 +470,91 @@ pub(crate) fn render_curved_from_straightened(
     max_x += width_mm;
     min_y -= width_mm;
     max_y += width_mm;
-
     let view_width = max_x - min_x;
     let view_height = max_y - min_y;
 
-    // 4. Precompute position vectors for 3D distance search
+    // 3. MIP slab
+    let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
+    let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
+        (0..n_slab_steps)
+            .map(|k| -slab_mm / 2.0 + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64))
+            .collect()
+    } else {
+        vec![0.0]
+    };
+    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+    // 4. Precompute position vectors
     let pos_vecs: Vec<Vector3<f64>> = positions.iter()
         .map(|p| Vector3::new(p[0], p[1], p[2]))
         .collect();
 
-    // 5. For each output pixel: find nearest centerline point in 3D,
-    // then look up the straightened CPR value.
+    // 5. Per-pixel: 3D nearest-point + direct volume sampling
     let mut image = vec![f32::NAN; pixels_high * pixels_wide];
 
     for row in 0..pixels_high {
         for col in 0..pixels_wide {
-            // Pixel → 3D position on viewing plane
             let x_mm = min_x + (col as f64) * view_width / ((pixels_wide - 1) as f64);
             let y_mm = max_y - (row as f64) * view_height / ((pixels_high - 1) as f64);
             let pixel_3d = center_vec + x_mm * view_right + y_mm * view_up;
 
-            // Find nearest centerline point in 3D (brute force)
+            // 3D nearest SEGMENT (not point) — enables smooth interpolation
             let mut best_j = 0usize;
+            let mut best_frac = 0.0f64;
             let mut best_dist_sq = f64::MAX;
-            for j in 0..n {
-                let d = (pixel_3d - pos_vecs[j]).norm_squared();
+            for j in 0..n - 1 {
+                let ab = pos_vecs[j + 1] - pos_vecs[j];
+                let ap = pixel_3d - pos_vecs[j];
+                let ab_len_sq = ab.norm_squared();
+                let t = if ab_len_sq > 1e-20 {
+                    ap.dot(&ab) / ab_len_sq
+                } else {
+                    0.0
+                }.clamp(0.0, 1.0);
+                let closest = pos_vecs[j] + t * ab;
+                let d = (pixel_3d - closest).norm_squared();
                 if d < best_dist_sq {
                     best_dist_sq = d;
                     best_j = j;
+                    best_frac = t;
                 }
             }
 
-            // Compute lateral offset along the normal at this point
-            let offset = pixel_3d - pos_vecs[best_j];
-            let lateral = offset.dot(&normals[best_j]);
+            // Interpolate position, normal, binormal at fractional segment position
+            let j1 = best_j + 1;
+            let interp_pos = pos_vecs[best_j] + best_frac * (pos_vecs[j1] - pos_vecs[best_j]);
+            let interp_normal = (normals[best_j] * (1.0 - best_frac) + normals[j1] * best_frac).normalize();
+            let interp_binormal = (binormals[best_j] * (1.0 - best_frac) + binormals[j1] * best_frac).normalize();
+
+            // Lateral offset along interpolated normal
+            let offset = pixel_3d - interp_pos;
+            let lateral = offset.dot(&interp_normal);
 
             if lateral.abs() > width_mm {
                 continue;
             }
 
-            // Map to straightened CPR coordinates
-            let src_col = (best_j as f64 / (n - 1) as f64) * (straight_w - 1) as f64;
-            let src_row = (0.5 - lateral / (2.0 * width_mm)) * (straight_h - 1) as f64;
+            // Sample volume at centerline + lateral * normal, MIP across slab
+            let sample_base = interp_pos + lateral * interp_normal;
+            let b_vec = interp_binormal;
 
-            if src_col < 0.0 || src_col > (straight_w - 1) as f64
-                || src_row < 0.0 || src_row > (straight_h - 1) as f64
-            {
-                continue;
-            }
-
-            // Bilinear lookup in straightened image
-            let c0 = src_col.floor() as usize;
-            let r0 = src_row.floor() as usize;
-            let c1 = (c0 + 1).min(straight_w - 1);
-            let r1 = (r0 + 1).min(straight_h - 1);
-            let wc = (src_col - c0 as f64) as f32;
-            let wr = (src_row - r0 as f64) as f32;
-
-            let v00 = straight_image[r0 * straight_w + c0];
-            let v01 = straight_image[r0 * straight_w + c1];
-            let v10 = straight_image[r1 * straight_w + c0];
-            let v11 = straight_image[r1 * straight_w + c1];
-
-            if v00.is_nan() || v01.is_nan() || v10.is_nan() || v11.is_nan() {
-                let vals = [v00, v01, v10, v11];
-                let valid: Vec<f32> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
-                if !valid.is_empty() {
-                    image[row * pixels_wide + col] = valid.iter().sum::<f32>() / valid.len() as f32;
+            let mut max_val = f32::NEG_INFINITY;
+            for &slab_off in &slab_offsets {
+                let s = sample_base + slab_off * b_vec;
+                let vz = (s[0] - origin[0]) * inv_spacing[0];
+                let vy = (s[1] - origin[1]) * inv_spacing[1];
+                let vx = (s[2] - origin[2]) * inv_spacing[2];
+                let val = trilinear(volume, vz, vy, vx);
+                if !val.is_nan() && val > max_val {
+                    max_val = val;
                 }
-            } else {
-                let top = v00 * (1.0 - wc) + v01 * wc;
-                let bot = v10 * (1.0 - wc) + v11 * wc;
-                image[row * pixels_wide + col] = top * (1.0 - wr) + bot * wr;
             }
+
+            image[row * pixels_wide + col] = if max_val == f32::NEG_INFINITY {
+                f32::NAN
+            } else {
+                max_val
+            };
         }
     }
 
@@ -550,6 +565,8 @@ pub(crate) fn render_curved_from_straightened(
         arclengths: arclengths.to_vec(),
     }
 }
+
+// (render_curved_from_straightened removed — superseded by render_curved_direct)
 
 // ---------------------------------------------------------------------------
 // Helpers

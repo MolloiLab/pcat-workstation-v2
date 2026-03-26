@@ -249,28 +249,22 @@ impl CprFrame {
         pixels_high: usize,
         slab_mm: f64,
     ) -> CurvedCprResult {
-        let (rot_normals, _rot_binormals) = self.rotated_frame(rotation_deg);
+        let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
 
-        // Strategy: render a clean straightened CPR first, then warp it
-        // to follow the projected curve using the 3D normals for strip
-        // direction. This avoids artifacts from projection fold-back.
-        let straight = self.render_cpr(
-            volume, spacing, origin,
-            rotation_deg, width_mm,
-            pixels_high,
-            slab_mm,
-        );
-
-        super::curved_cpr::render_curved_from_straightened(
-            &straight.image,
-            straight.pixels_wide,
-            straight.pixels_high,
+        // Direct volume sampling with PCA viewing plane + 3D nearest-point lookup.
+        // No texture warping — each pixel samples the volume directly.
+        super::curved_cpr::render_curved_direct(
             &self.positions,
             &rot_normals,
+            &rot_binormals,
+            &self.arclengths,
+            volume,
+            spacing,
+            origin,
             width_mm,
             pixels_wide,
             pixels_high,
-            &self.arclengths,
+            slab_mm,
         )
     }
 
