@@ -10,12 +10,13 @@
    *   [0,0] Axial    [0,1] Coronal
    *   [1,0] Sagittal [1,1] ContextPanel
    */
-  import { onMount, untrack } from 'svelte';
+  import { onMount } from 'svelte';
   import { tick } from 'svelte';
   import { Enums, setVolumesForViewports } from '@cornerstonejs/core';
 
   import { initCornerstone, getRenderingEngine } from '$lib/cornerstone/init';
   import { setupToolGroup } from '$lib/cornerstone/tools';
+  import { registerNavigate } from '$lib/navigation';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
 
   import { seedStore } from '$lib/stores/seedStore.svelte';
@@ -96,6 +97,9 @@
 
     setupToolGroup(VIEWPORT_IDS);
     engineReady = true;
+
+    // Register the imperative navigation function for the shared service
+    registerNavigate(navigateToWorldPos);
   });
 
   // ---------- React to volume changes ----------
@@ -151,16 +155,8 @@
     }
   }
 
-  // When a seed is selected (or placed, since addSeed auto-selects),
-  // navigate all MPR views to that seed's position.
-  $effect(() => {
-    const idx = seedStore.selectedSeedIndex;
-    if (idx === null || !engineReady) return;
-    const data = untrack(() => seedStore.activeVesselData);
-    if (!data || idx >= data.seeds.length) return;
-    const pos = data.seeds[idx].position;
-    untrack(() => navigateToWorldPos(pos));
-  });
+  // Navigation is now handled imperatively via the shared navigation service.
+  // Event handlers in SliceViewport and CprView call navigateToWorldPos directly.
 </script>
 
 <!--
@@ -191,5 +187,5 @@
   />
 
   <!-- [1,1] Context panel -->
-  <ContextPanel {phase} onNeedleMove={navigateToWorldPos} />
+  <ContextPanel {phase} />
 </div>

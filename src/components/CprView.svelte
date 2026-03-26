@@ -14,10 +14,9 @@
    *            70%                  30%
    */
   import { invoke } from '@tauri-apps/api/core';
+  import { navigateToWorldPos } from '$lib/navigation';
   import { seedStore, VESSEL_COLORS } from '$lib/stores/seedStore.svelte';
   import CrossSection from './CrossSection.svelte';
-
-  let { onNeedleMove }: { onNeedleMove?: (pos: [number, number, number]) => void } = $props();
 
   // ---- Types ----
   type CprCommandResult = {
@@ -384,28 +383,16 @@
     needleBFraction = closestIdx / (cl.length - 1);
   });
 
-  // ---- Needle B → MPR navigation ----
-  // Only fire when needleBFraction changes (not on seed data changes).
-  // Use untrack for seed data to avoid reactive cascade.
-  let lastNavFrac = -1;
-  let navDebounce: ReturnType<typeof setTimeout>;
+  // ---- Helpers: navigate MPR to needle B's current position ----
 
-  $effect(() => {
-    const frac = needleBFraction;
-    if (Math.abs(frac - lastNavFrac) < 0.001) return;
-    lastNavFrac = frac;
-
-    clearTimeout(navDebounce);
-    navDebounce = setTimeout(() => {
-      const cl = seedStore.activeVesselData?.centerline;
-      if (!cl || cl.length < 2 || !onNeedleMove) return;
-      const idx = Math.round(frac * (cl.length - 1));
-      const pos = cl[Math.min(idx, cl.length - 1)];
-      onNeedleMove(pos);
-    }, 50);
-
-    return () => clearTimeout(navDebounce);
-  });
+  /** Compute the world position at needle B and navigate MPR views there. */
+  function navigateToNeedlePos() {
+    const cl = seedStore.activeVesselData?.centerline;
+    if (!cl || cl.length < 2) return;
+    const idx = Math.round(needleBFraction * (cl.length - 1));
+    const pos = cl[Math.min(idx, cl.length - 1)];
+    navigateToWorldPos(pos);
+  }
 
   // ---- Needle dragging ----
 
@@ -426,6 +413,7 @@
     } else {
       // Click elsewhere: snap B to that position
       needleBFraction = Math.max(0, Math.min(1, fraction));
+      navigateToNeedlePos();
     }
   }
 
@@ -434,9 +422,13 @@
     const rect = cprCanvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     needleBFraction = Math.max(0, Math.min(1, x / rect.width));
+    navigateToNeedlePos();
   }
 
   function onCanvasMouseUp() {
+    if (dragging) {
+      navigateToNeedlePos();
+    }
     dragging = false;
   }
 
@@ -447,6 +439,7 @@
     const sensitivity = 0.0003;
     const delta = -event.deltaY * sensitivity;
     needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
+    navigateToNeedlePos();
   }
 
   // ---- W/L adjustment via right-drag on CPR canvas ----

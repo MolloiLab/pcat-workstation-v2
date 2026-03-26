@@ -13,6 +13,7 @@
    *  - SVG overlay for seed markers and centerline polylines
    */
   import { getRenderingEngine } from '$lib/cornerstone/init';
+  import { navigateToWorldPos } from '$lib/navigation';
   import { seedStore, type Vessel } from '$lib/stores/seedStore.svelte';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import SeedOverlay from './SeedOverlay.svelte';
@@ -257,6 +258,10 @@
       }
       seedStore.selectSeed(nearestSeed.seedIndex);
 
+      // Navigate MPR views to the selected seed position
+      const seedPos = seedStore.vessels[nearestSeed.vessel].seeds[nearestSeed.seedIndex].position;
+      navigateToWorldPos(seedPos as [number, number, number]);
+
       // Start drag
       isDragging = true;
       dragSeedIndex = nearestSeed.seedIndex;
@@ -274,6 +279,7 @@
     const nearestCL = findNearestCenterlinePoint(canvasX, canvasY);
     if (nearestCL) {
       seedStore.insertSeedAt(nearestCL.insertIndex, nearestCL.worldPos);
+      navigateToWorldPos(nearestCL.worldPos);
       // Clear hover state
       hoveringCenterline = false;
       hoverInsertPos = null;
@@ -291,6 +297,7 @@
     }
 
     seedStore.addSeed(worldPos);
+    navigateToWorldPos(worldPos);
   }
 
   /**
