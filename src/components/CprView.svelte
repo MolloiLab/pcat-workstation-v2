@@ -3,6 +3,10 @@
    * Compound CPR view: straightened CPR image (left 70%) with 3 cross-sections
    * (right 30%) at needle positions A, B, C.
    *
+   * Two-phase architecture:
+   *   Phase 1: centerline changes -> build_cpr_frame (once, ~100ms)
+   *   Phase 2: rotation/needle changes -> render_cpr_image + render_cross_sections (fast, ~10ms)
+   *
    * Layout:
    *   +-------------------------+----------+
    *   |                         |  A (xs)  |
@@ -15,7 +19,7 @@
    */
   import { invoke } from '@tauri-apps/api/core';
   import { navigateToWorldPos } from '$lib/navigation';
-  import { seedStore, VESSEL_COLORS } from '$lib/stores/seedStore.svelte';
+  import { seedStore } from '$lib/stores/seedStore.svelte';
   import CrossSection from './CrossSection.svelte';
 
   // ---- Types ----
@@ -45,15 +49,8 @@
   let cprImageData = $state<Float32Array | null>(null);
   let loading = $state(false);
 
-  // Track rotation interaction for lower-res preview during drag
-  let rotationActive = $state(false);
-  let rotationTimer: ReturnType<typeof setTimeout>;
-
-  function onRotationInput() {
-    rotationActive = true;
-    clearTimeout(rotationTimer);
-    rotationTimer = setTimeout(() => { rotationActive = false; }, 500);
-  }
+  // Phase 1: frame readiness
+  let frameReady = $state(false);
 
   // Current centerline from seed store
   let centerline = $derived(seedStore.activeVesselData?.centerline ?? null);
@@ -221,68 +218,99 @@
     drawOverlays(cprCanvas);
   }
 
-  // ---- CPR Computation (debounced) ----
+  // ---- Phase 1: Build frame when centerline changes ----
 
-  let cprDebounce: ReturnType<typeof setTimeout> | undefined;
-  let computingCpr = false;
+  let frameDebounce: ReturnType<typeof setTimeout> | undefined;
+  let buildingFrame = false;
 
   $effect(() => {
-    // Track reactive deps: centerline, rotation, rotationActive
     const cl = centerline;
-    const rot = rotationDeg;
-    const isRotating = rotationActive;
 
     if (!cl || cl.length < 2) {
       cprImageData = null;
+      frameReady = false;
       return;
     }
 
+    // Centerline changed — rebuild frame
+    frameReady = false;
     loading = true;
-    clearTimeout(cprDebounce);
-    cprDebounce = setTimeout(async () => {
-      if (computingCpr) {
-        loading = false;
-        return;
-      }
-      computingCpr = true;
+    clearTimeout(frameDebounce);
+    frameDebounce = setTimeout(async () => {
+      if (buildingFrame) return;
+      buildingFrame = true;
       try {
-        // The spline centerline is in cornerstone3D world coords [x, y, z]
-        // Rust expects [z, y, x]
         // Downsample to max 100 points for smooth CPR while keeping IPC fast
         const sampled = downsample(cl, 100);
+        // The spline centerline is in cornerstone3D world coords [x, y, z]
+        // Rust expects [z, y, x]
         const centerlineZyx = sampled.map(
           ([x, y, z]) => [z, y, x] as [number, number, number],
         );
 
-        // Use lower resolution during rotation interaction for faster feedback
-        const pw = isRotating ? 256 : 512;
-        const ph = isRotating ? 128 : 256;
-
-        const result = await invoke<CprCommandResult>('compute_cpr_image', {
+        await invoke('build_cpr_frame', {
           centerlineMm: centerlineZyx,
-          rotationDeg: rot,
-          widthMm: 25.0,
-          slabMm: 3.0,
-          pixelsWide: pw,
-          pixelsHigh: ph,
+          pixelsWide: 512,
         });
 
-        cprWidth = result.shape[1];
-        cprHeight = result.shape[0];
-        arclengths = result.arclengths;
-        cprImageData = decodeBase64Float32(result.image_base64);
+        frameReady = true;
+        // Trigger initial render
+        renderCpr();
+        renderCrossSections();
       } catch (e) {
-        console.error('CprView: CPR computation failed', e);
+        console.error('CprView: build_cpr_frame failed', e);
       } finally {
-        computingCpr = false;
+        buildingFrame = false;
         loading = false;
       }
-    }, 300);
+    }, 200);
 
-    return () => clearTimeout(cprDebounce);
+    return () => clearTimeout(frameDebounce);
   });
 
-  // Re-render when image data, W/L, needle positions, or seed state change
+  // ---- Phase 2: Render when rotation changes (uses cached frame) ----
+
+  let renderDebounce: ReturnType<typeof setTimeout> | undefined;
+  let renderingCpr = false;
+
+  $effect(() => {
+    // Track rotation dep
+    void rotationDeg;
+
+    if (!frameReady) return;
+
+    clearTimeout(renderDebounce);
+    renderDebounce = setTimeout(() => {
+      renderCpr();
+      renderCrossSections();
+    }, 50);
+
+    return () => clearTimeout(renderDebounce);
+  });
+
+  async function renderCpr() {
+    if (!frameReady || renderingCpr) return;
+    renderingCpr = true;
+    try {
+      const result = await invoke<CprCommandResult>('render_cpr_image', {
+        rotationDeg,
+        widthMm: 25.0,
+        pixelsHigh: 256,
+        slabMm: 0.0, // single plane for interactive speed
+      });
+
+      cprWidth = result.shape[1];
+      cprHeight = result.shape[0];
+      arclengths = result.arclengths;
+      cprImageData = decodeBase64Float32(result.image_base64);
+    } catch (e) {
+      console.error('CprView: render_cpr_image failed', e);
+    } finally {
+      renderingCpr = false;
+    }
+  }
+
+  // Re-render canvas when image data, W/L, needle positions change
   $effect(() => {
     // Touch reactive deps so Svelte tracks them for this effect
     void cprImageData;
@@ -299,20 +327,19 @@
     repaintCanvas();
   });
 
-  // ---- Batch cross-section computation (single IPC call for all 3) ----
+  // ---- Cross-section computation (uses cached frame) ----
 
   let xsDebounce: ReturnType<typeof setTimeout> | undefined;
   let computingXs = false;
 
   $effect(() => {
-    // Track deps: centerline, needle fractions, rotation
-    const cl = centerline;
-    const fracA = needleAFraction;
-    const fracB = needleBFraction;
-    const fracC = needleCFraction;
-    const rot = rotationDeg;
+    // Track needle and rotation deps
+    void needleAFraction;
+    void needleBFraction;
+    void needleCFraction;
+    void rotationDeg;
 
-    if (!cl || cl.length < 2) {
+    if (!frameReady) {
       batchXsA = null;
       batchXsB = null;
       batchXsC = null;
@@ -320,41 +347,40 @@
     }
 
     clearTimeout(xsDebounce);
-    xsDebounce = setTimeout(async () => {
-      if (computingXs) return;
-      computingXs = true;
-      try {
-        const centerlineZyx = cl.map(
-          ([x, y, z]) => [z, y, x] as [number, number, number],
-        );
-
-        const results = await invoke<BatchCrossSectionItem[]>(
-          'compute_cross_sections_batch',
-          {
-            centerlineMm: centerlineZyx,
-            positionFractions: [fracA, fracB, fracC],
-            rotationDeg: rot,
-            widthMm: 15.0,
-            pixels: 128,
-          },
-        );
-
-        if (results.length === 3) {
-          batchXsA = results[0];
-          batchXsB = results[1];
-          batchXsC = results[2];
-        }
-      } catch (e) {
-        console.error('CprView: batch cross-section failed', e);
-      } finally {
-        computingXs = false;
-      }
-    }, 150);
+    xsDebounce = setTimeout(() => {
+      renderCrossSections();
+    }, 100);
 
     return () => clearTimeout(xsDebounce);
   });
 
-  // ---- Seed selection → needle B navigation ----
+  async function renderCrossSections() {
+    if (!frameReady || computingXs) return;
+    computingXs = true;
+    try {
+      const results = await invoke<BatchCrossSectionItem[]>(
+        'render_cross_sections',
+        {
+          positionFractions: [needleAFraction, needleBFraction, needleCFraction],
+          rotationDeg,
+          widthMm: 15.0,
+          pixels: 128,
+        },
+      );
+
+      if (results.length === 3) {
+        batchXsA = results[0];
+        batchXsB = results[1];
+        batchXsC = results[2];
+      }
+    } catch (e) {
+      console.error('CprView: render_cross_sections failed', e);
+    } finally {
+      computingXs = false;
+    }
+  }
+
+  // ---- Seed selection -> needle B navigation ----
 
   $effect(() => {
     const selectedIdx = seedStore.selectedSeedIndex;
@@ -608,7 +634,6 @@
         max="360"
         step="1"
         bind:value={rotationDeg}
-        oninput={onRotationInput}
         class="h-1 w-24 cursor-pointer accent-accent"
       />
       <span class="w-7 text-right tabular-nums">{rotationDeg}&deg;</span>

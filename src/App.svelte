@@ -17,6 +17,7 @@
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
   import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { seedStore, type Vessel } from '$lib/stores/seedStore.svelte';
+  import { navigateToWorldPos } from '$lib/navigation';
 
   let errorMessage = $state('');
 
@@ -58,6 +59,24 @@
       } else {
         seedStore.clearVessel(seedStore.activeVessel);
       }
+      return;
+    }
+
+    // Arrow Left/Right: cycle through seeds
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const data = seedStore.activeVesselData;
+      if (data.seeds.length === 0) return;
+      const current = seedStore.selectedSeedIndex;
+      let next: number;
+      if (current === null) {
+        next = event.key === 'ArrowRight' ? 0 : data.seeds.length - 1;
+      } else {
+        next = event.key === 'ArrowRight'
+          ? (current + 1) % data.seeds.length
+          : (current - 1 + data.seeds.length) % data.seeds.length;
+      }
+      seedStore.selectSeed(next);
+      navigateToWorldPos(data.seeds[next].position);
       return;
     }
 

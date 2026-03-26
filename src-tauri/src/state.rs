@@ -2,12 +2,14 @@ use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::pipeline::cpr::CprFrame;
+
 /// CT volume loaded from DICOM, stored in Rust memory.
 pub struct LoadedVolume {
     pub data: Array3<f32>,       // (Z, Y, X) HU values
     pub spacing: [f64; 3],       // [sz, sy, sx] mm
     pub origin: [f64; 3],        // [oz, oy, ox] mm
-    pub direction: [f64; 9],     // row-major 3×3
+    pub direction: [f64; 9],     // row-major 3x3
     pub window_center: f64,
     pub window_width: f64,
     pub patient_name: String,
@@ -42,6 +44,7 @@ pub struct VesselResult {
 /// Application state managed by Tauri.
 pub struct AppState {
     pub volume: Option<LoadedVolume>,
+    pub cpr_frame: Option<CprFrame>,
     pub analysis_results: Option<AnalysisResults>,
 }
 
@@ -49,6 +52,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             volume: None,
+            cpr_frame: None,
             analysis_results: None,
         }
     }

@@ -2,6 +2,7 @@ use nalgebra::Vector3;
 use ndarray::Array3;
 
 use super::interp::trilinear;
+use super::spline::CubicSpline3D;
 
 /// Result of a CPR computation.
 #[derive(serde::Serialize)]
@@ -22,82 +23,298 @@ pub struct CrossSectionResult {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers: centerline resampling & Bishop frame
+// CprFrame — precomputed per-centerline, cached for reuse
 // ---------------------------------------------------------------------------
 
-/// Uniformly resample a dense centerline (already at ~0.5mm spacing) to
-/// exactly `n` positions along arc length. Returns (positions, tangents, arclengths).
+/// Precomputed CPR frame data — cached in AppState for reuse across
+/// render_cpr and render_cross_section calls at different rotation angles.
 ///
-/// Tangents are computed using centered finite differences on the RESAMPLED
-/// positions for smoothness, not from the original polyline segments.
-pub fn resample_centerline(
-    pts: &[[f64; 3]],
-    n: usize,
-) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>, Vec<f64>) {
-    assert!(pts.len() >= 2, "centerline must have at least 2 points");
-    assert!(n >= 2, "need at least 2 output samples");
+/// Built once when the centerline changes (~100ms), then reused for
+/// rotation/needle changes (<10ms per render).
+pub struct CprFrame {
+    pub positions: Vec<[f64; 3]>,    // [z,y,x] in mm, n_cols entries
+    pub tangents: Vec<Vector3<f64>>,
+    pub normals: Vec<Vector3<f64>>,  // Bishop frame (parallel transport)
+    pub binormals: Vec<Vector3<f64>>,
+    pub arclengths: Vec<f64>,
+}
 
-    // Compute cumulative arc lengths
-    let mut cum_arc = Vec::with_capacity(pts.len());
-    cum_arc.push(0.0);
-    for i in 1..pts.len() {
-        let d = Vector3::new(
-            pts[i][0] - pts[i - 1][0],
-            pts[i][1] - pts[i - 1][1],
-            pts[i][2] - pts[i - 1][2],
-        )
-        .norm();
-        cum_arc.push(cum_arc[i - 1] + d);
-    }
-    let total_arc = *cum_arc.last().unwrap();
+impl CprFrame {
+    /// Build frame from centerline points. Call once per centerline change.
+    ///
+    /// - `points`: centerline in [z,y,x] mm (dense, from frontend)
+    /// - `n_cols`: number of uniformly-spaced samples along arc-length
+    pub fn from_centerline(points: &[[f64; 3]], n_cols: usize) -> Self {
+        assert!(points.len() >= 2, "centerline must have at least 2 points");
+        assert!(n_cols >= 2, "need at least 2 output columns");
 
-    let mut positions = Vec::with_capacity(n);
-    let mut arclengths = Vec::with_capacity(n);
+        // 1. Fit cubic spline through the centerline points
+        let spline = CubicSpline3D::fit(points);
+        let total_arc = spline.total_arc();
 
-    // Pointer into the source polyline for O(n+m) walk
-    let mut seg = 0usize;
+        // 2. Sample at n_cols uniform arc-length positions
+        let mut positions = Vec::with_capacity(n_cols);
+        let mut arclengths = Vec::with_capacity(n_cols);
+        let mut tangents = Vec::with_capacity(n_cols);
 
-    for j in 0..n {
-        let s = total_arc * (j as f64) / ((n - 1) as f64);
-        arclengths.push(s);
+        for j in 0..n_cols {
+            let s = total_arc * (j as f64) / ((n_cols - 1) as f64);
+            arclengths.push(s);
 
-        // Advance segment pointer
-        while seg + 1 < pts.len() - 1 && cum_arc[seg + 1] < s {
-            seg += 1;
+            let pos = spline.eval(s);
+            positions.push(pos);
+
+            // Analytic tangent — smooth, no noise from finite differences
+            let t = spline.tangent(s);
+            tangents.push(Vector3::new(t[0], t[1], t[2]));
         }
 
-        // Interpolate position within segment [seg, seg+1]
-        let seg_len = cum_arc[seg + 1] - cum_arc[seg];
-        let t = if seg_len > 1e-12 {
-            ((s - cum_arc[seg]) / seg_len).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        // 3. Compute Bishop frame (parallel transport) from smooth tangents
+        let (normals, binormals) = bishop_frame(&tangents);
 
-        let p0 = Vector3::new(pts[seg][0], pts[seg][1], pts[seg][2]);
-        let p1 = Vector3::new(pts[seg + 1][0], pts[seg + 1][1], pts[seg + 1][2]);
-        positions.push(p0 + t * (p1 - p0));
+        Self {
+            positions,
+            tangents,
+            normals,
+            binormals,
+            arclengths,
+        }
     }
 
-    // Compute smooth tangents using centered finite differences on resampled positions
-    let mut tangents = Vec::with_capacity(n);
-    for j in 0..n {
-        let tang = if j == 0 {
-            (positions[1] - positions[0]).normalize()
-        } else if j == n - 1 {
-            (positions[n - 1] - positions[n - 2]).normalize()
-        } else {
-            (positions[j + 1] - positions[j - 1]).normalize()
-        };
-        tangents.push(tang);
+    /// Number of columns (arc-length samples) in this frame.
+    pub fn n_cols(&self) -> usize {
+        self.positions.len()
     }
 
-    (positions, tangents, arclengths)
+    /// Compute CPR image at a given rotation angle. Fast — just rotates + samples.
+    ///
+    /// - `slab_mm`: 0.0 for single-plane (interactive), >0 for MIP slab
+    pub fn render_cpr(
+        &self,
+        volume: &Array3<f32>,
+        spacing: [f64; 3],
+        origin: [f64; 3],
+        rotation_deg: f64,
+        width_mm: f64,
+        pixels_high: usize,
+        slab_mm: f64,
+    ) -> CprResult {
+        let n_cols = self.n_cols();
+
+        // Rotate the Bishop frame by the given angle
+        let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
+
+        // MIP slab sampling parameters
+        let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
+        let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
+            (0..n_slab_steps)
+                .map(|k| {
+                    -slab_mm / 2.0
+                        + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64)
+                })
+                .collect()
+        } else {
+            vec![0.0]
+        };
+
+        let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+        // Image reconstruction
+        let mut image = vec![f32::NAN; pixels_high * n_cols];
+
+        for j in 0..n_cols {
+            let pos = Vector3::new(
+                self.positions[j][0],
+                self.positions[j][1],
+                self.positions[j][2],
+            );
+            let n_vec = rot_normals[j];
+            let b_vec = rot_binormals[j];
+
+            for i in 0..pixels_high {
+                // Lateral offset: top row = +width_mm, bottom row = -width_mm
+                let lateral =
+                    width_mm * (1.0 - 2.0 * (i as f64) / ((pixels_high - 1) as f64));
+
+                let mut max_val = f32::NEG_INFINITY;
+
+                for &slab_off in &slab_offsets {
+                    let sample_mm = pos + lateral * n_vec + slab_off * b_vec;
+
+                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+
+                    let val = trilinear(volume, vz, vy, vx);
+                    if !val.is_nan() && val > max_val {
+                        max_val = val;
+                    }
+                }
+
+                image[i * n_cols + j] = if max_val == f32::NEG_INFINITY {
+                    f32::NAN
+                } else {
+                    max_val
+                };
+            }
+        }
+
+        CprResult {
+            image,
+            pixels_wide: n_cols,
+            pixels_high,
+            arclengths: self.arclengths.clone(),
+        }
+    }
+
+    /// Compute cross-section at a fractional position along the centerline.
+    pub fn render_cross_section(
+        &self,
+        volume: &Array3<f32>,
+        spacing: [f64; 3],
+        origin: [f64; 3],
+        position_frac: f64,
+        rotation_deg: f64,
+        width_mm: f64,
+        pixels: usize,
+    ) -> CrossSectionResult {
+        let n = self.n_cols();
+        let idx = ((position_frac * (n - 1) as f64).round() as usize).min(n - 1);
+
+        let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
+
+        let pos = Vector3::new(
+            self.positions[idx][0],
+            self.positions[idx][1],
+            self.positions[idx][2],
+        );
+        let n_vec = rot_normals[idx];
+        let b_vec = rot_binormals[idx];
+        let arc_mm = self.arclengths[idx];
+
+        let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+        let mut image = vec![f32::NAN; pixels * pixels];
+
+        for row in 0..pixels {
+            for col in 0..pixels {
+                let offset_n =
+                    width_mm * (1.0 - 2.0 * (row as f64) / ((pixels - 1) as f64));
+                let offset_b =
+                    width_mm * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
+
+                let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
+
+                let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+
+                image[row * pixels + col] = trilinear(volume, vz, vy, vx);
+            }
+        }
+
+        CrossSectionResult {
+            image,
+            pixels,
+            arc_mm,
+        }
+    }
+
+    /// Batch render multiple cross-sections efficiently.
+    pub fn render_cross_sections(
+        &self,
+        volume: &Array3<f32>,
+        spacing: [f64; 3],
+        origin: [f64; 3],
+        position_fracs: &[f64],
+        rotation_deg: f64,
+        width_mm: f64,
+        pixels: usize,
+    ) -> Vec<CrossSectionResult> {
+        let n = self.n_cols();
+        let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
+        let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+        position_fracs
+            .iter()
+            .map(|&frac| {
+                let idx = ((frac * (n - 1) as f64).round() as usize).min(n - 1);
+
+                let pos = Vector3::new(
+                    self.positions[idx][0],
+                    self.positions[idx][1],
+                    self.positions[idx][2],
+                );
+                let n_vec = rot_normals[idx];
+                let b_vec = rot_binormals[idx];
+                let arc_mm = self.arclengths[idx];
+
+                let mut image = vec![f32::NAN; pixels * pixels];
+
+                for row in 0..pixels {
+                    for col in 0..pixels {
+                        let offset_n = width_mm
+                            * (1.0 - 2.0 * (row as f64) / ((pixels - 1) as f64));
+                        let offset_b = width_mm
+                            * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
+
+                        let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
+
+                        let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                        let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                        let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+
+                        image[row * pixels + col] = trilinear(volume, vz, vy, vx);
+                    }
+                }
+
+                CrossSectionResult {
+                    image,
+                    pixels,
+                    arc_mm,
+                }
+            })
+            .collect()
+    }
+
+    // --- Internal helpers ---
+
+    /// Apply rotation around the tangent axis, returning rotated (normals, binormals).
+    /// Does NOT mutate self — returns new vectors for the requested angle.
+    fn rotated_frame(
+        &self,
+        rotation_deg: f64,
+    ) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
+        if rotation_deg.abs() < 1e-10 {
+            return (self.normals.clone(), self.binormals.clone());
+        }
+
+        let theta = rotation_deg.to_radians();
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+        let n = self.normals.len();
+
+        let mut rot_n = Vec::with_capacity(n);
+        let mut rot_b = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let ni = self.normals[i];
+            let bi = self.binormals[i];
+            rot_n.push(cos_t * ni + sin_t * bi);
+            rot_b.push(-sin_t * ni + cos_t * bi);
+        }
+
+        (rot_n, rot_b)
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Bishop frame (parallel transport)
+// ---------------------------------------------------------------------------
 
 /// Compute Bishop (parallel-transport) frame along a sequence of tangent
 /// vectors. Returns (normals, binormals).
-pub fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
+fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
     let n = tangents.len();
     let mut normals = Vec::with_capacity(n);
     let mut binormals = Vec::with_capacity(n);
@@ -144,76 +361,12 @@ pub fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector
     (normals, binormals)
 }
 
-/// Apply rotation around the tangent axis to normals and binormals.
-fn rotate_frame(
-    normals: &mut [Vector3<f64>],
-    binormals: &mut [Vector3<f64>],
-    rotation_deg: f64,
-) {
-    if rotation_deg.abs() < 1e-10 {
-        return;
-    }
-    let theta = rotation_deg.to_radians();
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
-
-    for i in 0..normals.len() {
-        let n = normals[i];
-        let b = binormals[i];
-        normals[i] = cos_t * n + sin_t * b;
-        binormals[i] = -sin_t * n + cos_t * b;
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Fixed up-vector frame (stable alternative to Bishop for CPR)
-// ---------------------------------------------------------------------------
-
-/// Compute a frame using a fixed world up-vector projected onto the plane
-/// perpendicular to each tangent. This avoids the error accumulation of
-/// parallel-transport (Bishop frame) and produces more stable CPR images.
-/// The tradeoff is slight twist along straight sections, but this is how
-/// Horos computes CPR and it works well in practice.
-fn fixed_up_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
-    // Choose a single up vector for the entire vessel based on average tangent.
-    // This avoids per-point switching that causes discontinuities (vertical striping).
-    let avg_tangent = tangents.iter()
-        .fold(Vector3::zeros(), |a, t| a + t)
-        .normalize();
-
-    let up = if avg_tangent.dot(&Vector3::new(0.0, 0.0, 1.0)).abs() < 0.85 {
-        Vector3::new(0.0, 0.0, 1.0) // world Z
-    } else {
-        Vector3::new(0.0, 1.0, 0.0) // world Y (when vessel runs mostly vertical)
-    };
-
-    tangents
-        .iter()
-        .map(|t| {
-            let projected = up - up.dot(t) * t;
-            let n = projected.normalize();
-            let b = t.cross(&n).normalize();
-            (n, b)
-        })
-        .unzip()
-}
-
-// ---------------------------------------------------------------------------
-// Public API
+// Legacy public API wrappers (still used by existing tests)
 // ---------------------------------------------------------------------------
 
 /// Compute a Curved Planar Reformation (CPR) image from a volume along a
-/// centerline.
-///
-/// - `volume`: 3D array of HU values, shape (Z, Y, X).
-/// - `centerline_mm`: Dense centerline points in [z, y, x] mm.
-/// - `spacing`: Volume spacing [sz, sy, sx] mm.
-/// - `origin`: Volume origin [oz, oy, ox] mm.
-/// - `width_mm`: Half-width of the lateral axis in mm.
-/// - `slab_mm`: MIP slab thickness in mm.
-/// - `pixels_wide`: Output width (arc-length axis / columns).
-/// - `pixels_high`: Output height (lateral axis / rows).
-/// - `rotation_deg`: Rotational CPR angle in degrees.
+/// centerline. This is the single-call API (builds frame + renders in one shot).
 pub fn compute_cpr(
     volume: &Array3<f32>,
     centerline_mm: &[[f64; 3]],
@@ -225,83 +378,12 @@ pub fn compute_cpr(
     pixels_high: usize,
     rotation_deg: f64,
 ) -> CprResult {
-    // 1. Resample centerline to pixels_wide uniform arc-length positions
-    let (positions, tangents, arclengths) = resample_centerline(centerline_mm, pixels_wide);
-
-    // 2. Fixed up-vector frame (stable, no error accumulation)
-    let (mut normals, mut binormals) = fixed_up_frame(&tangents);
-
-    // 3. Rotation
-    rotate_frame(&mut normals, &mut binormals, rotation_deg);
-
-    // 4. MIP slab sampling parameters — 9 steps for smoother edges
-    let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
-    let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
-        (0..n_slab_steps)
-            .map(|k| -slab_mm / 2.0 + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64))
-            .collect()
-    } else {
-        vec![0.0]
-    };
-
-    // Inverse spacing for mm -> voxel conversion
-    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
-
-    // 5. Image reconstruction
-    let mut image = vec![f32::NAN; pixels_high * pixels_wide];
-
-    for j in 0..pixels_wide {
-        let pos = positions[j];
-        let n_vec = normals[j];
-        let b_vec = binormals[j];
-
-        for i in 0..pixels_high {
-            // Lateral offset: top row = +width_mm, bottom row = -width_mm
-            let lateral = width_mm * (1.0 - 2.0 * (i as f64) / ((pixels_high - 1) as f64));
-
-            let mut max_val = f32::NEG_INFINITY;
-
-            for &slab_off in &slab_offsets {
-                let sample_mm = pos + lateral * n_vec + slab_off * b_vec;
-
-                // Convert mm -> voxel space: voxel = (mm - origin) / spacing
-                let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
-
-                let val = trilinear(volume, vz, vy, vx);
-                if !val.is_nan() && val > max_val {
-                    max_val = val;
-                }
-            }
-
-            image[i * pixels_wide + j] = if max_val == f32::NEG_INFINITY {
-                f32::NAN
-            } else {
-                max_val
-            };
-        }
-    }
-
-    CprResult {
-        image,
-        pixels_wide,
-        pixels_high,
-        arclengths,
-    }
+    let frame = CprFrame::from_centerline(centerline_mm, pixels_wide);
+    frame.render_cpr(volume, spacing, origin, rotation_deg, width_mm, pixels_high, slab_mm)
 }
 
 /// Compute a cross-sectional image perpendicular to the centerline at a
-/// given arc-length position.
-///
-/// - `volume`: 3D array of HU values, shape (Z, Y, X).
-/// - `centerline_mm`: Dense centerline points in [z, y, x] mm.
-/// - `spacing`: Volume spacing [sz, sy, sx] mm.
-/// - `origin`: Volume origin [oz, oy, ox] mm.
-/// - `position_frac`: Fractional position along the centerline [0.0, 1.0].
-/// - `rotation_deg`: Rotational CPR angle in degrees.
-/// - `width_mm`: Half-width of the cross-section in mm.
-/// - `pixels`: Output square image size (pixels x pixels).
+/// given arc-length position. Legacy single-call API.
 pub fn compute_cross_section(
     volume: &Array3<f32>,
     centerline_mm: &[[f64; 3]],
@@ -312,52 +394,12 @@ pub fn compute_cross_section(
     width_mm: f64,
     pixels: usize,
 ) -> CrossSectionResult {
-    // We need positions + frame at just one point, but reuse the same
-    // resampling to get consistent arc-length parametrisation.
     let n_samples = centerline_mm.len().max(2);
-    let (positions, tangents, arclengths) = resample_centerline(centerline_mm, n_samples);
-    let (mut normals, mut binormals) = bishop_frame(&tangents);
-    rotate_frame(&mut normals, &mut binormals, rotation_deg);
-
-    // Map fractional position to index
-    let idx = ((position_frac * (n_samples - 1) as f64).round() as usize).min(n_samples - 1);
-
-    let pos = positions[idx];
-    let n_vec = normals[idx];
-    let b_vec = binormals[idx];
-    let arc_mm = arclengths[idx];
-
-    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
-
-    let mut image = vec![f32::NAN; pixels * pixels];
-
-    for row in 0..pixels {
-        for col in 0..pixels {
-            // Map (row, col) to physical offsets along N and B
-            let offset_n = width_mm * (1.0 - 2.0 * (row as f64) / ((pixels - 1) as f64));
-            let offset_b = width_mm * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
-
-            let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
-
-            // Convert mm -> voxel space: voxel = (mm - origin) / spacing
-            let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-            let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-            let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
-
-            image[row * pixels + col] = trilinear(volume, vz, vy, vx);
-        }
-    }
-
-    CrossSectionResult {
-        image,
-        pixels,
-        arc_mm,
-    }
+    let frame = CprFrame::from_centerline(centerline_mm, n_samples);
+    frame.render_cross_section(volume, spacing, origin, position_frac, rotation_deg, width_mm, pixels)
 }
 
-/// Compute multiple cross-sections in a single call, sharing the centerline
-/// resampling and Bishop frame computation. Much faster than calling
-/// `compute_cross_section` separately for each position.
+/// Compute multiple cross-sections in a single call. Legacy single-call API.
 pub fn compute_cross_sections_batch(
     volume: &Array3<f32>,
     centerline_mm: &[[f64; 3]],
@@ -368,52 +410,9 @@ pub fn compute_cross_sections_batch(
     width_mm: f64,
     pixels: usize,
 ) -> Vec<CrossSectionResult> {
-    // Resample + Bishop frame ONCE
     let n_samples = centerline_mm.len().max(2);
-    let (positions, tangents, arclengths) = resample_centerline(centerline_mm, n_samples);
-    let (mut normals, mut binormals) = bishop_frame(&tangents);
-    rotate_frame(&mut normals, &mut binormals, rotation_deg);
-
-    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
-
-    // Compute each cross-section using the shared precomputed frame
-    position_fracs
-        .iter()
-        .map(|&frac| {
-            let idx =
-                ((frac * (n_samples - 1) as f64).round() as usize).min(n_samples - 1);
-
-            let pos = positions[idx];
-            let n_vec = normals[idx];
-            let b_vec = binormals[idx];
-            let arc_mm = arclengths[idx];
-
-            let mut image = vec![f32::NAN; pixels * pixels];
-
-            for row in 0..pixels {
-                for col in 0..pixels {
-                    let offset_n =
-                        width_mm * (1.0 - 2.0 * (row as f64) / ((pixels - 1) as f64));
-                    let offset_b =
-                        width_mm * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
-
-                    let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
-
-                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
-
-                    image[row * pixels + col] = trilinear(volume, vz, vy, vx);
-                }
-            }
-
-            CrossSectionResult {
-                image,
-                pixels,
-                arc_mm,
-            }
-        })
-        .collect()
+    let frame = CprFrame::from_centerline(centerline_mm, n_samples);
+    frame.render_cross_sections(volume, spacing, origin, position_fracs, rotation_deg, width_mm, pixels)
 }
 
 #[cfg(test)]
@@ -512,18 +511,66 @@ mod tests {
     }
 
     #[test]
-    fn test_resample_preserves_endpoints() {
-        let pts: Vec<[f64; 3]> = vec![
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [20.0, 0.0, 0.0],
-        ];
-        let (positions, _tangents, arclengths) = resample_centerline(&pts, 5);
+    fn test_cpr_frame_cached_render() {
+        // Use a volume with y-variation so rotation around the tangent axis
+        // produces visibly different CPR images.
+        let mut vol = Array3::<f32>::zeros((64, 64, 64));
+        for z in 0..64 {
+            for y in 0..64 {
+                for x in 0..64 {
+                    // value = z + y  (gradient along both z and y)
+                    vol[[z, y, x]] = (z + y) as f32;
+                }
+            }
+        }
+        let spacing = [1.0, 1.0, 1.0];
+        let origin = [0.0, 0.0, 0.0];
 
-        assert_eq!(positions.len(), 5);
-        assert!((positions[0] - Vector3::new(0.0, 0.0, 0.0)).norm() < 1e-10);
-        assert!((positions[4] - Vector3::new(20.0, 0.0, 0.0)).norm() < 1e-10);
-        assert!((arclengths[0]).abs() < 1e-10);
-        assert!((arclengths[4] - 20.0).abs() < 1e-10);
+        let centerline: Vec<[f64; 3]> = (0..60)
+            .map(|z| [z as f64, 32.0, 32.0])
+            .collect();
+
+        // Build frame once
+        let frame = CprFrame::from_centerline(&centerline, 60);
+        assert_eq!(frame.n_cols(), 60);
+        assert_eq!(frame.arclengths.len(), 60);
+
+        // Render at two different rotations — both should produce valid images
+        let r1 = frame.render_cpr(&vol, spacing, origin, 0.0, 10.0, 21, 0.0);
+        let r2 = frame.render_cpr(&vol, spacing, origin, 90.0, 10.0, 21, 0.0);
+
+        assert_eq!(r1.image.len(), 60 * 21);
+        assert_eq!(r2.image.len(), 60 * 21);
+
+        // Images should differ (different rotation angles slice through y vs x gradient)
+        let differs = r1.image.iter().zip(r2.image.iter())
+            .any(|(a, b)| {
+                !a.is_nan() && !b.is_nan() && (a - b).abs() > 0.01
+            });
+        assert!(differs, "different rotation angles should produce different images");
+    }
+
+    #[test]
+    fn test_cpr_frame_cross_sections() {
+        let (vol, spacing) = make_test_volume();
+        let origin = [0.0, 0.0, 0.0];
+
+        let centerline: Vec<[f64; 3]> = (0..60)
+            .map(|z| [z as f64, 32.0, 32.0])
+            .collect();
+
+        let frame = CprFrame::from_centerline(&centerline, 60);
+
+        // Batch cross-sections
+        let results = frame.render_cross_sections(
+            &vol, spacing, origin,
+            &[0.25, 0.5, 0.75],
+            0.0, 10.0, 21,
+        );
+        assert_eq!(results.len(), 3);
+
+        // Arc-lengths should be increasing
+        assert!(results[0].arc_mm < results[1].arc_mm);
+        assert!(results[1].arc_mm < results[2].arc_mm);
     }
 }

@@ -1,6 +1,7 @@
+use nalgebra::Vector3;
 use ndarray::Array3;
 
-use super::cpr::{bishop_frame, resample_centerline};
+use super::cpr::CprFrame;
 use super::interp::trilinear;
 
 /// Result of contour extraction along a vessel centerline.
@@ -42,9 +43,15 @@ pub fn extract_contours(
         .map(|pt| [pt[0] * spacing[0], pt[1] * spacing[1], pt[2] * spacing[2]])
         .collect();
 
-    // 2. Compute Bishop frame via resampling (reuse from cpr.rs)
-    let (positions, tangents, arclengths) = resample_centerline(&centerline_mm, n_pts);
-    let (normals, binormals) = bishop_frame(&tangents);
+    // 2. Build CprFrame — gives us positions, tangents, normals, binormals via
+    //    cubic spline + Bishop frame (same as CPR rendering)
+    let frame = CprFrame::from_centerline(&centerline_mm, n_pts);
+    let positions: Vec<Vector3<f64>> = frame.positions.iter()
+        .map(|p| Vector3::new(p[0], p[1], p[2]))
+        .collect();
+    let normals = frame.normals;
+    let binormals = frame.binormals;
+    let arclengths = frame.arclengths;
 
     // Radial sampling parameters
     let radial_step_mm = 0.2;
