@@ -347,7 +347,7 @@
 
   /**
    * Pinch-to-zoom: trackpad pinch generates wheel events with ctrlKey=true.
-   * Zoom toward the cursor position.
+   * Zooms toward cursor position by adjusting both parallelScale and focalPoint.
    */
   function handleWheel(event: WheelEvent) {
     if (!event.ctrlKey || !containerEl) return;
@@ -360,10 +360,32 @@
 
     const zoomFactor = 1 - event.deltaY * 0.01;
     const camera = vp.getCamera();
-    if (camera?.parallelScale != null) {
-      vp.setCamera({ parallelScale: camera.parallelScale / zoomFactor });
-      vp.render();
+    if (camera?.parallelScale == null) return;
+
+    // Get cursor world position for zoom-toward-cursor
+    const rect = containerEl.getBoundingClientRect();
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+    const worldPos = vp.canvasToWorld([canvasX, canvasY]);
+
+    const newScale = camera.parallelScale / zoomFactor;
+
+    if (worldPos && camera.focalPoint) {
+      // Shift focal point toward cursor proportionally to zoom change
+      const t = 1 - 1 / zoomFactor;
+      const fp = camera.focalPoint;
+      vp.setCamera({
+        parallelScale: newScale,
+        focalPoint: [
+          fp[0] + (worldPos[0] - fp[0]) * t,
+          fp[1] + (worldPos[1] - fp[1]) * t,
+          fp[2] + (worldPos[2] - fp[2]) * t,
+        ],
+      });
+    } else {
+      vp.setCamera({ parallelScale: newScale });
     }
+    vp.render();
   }
 
   /**

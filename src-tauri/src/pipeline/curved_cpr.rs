@@ -12,6 +12,11 @@ use ndarray::Array3;
 use super::cpr::CurvedCprResult;
 use super::interp::trilinear;
 
+/// Bounding box padding beyond the projected centerline (mm).
+/// Controls how much anatomical context surrounds the vessel.
+/// Shared with `commands/cpr.rs::get_cpr_projection_info`.
+pub const CONTEXT_PAD_MM: f64 = 35.0;
+
 // ---------------------------------------------------------------------------
 // 1. View basis from binormals
 // ---------------------------------------------------------------------------
@@ -467,7 +472,7 @@ pub(crate) fn render_curved_direct(
         if py < min_y { min_y = py; }
         if py > max_y { max_y = py; }
     }
-    let context_pad_mm = 35.0; // spine + 1 chamber, matching syngo.via FOV
+    let context_pad_mm = CONTEXT_PAD_MM;
     min_x -= context_pad_mm;
     max_x += context_pad_mm;
     min_y -= context_pad_mm;

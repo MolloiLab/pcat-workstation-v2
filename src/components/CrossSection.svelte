@@ -82,10 +82,10 @@
   }
 
   /**
-   * Measure vessel diameter from cross-section image.
-   * Finds the bright lumen (HU > 150) region passing through the center
-   * and returns the diameter in mm.
-   * widthMm is the physical half-width of the cross-section (15mm).
+   * Estimate vessel diameter from cross-section image.
+   * Scans from the center outward for bright lumen (HU > 150).
+   * Limitations: assumes vessel is centered, may overestimate if
+   * calcified plaque (also bright) is present. For display only.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
     const widthMm = 15.0; // matches the render_cross_sections widthMm

@@ -294,8 +294,7 @@ pub async fn get_cpr_projection_info(
         if py < min_y { min_y = py; }
         if py > max_y { max_y = py; }
     }
-    // Must match context_pad_mm in render_curved_direct (curved_cpr.rs)
-    let context_pad = 35.0f64;
+    let context_pad = curved_cpr::CONTEXT_PAD_MM;
     min_x -= context_pad;
     max_x += context_pad;
     min_y -= context_pad;

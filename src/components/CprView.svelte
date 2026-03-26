@@ -856,18 +856,16 @@
     event.preventDefault();
 
     if (event.ctrlKey) {
-      // Pinch-to-zoom toward cursor
+      // Pinch-to-zoom toward cursor using transform-origin
       const zoomFactor = 1 - event.deltaY * 0.01;
       const newZoom = Math.max(1, Math.min(8, cprZoom * zoomFactor));
       if (cprCanvas) {
-        const rect = cprCanvas.getBoundingClientRect();
-        const cursorX = event.clientX - rect.left;
-        const cursorY = event.clientY - rect.top;
-        // Zoom toward cursor: adjust pan so cursor stays at same position
-        const cx = cursorX / rect.width;
-        const cy = cursorY / rect.height;
-        cprPanX = cx - (cx - cprPanX) * (newZoom / cprZoom);
-        cprPanY = cy - (cy - cprPanY) * (newZoom / cprZoom);
+        const rect = cprCanvas.parentElement!.getBoundingClientRect();
+        const cursorX = (event.clientX - rect.left) / rect.width;
+        const cursorY = (event.clientY - rect.top) / rect.height;
+        // Set transform-origin to cursor position (as offset from center)
+        cprPanX = 0.5 - cursorX;
+        cprPanY = 0.5 - cursorY;
       }
       cprZoom = newZoom;
     } else {
@@ -971,15 +969,19 @@
         </div>
       {:else}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <canvas
-          bind:this={cprCanvas}
-          class="min-h-0 flex-1"
+        <div
+          class="min-h-0 flex-1 overflow-hidden relative"
           style:cursor={draggingSeedIndex !== null ? 'grabbing' : hoverSeedIndex !== null ? 'grab' : 'crosshair'}
-          style="image-rendering: pixelated; width: 100%; height: 100%; transform: scale({cprZoom}) translate({cprPanX * 100}%, {cprPanY * 100}%); transform-origin: 0 0;"
           onmousedown={handleMouseDown}
           oncontextmenu={onCanvasContextMenu}
           onwheel={onCanvasWheel}
-        ></canvas>
+        >
+          <canvas
+            bind:this={cprCanvas}
+            class="absolute inset-0"
+            style="image-rendering: pixelated; width: 100%; height: 100%; transform: scale({cprZoom}); transform-origin: {(0.5 - cprPanX) * 100}% {(0.5 - cprPanY) * 100}%;"
+          ></canvas>
+        </div>
       {/if}
     </div>
 
