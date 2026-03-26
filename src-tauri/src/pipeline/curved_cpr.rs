@@ -449,7 +449,7 @@ pub(crate) fn render_curved_direct(
     // 1. Viewing plane from rotated binormals — rotates with the slider.
     // This ensures the lateral sampling direction is always visible on screen.
     // 3D segment search prevents fold-back artifacts.
-    let (_vf, view_right, view_up) = compute_view_basis(binormals);
+    let (view_forward, view_right, view_up) = compute_view_basis(binormals);
 
     // 2. Project centerline for bounding box
     let mid_idx = n / 2;
@@ -467,10 +467,11 @@ pub(crate) fn render_curved_direct(
         if py < min_y { min_y = py; }
         if py > max_y { max_y = py; }
     }
-    min_x -= width_mm;
-    max_x += width_mm;
-    min_y -= width_mm;
-    max_y += width_mm;
+    let context_pad_mm = 80.0; // show bones, chambers, full context
+    min_x -= context_pad_mm;
+    max_x += context_pad_mm;
+    min_y -= context_pad_mm;
+    max_y += context_pad_mm;
     let view_width = max_x - min_x;
     let view_height = max_y - min_y;
 
@@ -490,7 +491,7 @@ pub(crate) fn render_curved_direct(
         .map(|p| Vector3::new(p[0], p[1], p[2]))
         .collect();
 
-    // 5. Per-pixel: 3D nearest-point + direct volume sampling
+    // 5. Per-pixel: two-layer composite (oblique MIP + CPR near vessel)
     let mut image = vec![f32::NAN; pixels_high * pixels_wide];
 
     for row in 0..pixels_high {
@@ -499,10 +500,26 @@ pub(crate) fn render_curved_direct(
             let y_mm = max_y - (row as f64) * view_height / ((pixels_high - 1) as f64);
             let pixel_3d = center_vec + x_mm * view_right + y_mm * view_up;
 
-            // 3D nearest SEGMENT (not point) — enables smooth interpolation
+            // --- Layer 1: Oblique slab MIP (always computed, no artifacts) ---
+            let mut oblique_val = f32::NEG_INFINITY;
+            for &slab_off in &slab_offsets {
+                let s = pixel_3d + slab_off * view_forward;
+                let vz = (s[0] - origin[0]) * inv_spacing[0];
+                let vy = (s[1] - origin[1]) * inv_spacing[1];
+                let vx = (s[2] - origin[2]) * inv_spacing[2];
+                let val = trilinear(volume, vz, vy, vx);
+                if !val.is_nan() && val > oblique_val {
+                    oblique_val = val;
+                }
+            }
+            let oblique_val = if oblique_val == f32::NEG_INFINITY { f32::NAN } else { oblique_val };
+
+            // --- Layer 2: CPR sampling (only near vessel) ---
+            // Find nearest 3D segment + track second-nearest distance
             let mut best_j = 0usize;
             let mut best_frac = 0.0f64;
             let mut best_dist_sq = f64::MAX;
+            let mut second_dist_sq = f64::MAX;
             for j in 0..n - 1 {
                 let ab = pos_vecs[j + 1] - pos_vecs[j];
                 let ap = pixel_3d - pos_vecs[j];
@@ -515,51 +532,78 @@ pub(crate) fn render_curved_direct(
                 let closest = pos_vecs[j] + t * ab;
                 let d = (pixel_3d - closest).norm_squared();
                 if d < best_dist_sq {
+                    second_dist_sq = best_dist_sq;
                     best_dist_sq = d;
                     best_j = j;
                     best_frac = t;
+                } else if d < second_dist_sq {
+                    second_dist_sq = d;
                 }
             }
 
-            // Interpolate position, normal, binormal at fractional segment position
+            let best_dist = best_dist_sq.sqrt();
+            let _ = best_dist; // suppress unused warning
+
+            // Interpolate frame at nearest segment
             let j1 = best_j + 1;
             let interp_pos = pos_vecs[best_j] + best_frac * (pos_vecs[j1] - pos_vecs[best_j]);
             let interp_normal = (normals[best_j] * (1.0 - best_frac) + normals[j1] * best_frac).normalize();
             let interp_binormal = (binormals[best_j] * (1.0 - best_frac) + binormals[j1] * best_frac).normalize();
 
-            // Lateral offset along interpolated normal
             let offset = pixel_3d - interp_pos;
             let lateral = offset.dot(&interp_normal);
 
-            // Sample point: if within lateral width, use CPR sampling
-            // (centerline + lateral along normal). Otherwise, sample the
-            // viewing plane directly — this shows surrounding context
-            // (bones, chambers) like syngo.via does.
-            let (sample_base, b_vec) = if lateral.abs() <= width_mm {
-                // CPR: sample perpendicular to vessel
-                (interp_pos + lateral * interp_normal, interp_binormal)
+            // Voronoi ambiguity check: if second-nearest is close to nearest,
+            // the segment assignment is ambiguous -> don't trust CPR sampling
+            let ambiguity_ratio = if best_dist_sq > 1e-10 {
+                second_dist_sq / best_dist_sq
             } else {
-                // Direct oblique: sample at the pixel's actual 3D position
-                (pixel_3d, interp_binormal)
+                f64::MAX
+            };
+            let voronoi_safe = ambiguity_ratio > 2.0;
+
+            // CPR blend weight: full CPR at center, fade to oblique
+            let cpr_blend = if !voronoi_safe || lateral.abs() > width_mm {
+                0.0 // pure oblique
+            } else if lateral.abs() < width_mm * 0.8 {
+                1.0 // pure CPR
+            } else {
+                // Smooth transition zone (last 20% of width)
+                let t = (width_mm - lateral.abs()) / (width_mm * 0.2);
+                t.clamp(0.0, 1.0)
             };
 
-            let mut max_val = f32::NEG_INFINITY;
-            for &slab_off in &slab_offsets {
-                let s = sample_base + slab_off * b_vec;
-                let vz = (s[0] - origin[0]) * inv_spacing[0];
-                let vy = (s[1] - origin[1]) * inv_spacing[1];
-                let vx = (s[2] - origin[2]) * inv_spacing[2];
-                let val = trilinear(volume, vz, vy, vx);
-                if !val.is_nan() && val > max_val {
-                    max_val = val;
+            let final_val = if cpr_blend <= 0.0 {
+                oblique_val
+            } else {
+                // CPR sample
+                let sample_base = interp_pos + lateral * interp_normal;
+                let mut cpr_val = f32::NEG_INFINITY;
+                for &slab_off in &slab_offsets {
+                    let s = sample_base + slab_off * interp_binormal;
+                    let vz = (s[0] - origin[0]) * inv_spacing[0];
+                    let vy = (s[1] - origin[1]) * inv_spacing[1];
+                    let vx = (s[2] - origin[2]) * inv_spacing[2];
+                    let val = trilinear(volume, vz, vy, vx);
+                    if !val.is_nan() && val > cpr_val {
+                        cpr_val = val;
+                    }
                 }
-            }
+                let cpr_val = if cpr_val == f32::NEG_INFINITY { f32::NAN } else { cpr_val };
 
-            image[row * pixels_wide + col] = if max_val == f32::NEG_INFINITY {
-                f32::NAN
-            } else {
-                max_val
+                if cpr_blend >= 1.0 {
+                    cpr_val
+                } else if cpr_val.is_nan() {
+                    oblique_val
+                } else if oblique_val.is_nan() {
+                    cpr_val
+                } else {
+                    // Blend
+                    cpr_val * cpr_blend as f32 + oblique_val * (1.0 - cpr_blend as f32)
+                }
             };
+
+            image[row * pixels_wide + col] = final_val;
         }
     }
 
