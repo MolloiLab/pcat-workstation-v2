@@ -294,10 +294,12 @@ pub async fn get_cpr_projection_info(
         if py < min_y { min_y = py; }
         if py > max_y { max_y = py; }
     }
-    min_x -= width_mm;
-    max_x += width_mm;
-    min_y -= width_mm;
-    max_y += width_mm;
+    // Must match context_pad_mm in render_curved_direct (curved_cpr.rs)
+    let context_pad = 35.0f64;
+    min_x -= context_pad;
+    max_x += context_pad;
+    min_y -= context_pad;
+    max_y += context_pad;
 
     let total_arc = *frame.arclengths.last().unwrap_or(&0.0);
 

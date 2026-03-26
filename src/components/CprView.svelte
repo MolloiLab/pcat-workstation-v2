@@ -353,6 +353,27 @@
       ctx.fillText('O', ox, 14);
     }
 
+    // --- Centerline polyline on CPR ---
+    if (projectionInfo && cprMode === 'curved') {
+      const color = VESSEL_COLORS[seedStore.activeVessel];
+      const nPos = projectionInfo.positions.length;
+      const step = Math.max(1, Math.floor(nPos / 200)); // sample every few points
+
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.5;
+      let started = false;
+      for (let j = 0; j < nPos; j += step) {
+        const projected = worldToCurvedCpr(projectionInfo.positions[j], projectionInfo, w, h);
+        if (!projected) { started = false; continue; }
+        if (!started) { ctx.moveTo(projected[0], projected[1]); started = true; }
+        else { ctx.lineTo(projected[0], projected[1]); }
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1.0;
+    }
+
     // --- Seed markers on CPR ---
     if (projectionInfo) {
       const vessel = seedStore.activeVessel;

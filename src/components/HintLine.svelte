@@ -32,27 +32,27 @@
 
     // Seed selected — show selection actions
     if (selected !== null) {
-      return 'Drag to move \u00b7 Backspace to delete \u00b7 Escape to deselect';
+      return 'Drag to move \u00b7 Del to remove \u00b7 Esc to deselect \u00b7 Arrow keys to cycle';
     }
 
-    // "Experienced" detection: 3+ seeds means user knows the workflow
-    if (seedCount >= 3) {
+    // "Experienced" detection: 5+ seeds means user knows the workflow
+    if (seedCount >= 5) {
       return '';
     }
 
-    // No seeds — prompt for ostium
+    // No seeds — prompt to start in aorta
     if (seedCount === 0) {
-      return `Click on any view to place ostium for ${VESSEL_LABELS[vessel]}`;
+      return `Start in the aorta, then trace into ${VESSEL_LABELS[vessel]} \u00b7 Click on any MPR view to place seeds`;
     }
 
-    // Has ostium only — prompt for waypoints
+    // 1 seed — continue tracing
     if (seedCount === 1) {
-      return 'Click to add waypoints along the vessel';
+      return 'Continue clicking along the vessel to add waypoints';
     }
 
-    // Has 2 seeds — show extended hints
-    if (seedCount === 2) {
-      return 'Click to add more waypoints \u00b7 Click on centerline to insert';
+    // 2-4 seeds — show CPR hints
+    if (seedCount >= 2) {
+      return 'CPR generated \u00b7 Shift+click on CPR to mark ostium \u00b7 Scroll CPR to move needle';
     }
 
     return '';
