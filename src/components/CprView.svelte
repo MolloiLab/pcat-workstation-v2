@@ -1,16 +1,18 @@
 <script lang="ts">
   /**
-   * Compound CPR view: straightened CPR image (left 70%) with 3 cross-sections
-   * (right 30%) at needle positions A, B, C.
+   * Compound CPR view: straightened or curved CPR image (left 70%) with
+   * 3 cross-sections (right 30%) at needle positions A, B, C.
    *
    * Two-phase architecture:
    *   Phase 1: centerline changes -> build_cpr_frame (once, ~100ms)
    *   Phase 2: rotation/needle changes -> render_cpr_image + render_cross_sections (fast, ~10ms)
    *
+   * All image IPC uses raw binary (tauri::ipc::Response) -- no base64.
+   *
    * Layout:
    *   +-------------------------+----------+
    *   |                         |  A (xs)  |
-   *   |   Straightened CPR      |----------|
+   *   |   Straightened/Curved   |----------|
    *   |   3 needle lines A/B/C  |  B (xs)  |
    *   |                         |----------|
    *   |                         |  C (xs)  |
@@ -22,18 +24,14 @@
   import { seedStore } from '$lib/stores/seedStore.svelte';
   import CrossSection from './CrossSection.svelte';
 
-  // ---- Types ----
-  type CprCommandResult = {
-    image_base64: string;
-    shape: [number, number]; // [height, width]
-    arclengths: number[];
-  };
-
   // ---- Reactive state ----
   let cprCanvas: HTMLCanvasElement | undefined = $state();
   let rotationDeg = $state(0);
   let windowCenter = $state(40);
   let windowWidth = $state(400);
+
+  // CPR mode: straightened (classic) vs curved (natural vessel path)
+  let cprMode: 'straightened' | 'curved' = $state('straightened');
 
   // Needle B position as fraction (0..1); A and C are offset
   let needleBFraction = $state(0.5);
@@ -43,8 +41,8 @@
   let needleCFraction = $derived(Math.min(1, needleBFraction + needleOffset));
 
   // Image dimensions from last CPR result
-  let cprWidth = $state(512);
-  let cprHeight = $state(256);
+  let cprWidth = $state(768);
+  let cprHeight = $state(384);
   let arclengths = $state<number[]>([]);
   let cprImageData = $state<Float32Array | null>(null);
   let loading = $state(false);
@@ -57,7 +55,7 @@
 
   // Batch cross-section results (one per needle: A, B, C)
   type BatchCrossSectionItem = {
-    image_base64: string;
+    imageData: Float32Array;
     pixels: number;
     arc_mm: number;
   };
@@ -82,11 +80,56 @@
     return result;
   }
 
-  function decodeBase64Float32(b64: string): Float32Array {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return new Float32Array(bytes.buffer);
+  /**
+   * Decode the raw binary CPR response:
+   *   [width: u32 LE][height: u32 LE][n_arclengths: u32 LE]
+   *   [arclengths: n * f64 LE]
+   *   [image: width*height * f32 LE]
+   */
+  function decodeCprBinary(buffer: ArrayBuffer): {
+    width: number;
+    height: number;
+    arclengths: number[];
+    image: Float32Array;
+  } {
+    const view = new DataView(buffer);
+    const width = view.getUint32(0, true);
+    const height = view.getUint32(4, true);
+    const nArc = view.getUint32(8, true);
+
+    const arcOffset = 12;
+    const arclengths: number[] = [];
+    for (let i = 0; i < nArc; i++) {
+      arclengths.push(view.getFloat64(arcOffset + i * 8, true));
+    }
+
+    const imgOffset = arcOffset + nArc * 8;
+    const image = new Float32Array(buffer, imgOffset, width * height);
+    return { width, height, arclengths, image };
+  }
+
+  /**
+   * Decode the raw binary cross-sections response:
+   *   [n_sections: u32 LE]
+   *   For each: [pixels: u32 LE][arc_mm: f64 LE][image: pixels*pixels * f32 LE]
+   */
+  function decodeCrossSectionsBinary(buffer: ArrayBuffer): BatchCrossSectionItem[] {
+    const view = new DataView(buffer);
+    const nSections = view.getUint32(0, true);
+    const results: BatchCrossSectionItem[] = [];
+    let offset = 4;
+
+    for (let i = 0; i < nSections; i++) {
+      const pixels = view.getUint32(offset, true);
+      offset += 4;
+      const arc_mm = view.getFloat64(offset, true);
+      offset += 8;
+      const imgLen = pixels * pixels;
+      const imageData = new Float32Array(buffer, offset, imgLen);
+      offset += imgLen * 4;
+      results.push({ imageData, pixels, arc_mm });
+    }
+    return results;
   }
 
   function renderCprToCanvas(
@@ -104,7 +147,17 @@
     const lo = wc - ww / 2;
     const range = ww;
     for (let i = 0; i < data.length; i++) {
-      const v = Math.round(((data[i] - lo) / range) * 255);
+      const raw = data[i];
+      // NaN pixels (outside volume / curved CPR gaps) -> black transparent
+      if (raw !== raw) {
+        // NaN
+        imgData.data[i * 4] = 0;
+        imgData.data[i * 4 + 1] = 0;
+        imgData.data[i * 4 + 2] = 0;
+        imgData.data[i * 4 + 3] = 255;
+        continue;
+      }
+      const v = Math.round(((raw - lo) / range) * 255);
       const clamped = Math.max(0, Math.min(255, v));
       imgData.data[i * 4] = clamped;
       imgData.data[i * 4 + 1] = clamped;
@@ -120,6 +173,9 @@
     const w = cvs.width;
     const h = cvs.height;
 
+    // In curved mode, needle lines are less meaningful (vessel is not straightened)
+    // but we still draw them at the same fractional position for consistency.
+
     // Draw needle lines (vertical)
     const drawNeedle = (fraction: number, color: string, lineWidth: number) => {
       const x = Math.round(fraction * w);
@@ -132,43 +188,46 @@
       ctx.stroke();
     };
 
-    // A (yellow, dashed)
-    const xA = Math.round(needleAFraction * w);
-    ctx.beginPath();
-    ctx.strokeStyle = '#ffee00';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 3]);
-    ctx.moveTo(xA, 0);
-    ctx.lineTo(xA, h);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    // Only draw needle lines in straightened mode
+    if (cprMode === 'straightened') {
+      // A (yellow, dashed)
+      const xA = Math.round(needleAFraction * w);
+      ctx.beginPath();
+      ctx.strokeStyle = '#ffee00';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.moveTo(xA, 0);
+      ctx.lineTo(xA, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
 
-    // B (cyan, solid, thicker)
-    drawNeedle(needleBFraction, '#00ffcc', 2);
+      // B (cyan, solid, thicker)
+      drawNeedle(needleBFraction, '#00ffcc', 2);
 
-    // C (yellow, dashed)
-    const xC = Math.round(needleCFraction * w);
-    ctx.beginPath();
-    ctx.strokeStyle = '#ffee00';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 3]);
-    ctx.moveTo(xC, 0);
-    ctx.lineTo(xC, h);
-    ctx.stroke();
-    ctx.setLineDash([]);
+      // C (yellow, dashed)
+      const xC = Math.round(needleCFraction * w);
+      ctx.beginPath();
+      ctx.strokeStyle = '#ffee00';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.moveTo(xC, 0);
+      ctx.lineTo(xC, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
 
-    // Labels
-    ctx.font = 'bold 11px -apple-system, sans-serif';
-    ctx.textAlign = 'center';
+      // Labels
+      ctx.font = 'bold 11px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
 
-    ctx.fillStyle = '#ffee00';
-    ctx.fillText('A', xA, 14);
+      ctx.fillStyle = '#ffee00';
+      ctx.fillText('A', xA, 14);
 
-    ctx.fillStyle = '#00ffcc';
-    ctx.fillText('B', Math.round(needleBFraction * w), 14);
+      ctx.fillStyle = '#00ffcc';
+      ctx.fillText('B', Math.round(needleBFraction * w), 14);
 
-    ctx.fillStyle = '#ffee00';
-    ctx.fillText('C', xC, 14);
+      ctx.fillStyle = '#ffee00';
+      ctx.fillText('C', xC, 14);
+    }
 
     // --- Centerline: subtle horizontal dashed line at vertical midpoint ---
     const midY = Math.round(h / 2);
@@ -181,8 +240,8 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Arclength ticks every 10mm along the bottom
-    if (arclengths.length > 0) {
+    // Arclength ticks every 10mm along the bottom (straightened mode only)
+    if (cprMode === 'straightened' && arclengths.length > 0) {
       const totalArc = arclengths[arclengths.length - 1];
       ctx.font = '9px -apple-system, sans-serif';
       ctx.fillStyle = '#98989d';
@@ -202,6 +261,16 @@
         ctx.fillText(`${mm}`, x, h - 12);
       }
     }
+
+    // Mode badge (top-right area, below W/L)
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.fillStyle = cprMode === 'curved' ? '#ff9500' : '#98989d';
+    ctx.textAlign = 'right';
+    ctx.fillText(
+      cprMode === 'curved' ? 'CURVED' : 'STRAIGHTENED',
+      w - 8,
+      24,
+    );
   }
 
   /** Full re-render: image + overlays. */
@@ -232,7 +301,7 @@
       return;
     }
 
-    // Centerline changed — rebuild frame
+    // Centerline changed -- rebuild frame
     frameReady = false;
     loading = true;
     clearTimeout(frameDebounce);
@@ -250,7 +319,7 @@
 
         await invoke('build_cpr_frame', {
           centerlineMm: centerlineZyx,
-          pixelsWide: 512,
+          pixelsWide: 768,
         });
 
         frameReady = true;
@@ -268,14 +337,15 @@
     return () => clearTimeout(frameDebounce);
   });
 
-  // ---- Phase 2: Render when rotation changes (uses cached frame) ----
+  // ---- Phase 2: Render when rotation or mode changes (uses cached frame) ----
 
   let renderDebounce: ReturnType<typeof setTimeout> | undefined;
   let renderingCpr = false;
 
   $effect(() => {
-    // Track rotation dep
+    // Track rotation and mode deps
     void rotationDeg;
+    void cprMode;
 
     if (!frameReady) return;
 
@@ -292,19 +362,32 @@
     if (!frameReady || renderingCpr) return;
     renderingCpr = true;
     try {
-      const result = await invoke<CprCommandResult>('render_cpr_image', {
-        rotationDeg,
-        widthMm: 25.0,
-        pixelsHigh: 256,
-        slabMm: 0.0, // single plane for interactive speed
-      });
+      let buffer: ArrayBuffer;
 
-      cprWidth = result.shape[1];
-      cprHeight = result.shape[0];
-      arclengths = result.arclengths;
-      cprImageData = decodeBase64Float32(result.image_base64);
+      if (cprMode === 'curved') {
+        buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
+          rotationDeg,
+          widthMm: 25.0,
+          pixelsWide: 768,
+          pixelsHigh: 384,
+          slabMm: 1.0,
+        });
+      } else {
+        buffer = await invoke<ArrayBuffer>('render_cpr_image', {
+          rotationDeg,
+          widthMm: 25.0,
+          pixelsHigh: 384,
+          slabMm: 1.0,
+        });
+      }
+
+      const decoded = decodeCprBinary(buffer);
+      cprWidth = decoded.width;
+      cprHeight = decoded.height;
+      arclengths = decoded.arclengths;
+      cprImageData = decoded.image;
     } catch (e) {
-      console.error('CprView: render_cpr_image failed', e);
+      console.error('CprView: render CPR failed', e);
     } finally {
       renderingCpr = false;
     }
@@ -320,6 +403,7 @@
     void needleBFraction;
     void needleCFraction;
     void arclengths;
+    void cprMode;
     // Track seed state for centerline overlay dots
     void seedStore.activeVesselData;
     void seedStore.selectedSeedIndex;
@@ -327,7 +411,7 @@
     repaintCanvas();
   });
 
-  // ---- Cross-section computation (uses cached frame) ----
+  // ---- Cross-section computation (uses cached frame, raw binary) ----
 
   let xsDebounce: ReturnType<typeof setTimeout> | undefined;
   let computingXs = false;
@@ -358,16 +442,14 @@
     if (!frameReady || computingXs) return;
     computingXs = true;
     try {
-      const results = await invoke<BatchCrossSectionItem[]>(
-        'render_cross_sections',
-        {
-          positionFractions: [needleAFraction, needleBFraction, needleCFraction],
-          rotationDeg,
-          widthMm: 15.0,
-          pixels: 128,
-        },
-      );
+      const buffer = await invoke<ArrayBuffer>('render_cross_sections', {
+        positionFractions: [needleAFraction, needleBFraction, needleCFraction],
+        rotationDeg,
+        widthMm: 15.0,
+        pixels: 128,
+      });
 
+      const results = decodeCrossSectionsBinary(buffer);
       if (results.length === 3) {
         batchXsA = results[0];
         batchXsB = results[1];
@@ -458,7 +540,7 @@
     dragging = false;
   }
 
-  /** Scroll wheel moves needle B position — scales with deltaY magnitude
+  /** Scroll wheel moves needle B position -- scales with deltaY magnitude
    *  so both mouse wheels (large deltaY) and touchpads (small deltaY) work. */
   function onCanvasWheel(event: WheelEvent) {
     event.preventDefault();
@@ -528,13 +610,13 @@
 <div class="flex h-full w-full flex-col bg-surface-secondary">
   <!-- Main layout: CPR + cross-sections -->
   <div class="flex min-h-0 flex-1">
-    <!-- Left: Straightened CPR (70%) -->
+    <!-- Left: CPR (70%) -->
     <div class="relative flex min-h-0 flex-[7] flex-col">
       <!-- CPR label -->
       <span
         class="pointer-events-none absolute left-2 top-1.5 z-10 text-[11px] font-semibold tracking-wider text-text-secondary/60"
       >
-        CPR — {seedStore.activeVessel}
+        CPR &mdash; {seedStore.activeVessel}
       </span>
 
       <!-- W/L display -->
@@ -584,7 +666,8 @@
             color="#ffee00"
             {windowCenter}
             {windowWidth}
-            imageBase64={batchXsA?.image_base64 ?? null}
+            batchImageData={batchXsA?.imageData ?? null}
+            batchPixels={batchXsA?.pixels ?? null}
             arcMmProp={batchXsA?.arc_mm ?? null}
           />
         </div>
@@ -597,7 +680,8 @@
             color="#00ffcc"
             {windowCenter}
             {windowWidth}
-            imageBase64={batchXsB?.image_base64 ?? null}
+            batchImageData={batchXsB?.imageData ?? null}
+            batchPixels={batchXsB?.pixels ?? null}
             arcMmProp={batchXsB?.arc_mm ?? null}
           />
         </div>
@@ -610,7 +694,8 @@
             color="#ffee00"
             {windowCenter}
             {windowWidth}
-            imageBase64={batchXsC?.image_base64 ?? null}
+            batchImageData={batchXsC?.imageData ?? null}
+            batchPixels={batchXsC?.pixels ?? null}
             arcMmProp={batchXsC?.arc_mm ?? null}
           />
         </div>
@@ -622,7 +707,7 @@
     </div>
   </div>
 
-  <!-- Bottom toolbar: rotation slider -->
+  <!-- Bottom toolbar: rotation slider + mode toggle -->
   <div
     class="flex h-8 shrink-0 items-center gap-3 border-t border-border bg-surface-secondary px-3"
   >
@@ -638,6 +723,28 @@
       />
       <span class="w-7 text-right tabular-nums">{rotationDeg}&deg;</span>
     </label>
+
+    <span class="text-[10px] text-text-secondary/40">|</span>
+
+    <!-- Curved / Straightened toggle -->
+    <button
+      class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
+        {cprMode === 'straightened'
+          ? 'bg-accent/20 text-accent'
+          : 'text-text-secondary/60 hover:text-text-secondary'}"
+      onclick={() => { cprMode = 'straightened'; }}
+    >
+      Straightened
+    </button>
+    <button
+      class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
+        {cprMode === 'curved'
+          ? 'bg-accent/20 text-accent'
+          : 'text-text-secondary/60 hover:text-text-secondary'}"
+      onclick={() => { cprMode = 'curved'; }}
+    >
+      Curved
+    </button>
 
     <span class="text-[10px] text-text-secondary/40">|</span>
 

@@ -14,6 +14,16 @@ pub struct CprResult {
     pub arclengths: Vec<f64>, // pixels_wide entries, mm
 }
 
+/// Result of a curved CPR computation.
+pub struct CurvedCprResult {
+    /// Flattened row-major image, shape (pixels_high, pixels_wide).
+    /// Pixels outside the vessel field of view are NAN.
+    pub image: Vec<f32>,
+    pub pixels_wide: usize,
+    pub pixels_high: usize,
+    pub arclengths: Vec<f64>,
+}
+
 /// Result of a cross-section computation.
 #[derive(serde::Serialize)]
 pub struct CrossSectionResult {
@@ -217,6 +227,171 @@ impl CprFrame {
             image,
             pixels,
             arc_mm,
+        }
+    }
+
+    /// Render curved CPR: the vessel follows its natural projected path on screen.
+    ///
+    /// Instead of straightening the vessel into columns, each centerline position
+    /// is projected onto a 2D viewing plane, and perpendicular strips are painted
+    /// at the projected location.
+    ///
+    /// - `view_width_mm`, `view_height_mm`: physical size of the output viewport.
+    /// - `pixels_wide`, `pixels_high`: output image dimensions.
+    pub fn render_curved_cpr(
+        &self,
+        volume: &Array3<f32>,
+        spacing: [f64; 3],
+        origin: [f64; 3],
+        rotation_deg: f64,
+        width_mm: f64,
+        pixels_wide: usize,
+        pixels_high: usize,
+        slab_mm: f64,
+    ) -> CurvedCprResult {
+        let n_cols = self.n_cols();
+        let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
+        let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+        // MIP slab sampling parameters
+        let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
+        let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
+            (0..n_slab_steps)
+                .map(|k| {
+                    -slab_mm / 2.0
+                        + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64)
+                })
+                .collect()
+        } else {
+            vec![0.0]
+        };
+
+        // --- Project centerline onto a 2D viewing plane ---
+        // The viewing plane is defined by the average binormal as the "into-screen"
+        // direction. We compute a right/up basis from that.
+        let avg_binormal = {
+            let mut sum = Vector3::new(0.0, 0.0, 0.0);
+            for b in &rot_binormals {
+                sum += b;
+            }
+            sum / n_cols as f64
+        };
+        let view_in = avg_binormal.normalize();
+
+        // view_right: perpendicular to view_in, preferring the horizontal plane
+        let world_up = Vector3::new(1.0, 0.0, 0.0); // z-axis is "up" in [z,y,x] coords
+        let view_right = {
+            let candidate = world_up.cross(&view_in);
+            if candidate.norm() > 1e-6 {
+                candidate.normalize()
+            } else {
+                // view_in is nearly parallel to world_up, use fallback
+                let fallback = Vector3::new(0.0, 1.0, 0.0);
+                fallback.cross(&view_in).normalize()
+            }
+        };
+        let view_up = view_in.cross(&view_right).normalize();
+
+        // Project each centerline position onto the 2D plane
+        let center_pos = Vector3::new(
+            self.positions[n_cols / 2][0],
+            self.positions[n_cols / 2][1],
+            self.positions[n_cols / 2][2],
+        );
+        let projected: Vec<(f64, f64)> = self.positions.iter().map(|p| {
+            let v = Vector3::new(p[0], p[1], p[2]) - center_pos;
+            (v.dot(&view_right), v.dot(&view_up))
+        }).collect();
+
+        // Find bounding box of projected centerline + lateral extent
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::MAX;
+        let mut max_y = f64::NEG_INFINITY;
+        for &(px, py) in &projected {
+            if px < min_x { min_x = px; }
+            if px > max_x { max_x = px; }
+            if py < min_y { min_y = py; }
+            if py > max_y { max_y = py; }
+        }
+        // Add lateral padding
+        min_x -= width_mm;
+        max_x += width_mm;
+        min_y -= width_mm;
+        max_y += width_mm;
+
+        let view_width = max_x - min_x;
+        let view_height = max_y - min_y;
+
+        // Scale factors: mm -> pixel
+        let sx = (pixels_wide as f64 - 1.0) / view_width;
+        let sy = (pixels_high as f64 - 1.0) / view_height;
+
+        // For each centerline position, paint perpendicular strip
+        let mut image = vec![f32::NAN; pixels_wide * pixels_high];
+
+        // Number of lateral samples per centerline position
+        let n_lateral = pixels_high; // same density as straightened
+
+        for j in 0..n_cols {
+            let pos = Vector3::new(
+                self.positions[j][0],
+                self.positions[j][1],
+                self.positions[j][2],
+            );
+            let n_vec = rot_normals[j];
+            let b_vec = rot_binormals[j];
+
+            for li in 0..n_lateral {
+                // Lateral offset: from +width_mm to -width_mm
+                let lateral =
+                    width_mm * (1.0 - 2.0 * (li as f64) / ((n_lateral - 1) as f64));
+
+                // 3D sample position
+                let sample_base = pos + lateral * n_vec;
+
+                // MIP across slab
+                let mut max_val = f32::NEG_INFINITY;
+                for &slab_off in &slab_offsets {
+                    let sample_mm = sample_base + slab_off * b_vec;
+                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+                    let val = trilinear(volume, vz, vy, vx);
+                    if !val.is_nan() && val > max_val {
+                        max_val = val;
+                    }
+                }
+                let val = if max_val == f32::NEG_INFINITY { f32::NAN } else { max_val };
+
+                // Project this 3D position onto the 2D viewing plane
+                let offset_3d = sample_base - center_pos;
+                let proj_x = offset_3d.dot(&view_right);
+                let proj_y = offset_3d.dot(&view_up);
+
+                // Map to pixel coordinates
+                let out_col = ((proj_x - min_x) * sx).round() as isize;
+                let out_row = ((max_y - proj_y) * sy).round() as isize; // flip y: top=max_y
+
+                if out_col >= 0 && out_col < pixels_wide as isize
+                    && out_row >= 0 && out_row < pixels_high as isize
+                {
+                    let idx = out_row as usize * pixels_wide + out_col as usize;
+                    // MIP compositing: keep the brightest value at each pixel
+                    if val.is_nan() {
+                        // skip
+                    } else if image[idx].is_nan() || val > image[idx] {
+                        image[idx] = val;
+                    }
+                }
+            }
+        }
+
+        CurvedCprResult {
+            image,
+            pixels_wide,
+            pixels_high,
+            arclengths: self.arclengths.clone(),
         }
     }
 

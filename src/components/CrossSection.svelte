@@ -2,8 +2,9 @@
   /**
    * Single cross-section canvas for a CPR needle position.
    *
-   * If `imageBase64` is provided (from parent batch computation), renders it
-   * directly. Otherwise falls back to invoking Rust individually.
+   * If `batchImageData` is provided (from parent batch computation as raw
+   * Float32Array), renders it directly. Otherwise falls back to invoking
+   * Rust individually (legacy base64 path).
    */
   import { invoke } from '@tauri-apps/api/core';
 
@@ -15,8 +16,10 @@
     color: string;
     windowCenter?: number;
     windowWidth?: number;
-    /** Pre-computed base64 f32 image data from batch call. */
-    imageBase64?: string | null;
+    /** Pre-computed raw f32 image data from batch call. */
+    batchImageData?: Float32Array | null;
+    /** Pixel size of the batch image. */
+    batchPixels?: number | null;
     /** Pre-computed arc-length in mm from batch call. */
     arcMmProp?: number | null;
   };
@@ -29,7 +32,8 @@
     color,
     windowCenter = 40,
     windowWidth = 400,
-    imageBase64 = null,
+    batchImageData = null,
+    batchPixels = null,
     arcMmProp = null,
   }: Props = $props();
 
@@ -78,26 +82,25 @@
 
   // --- Render pre-computed batch data when provided ---
   $effect(() => {
-    const b64 = imageBase64;
+    const imgData = batchImageData;
+    const sz = batchPixels;
     const am = arcMmProp;
     const wc = windowCenter;
     const ww = windowWidth;
 
-    if (b64 && canvas) {
-      const data = decodeBase64Float32(b64);
-      const sz = Math.round(Math.sqrt(data.length));
+    if (imgData && sz && canvas) {
       pixels = sz;
       arcMm = am;
-      renderToCanvas(canvas, data, sz, sz, wc, ww);
+      renderToCanvas(canvas, imgData, sz, sz, wc, ww);
     }
   });
 
-  // --- Fallback: invoke individually if no batch data ---
+  // --- Fallback: invoke individually if no batch data (legacy base64 path) ---
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
   $effect(() => {
     // Only self-invoke if no batch data provided
-    if (imageBase64) return;
+    if (batchImageData) return;
 
     const cl = centerlineMm;
     const pf = positionFraction;
