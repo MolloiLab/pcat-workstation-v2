@@ -377,7 +377,7 @@
           rotationDeg,
           widthMm: 25.0,
           pixelsHigh: 384,
-          slabMm: 1.0,
+          slabMm: 0.0,
         });
       }
 
