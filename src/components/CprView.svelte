@@ -375,7 +375,7 @@
   /** Scroll wheel moves needle B position by 2% per step. */
   function onCanvasWheel(event: WheelEvent) {
     event.preventDefault();
-    const delta = event.deltaY > 0 ? 0.02 : -0.02;
+    const delta = event.deltaY > 0 ? 0.005 : -0.005;
     needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
   }
 

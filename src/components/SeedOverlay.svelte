@@ -301,11 +301,11 @@
     <circle
       cx={projectedGhostDot.cx}
       cy={projectedGhostDot.cy}
-      r="5"
+      r="3"
       fill={projectedGhostDot.color}
       fill-opacity="0.5"
       stroke={projectedGhostDot.color}
-      stroke-width="1.5"
+      stroke-width="1"
       stroke-opacity="0.5"
     />
   {/if}
@@ -319,13 +319,13 @@
     {#if seed.isSelected}
       {#if seed.type === 'ostium'}
         <rect
-          x={seed.cx - 7}
-          y={seed.cy - 7}
-          width="14"
-          height="14"
+          x={seed.cx - 5}
+          y={seed.cy - 5}
+          width="10"
+          height="10"
           fill="none"
           stroke="white"
-          stroke-width="3"
+          stroke-width="2"
           stroke-opacity="0.5"
           rx="1"
         />
@@ -333,10 +333,10 @@
         <circle
           cx={seed.cx}
           cy={seed.cy}
-          r="7"
+          r="5"
           fill="none"
           stroke="white"
-          stroke-width="3"
+          stroke-width="2"
           stroke-opacity="0.5"
         />
       {/if}
@@ -345,14 +345,14 @@
     {#if seed.type === 'ostium'}
       <!-- Ostium: filled square -->
       <rect
-        x={seed.cx - 5}
-        y={seed.cy - 5}
-        width="10"
-        height="10"
+        x={seed.cx - 3}
+        y={seed.cy - 3}
+        width="6"
+        height="6"
         fill={color}
-        fill-opacity={opacity * 0.8}
+        fill-opacity={opacity * 0.9}
         stroke={color}
-        stroke-width="1.5"
+        stroke-width="1"
         stroke-opacity={opacity}
       />
     {:else}
@@ -360,11 +360,11 @@
       <circle
         cx={seed.cx}
         cy={seed.cy}
-        r="4.5"
+        r="2.5"
         fill={color}
-        fill-opacity={opacity * 0.8}
+        fill-opacity={opacity * 0.9}
         stroke={color}
-        stroke-width="1.5"
+        stroke-width="1"
         stroke-opacity={opacity}
       />
     {/if}
