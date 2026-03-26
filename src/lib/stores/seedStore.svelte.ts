@@ -124,8 +124,9 @@ export const seedStore = {
       { position, type: 'waypoint' },
     ]);
     vesselData[v] = recomputeCenterline({ seeds: newSeeds, centerline: null });
-    // Auto-select the newly placed seed so navigation triggers
-    selectedSeedIndex = newSeeds.length - 1;
+    // Don't auto-select — it causes cascading effects that freeze the UI.
+    // Navigation only happens when user explicitly clicks an existing seed.
+    selectedSeedIndex = null;
   },
 
   /**

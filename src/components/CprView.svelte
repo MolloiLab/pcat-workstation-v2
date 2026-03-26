@@ -385,15 +385,26 @@
   });
 
   // ---- Needle B → MPR navigation ----
-  // Whenever needleBFraction changes, compute the world position on the
-  // centerline and notify the parent so MPR views can navigate there.
+  // Only fire when needleBFraction changes (not on seed data changes).
+  // Use untrack for seed data to avoid reactive cascade.
+  let lastNavFrac = -1;
+  let navDebounce: ReturnType<typeof setTimeout>;
+
   $effect(() => {
     const frac = needleBFraction;
-    const cl = seedStore.activeVesselData?.centerline;
-    if (!cl || cl.length < 2 || !onNeedleMove) return;
-    const idx = Math.round(frac * (cl.length - 1));
-    const pos = cl[Math.min(idx, cl.length - 1)];
-    onNeedleMove(pos);
+    if (Math.abs(frac - lastNavFrac) < 0.001) return;
+    lastNavFrac = frac;
+
+    clearTimeout(navDebounce);
+    navDebounce = setTimeout(() => {
+      const cl = seedStore.activeVesselData?.centerline;
+      if (!cl || cl.length < 2 || !onNeedleMove) return;
+      const idx = Math.round(frac * (cl.length - 1));
+      const pos = cl[Math.min(idx, cl.length - 1)];
+      onNeedleMove(pos);
+    }, 50);
+
+    return () => clearTimeout(navDebounce);
   });
 
   // ---- Needle dragging ----
