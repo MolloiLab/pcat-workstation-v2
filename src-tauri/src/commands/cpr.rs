@@ -274,7 +274,7 @@ pub async fn get_cpr_projection_info(
     // Rotate frame
     let (rot_normals, _rot_binormals) = frame.rotated_frame(rotation_deg);
 
-    // Compute view basis via PCA — minimizes projection self-intersection
+    // Fixed PCA viewing plane (same as curved CPR renderer)
     let (_view_forward, view_right, view_up) = curved_cpr::compute_view_basis_pca(&frame.positions);
 
     // Project centerline to 2D

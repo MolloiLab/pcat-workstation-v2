@@ -446,8 +446,9 @@ pub(crate) fn render_curved_direct(
     let n = positions.len();
     assert!(n >= 2);
 
-    // 1. Viewing plane from rotated binormals (rotates with the slider).
-    // Safe to use because 3D nearest-point lookup is immune to fold-back.
+    // 1. Viewing plane from rotated binormals — rotates with the slider.
+    // This ensures the lateral sampling direction is always visible on screen.
+    // 3D segment search prevents fold-back artifacts.
     let (_vf, view_right, view_up) = compute_view_basis(binormals);
 
     // 2. Project centerline for bounding box

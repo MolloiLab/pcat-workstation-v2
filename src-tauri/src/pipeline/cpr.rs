@@ -904,9 +904,10 @@ mod tests {
         let out_dir = Path::new("/Users/shunie/Developer/PCAT/pcat-workstation-v2/test_output");
         std::fs::create_dir_all(out_dir).unwrap();
 
+        // Test with width=25 (50mm total, matching syngo.via FOV)
         for rot in [0.0, 90.0, 180.0, 270.0] {
             let result = frame.render_curved_cpr(
-                &vol.data, vol.spacing, vol.origin, rot, 40.0, 768, 384, 1.0,
+                &vol.data, vol.spacing, vol.origin, rot, 25.0, 768, 384, 1.0,
             );
             let valid: Vec<f32> = result.image.iter().copied().filter(|v| !v.is_nan()).collect();
             let nan_pct = 100.0 * (result.image.len() - valid.len()) as f64 / result.image.len() as f64;

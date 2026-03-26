@@ -32,7 +32,7 @@
   import CrossSection from './CrossSection.svelte';
 
   // ---- Constants ----
-  const CPR_WIDTH_MM = 40.0;
+  const CPR_WIDTH_MM = 25.0;
 
   // ---- Reactive state ----
   let cprCanvas: HTMLCanvasElement | undefined = $state();
