@@ -41,11 +41,10 @@ pub struct CrossSectionResult {
 ///
 /// Built once when the centerline changes (~100ms), then reused for
 /// rotation/needle changes (<10ms per render).
-#[allow(dead_code)]
 pub struct CprFrame {
     pub positions: Vec<[f64; 3]>,    // [z,y,x] in mm, n_cols entries
     pub tangents: Vec<Vector3<f64>>,
-    pub normals: Vec<Vector3<f64>>,  // RMF (Double Reflection Method)
+    pub normals: Vec<Vector3<f64>>,  // Bishop frame (parallel transport)
     pub binormals: Vec<Vector3<f64>>,
     pub arclengths: Vec<f64>,
 }
@@ -231,12 +230,14 @@ impl CprFrame {
         }
     }
 
-    /// Render curved CPR using pixel-driven approach: for each output pixel,
-    /// find the nearest projected centerline point and sample the 3D volume
-    /// at the corresponding position offset by the signed perpendicular distance.
+    /// Render curved CPR: the vessel follows its natural projected path on screen.
     ///
-    /// This eliminates gaps and fan artifacts from the old centerline-driven
-    /// strip-painting approach.
+    /// Instead of straightening the vessel into columns, each centerline position
+    /// is projected onto a 2D viewing plane, and perpendicular strips are painted
+    /// at the projected location.
+    ///
+    /// - `view_width_mm`, `view_height_mm`: physical size of the output viewport.
+    /// - `pixels_wide`, `pixels_high`: output image dimensions.
     pub fn render_curved_cpr(
         &self,
         volume: &Array3<f32>,
@@ -284,6 +285,7 @@ impl CprFrame {
             if candidate.norm() > 1e-6 {
                 candidate.normalize()
             } else {
+                // view_in is nearly parallel to world_up, use fallback
                 let fallback = Vector3::new(0.0, 1.0, 0.0);
                 fallback.cross(&view_in).normalize()
             }
@@ -322,92 +324,66 @@ impl CprFrame {
         let view_height = max_y - min_y;
 
         // Scale factors: mm -> pixel
-        let sx = if pixels_wide > 1 { (pixels_wide as f64 - 1.0) / view_width } else { 1.0 };
-        let sy = if pixels_high > 1 { (pixels_high as f64 - 1.0) / view_height } else { 1.0 };
+        let sx = (pixels_wide as f64 - 1.0) / view_width;
+        let sy = (pixels_high as f64 - 1.0) / view_height;
 
+        // For each centerline position, paint perpendicular strip
         let mut image = vec![f32::NAN; pixels_wide * pixels_high];
 
-        // Width threshold squared for early rejection
-        let width_sq = width_mm * width_mm;
+        // Number of lateral samples per centerline position
+        let n_lateral = pixels_high; // same density as straightened
 
-        // Pixel-driven: for each output pixel, find nearest centerline point
-        for row in 0..pixels_high {
-            // Map pixel row to mm coordinate (flip y: top = max_y)
-            let py_mm = max_y - row as f64 / sy;
+        for j in 0..n_cols {
+            let pos = Vector3::new(
+                self.positions[j][0],
+                self.positions[j][1],
+                self.positions[j][2],
+            );
+            let n_vec = rot_normals[j];
+            let b_vec = rot_binormals[j];
 
-            // Track best index from previous column for locality hint
-            let mut hint_idx: usize = 0;
+            for li in 0..n_lateral {
+                // Lateral offset: from +width_mm to -width_mm
+                let lateral =
+                    width_mm * (1.0 - 2.0 * (li as f64) / ((n_lateral - 1) as f64));
 
-            for col in 0..pixels_wide {
-                // Map pixel column to mm coordinate
-                let px_mm = min_x + col as f64 / sx;
+                // 3D sample position
+                let sample_base = pos + lateral * n_vec;
 
-                // Find nearest projected centerline point (brute force over n_cols)
-                // Start search from hint (previous best) and expand outward
-                let mut best_idx = hint_idx;
-                let dx0 = projected[hint_idx].0 - px_mm;
-                let dy0 = projected[hint_idx].1 - py_mm;
-                let mut best_dist_sq = dx0 * dx0 + dy0 * dy0;
-
-                for k in 0..n_cols {
-                    let dx = projected[k].0 - px_mm;
-                    let dy = projected[k].1 - py_mm;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 < best_dist_sq {
-                        best_dist_sq = d2;
-                        best_idx = k;
-                    }
-                }
-
-                hint_idx = best_idx;
-
-                // Skip if too far from centerline
-                if best_dist_sq > width_sq {
-                    continue;
-                }
-
-                // Compute signed perpendicular distance along local normal direction
-                let centerline_2d = projected[best_idx];
-                let delta = (px_mm - centerline_2d.0, py_mm - centerline_2d.1);
-
-                // Project the 3D normal at best_idx into the 2D viewing plane
-                let n_3d = rot_normals[best_idx];
-                let n_proj_x = n_3d.dot(&view_right);
-                let n_proj_y = n_3d.dot(&view_up);
-                let n_len = (n_proj_x * n_proj_x + n_proj_y * n_proj_y).sqrt();
-                if n_len < 1e-10 {
-                    continue;
-                }
-
-                // Signed distance along the projected normal direction
-                let signed_d = (delta.0 * n_proj_x + delta.1 * n_proj_y) / n_len;
-
-                // Sample 3D volume: centerline position + signed_d * normal
-                let pos = Vector3::new(
-                    self.positions[best_idx][0],
-                    self.positions[best_idx][1],
-                    self.positions[best_idx][2],
-                );
-                let sample_mm = pos + signed_d * rot_normals[best_idx];
-
-                // MIP slab along binormal
+                // MIP across slab
                 let mut max_val = f32::NEG_INFINITY;
                 for &slab_off in &slab_offsets {
-                    let s = sample_mm + slab_off * rot_binormals[best_idx];
-                    let vz = (s[0] - origin[0]) * inv_spacing[0];
-                    let vy = (s[1] - origin[1]) * inv_spacing[1];
-                    let vx = (s[2] - origin[2]) * inv_spacing[2];
+                    let sample_mm = sample_base + slab_off * b_vec;
+                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
                     let val = trilinear(volume, vz, vy, vx);
                     if !val.is_nan() && val > max_val {
                         max_val = val;
                     }
                 }
+                let val = if max_val == f32::NEG_INFINITY { f32::NAN } else { max_val };
 
-                image[row * pixels_wide + col] = if max_val == f32::NEG_INFINITY {
-                    f32::NAN
-                } else {
-                    max_val
-                };
+                // Project this 3D position onto the 2D viewing plane
+                let offset_3d = sample_base - center_pos;
+                let proj_x = offset_3d.dot(&view_right);
+                let proj_y = offset_3d.dot(&view_up);
+
+                // Map to pixel coordinates
+                let out_col = ((proj_x - min_x) * sx).round() as isize;
+                let out_row = ((max_y - proj_y) * sy).round() as isize; // flip y: top=max_y
+
+                if out_col >= 0 && out_col < pixels_wide as isize
+                    && out_row >= 0 && out_row < pixels_high as isize
+                {
+                    let idx = out_row as usize * pixels_wide + out_col as usize;
+                    // MIP compositing: keep the brightest value at each pixel
+                    if val.is_nan() {
+                        // skip
+                    } else if image[idx].is_nan() || val > image[idx] {
+                        image[idx] = val;
+                    }
+                }
             }
         }
 
@@ -511,13 +487,10 @@ impl CprFrame {
 // Bishop frame (parallel transport)
 // ---------------------------------------------------------------------------
 
-/// Compute Rotation Minimizing Frame using the Double Reflection Method
-/// (Wang et al. 2008). More numerically stable than simple projection-based
-/// parallel transport — no error accumulation, even over long curves.
+/// Compute Bishop (parallel-transport) frame along a sequence of tangent
+/// vectors. Returns (normals, binormals).
 fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
     let n = tangents.len();
-    if n == 0 { return (vec![], vec![]); }
-
     let mut normals = Vec::with_capacity(n);
     let mut binormals = Vec::with_capacity(n);
 
@@ -525,44 +498,39 @@ fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f6
     let t0 = tangents[0];
     let world_y = Vector3::new(0.0, 1.0, 0.0);
     let world_x = Vector3::new(1.0, 0.0, 0.0);
-    let seed = if t0.cross(&world_y).norm() > 0.1 { world_y } else { world_x };
+
+    let seed = if t0.cross(&world_y).norm() > 0.1 {
+        world_y
+    } else {
+        world_x
+    };
     let n0 = t0.cross(&seed).normalize();
     let b0 = t0.cross(&n0).normalize();
     normals.push(n0);
     binormals.push(b0);
 
-    // Double Reflection Method
-    for i in 0..n - 1 {
-        let ti = tangents[i];
-        let ti1 = tangents[i + 1];
-        let ni = normals[i];
+    // Parallel transport: project previous normal onto the plane perp to current tangent
+    for i in 1..n {
+        let t = tangents[i];
+        let prev_n = normals[i - 1];
 
-        // Reflection 1: across the bisector plane of T[i] and T[i+1]
-        let v1 = ti1 - ti;
-        let c1 = v1.dot(&v1);
-        if c1 < 1e-30 {
-            // Tangents are identical — frame doesn't change
-            normals.push(ni);
-            binormals.push(ti1.cross(&ni).normalize());
-            continue;
-        }
-        let n_mid = ni - (2.0 / c1) * v1.dot(&ni) * v1;
-        let t_mid = ti - (2.0 / c1) * v1.dot(&ti) * v1;
-
-        // Reflection 2: across the plane perpendicular to T[i+1]
-        let v2 = ti1 - t_mid;
-        let c2 = v2.dot(&v2);
-        let ni1 = if c2 < 1e-30 {
-            n_mid
+        // Remove component along T[i]
+        let projected = prev_n - prev_n.dot(&t) * t;
+        let pn = projected.norm();
+        let ni = if pn > 1e-12 {
+            projected / pn
         } else {
-            n_mid - (2.0 / c2) * v2.dot(&n_mid) * v2
+            // Degenerate: tangent changed drastically, re-seed
+            let s = if t.cross(&world_y).norm() > 0.1 {
+                world_y
+            } else {
+                world_x
+            };
+            t.cross(&s).normalize()
         };
-
-        // Normalize to prevent any drift (should be near unit already)
-        let ni1 = ni1.normalize();
-        let bi1 = ti1.cross(&ni1).normalize();
-        normals.push(ni1);
-        binormals.push(bi1);
+        let bi = t.cross(&ni).normalize();
+        normals.push(ni);
+        binormals.push(bi);
     }
 
     (normals, binormals)
