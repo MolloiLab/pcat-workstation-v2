@@ -15,7 +15,7 @@
   async function handleSaveSeeds() {
     try {
       const json = seedStore.exportJson();
-      const path = await saveSeeds(json);
+      await saveSeeds(json);
       saveStatus = 'Saved';
       setTimeout(() => { saveStatus = ''; }, 2000);
     } catch (e) {

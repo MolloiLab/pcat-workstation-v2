@@ -95,19 +95,27 @@
     }
   }
 
+  /** Counter for unique volume IDs across loads. */
+  let volumeCounter = 0;
+
   /** Load DICOM from a specific folder path. */
   async function loadFromPath(path: string) {
     errorMessage = '';
     showRecent = false;
 
     try {
+      // Clear previous state
+      seedStore.clearAll();
+      volumeStore.clear();
+
       volumeStore.setLoading(true);
       volumeStore.setLoadProgress(0);
 
       const info = await loadDicom(path);
 
+      volumeCounter++;
       const meta: VolumeMetadata = {
-        volumeId: 'vol-1',
+        volumeId: `vol-${volumeCounter}`,
         shape: info.shape,
         spacing: info.spacing,
         origin: info.origin,

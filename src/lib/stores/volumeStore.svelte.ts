@@ -5,6 +5,8 @@
  * Import `volumeStore` from any `.svelte` or `.svelte.ts` file.
  */
 
+import { cache } from '@cornerstonejs/core';
+
 export type VolumeMetadata = {
   volumeId: string;
   /** Dimensions in Python/NumPy order: [Z, Y, X] (slices, rows, columns). */
@@ -53,6 +55,10 @@ export const volumeStore = {
     loadProgress = v;
   },
   clear() {
+    // Purge old volume from cornerstone cache
+    if (cornerstoneVolumeId) {
+      try { cache.removeVolumeLoadObject(cornerstoneVolumeId); } catch { /* ignore */ }
+    }
     currentVolume = null;
     cornerstoneVolumeId = null;
     loading = false;
