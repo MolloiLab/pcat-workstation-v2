@@ -8,16 +8,16 @@
 import { computeSplineCenterline } from '$lib/spline';
 
 export type Vessel = 'LAD' | 'LCx' | 'RCA';
-export type SeedType = 'ostium' | 'waypoint';
 
 export type Seed = {
   position: [number, number, number];
-  type: SeedType;
 };
 
 export type VesselData = {
   seeds: Seed[];
   centerline: [number, number, number][] | null;
+  /** Fractional position (0..1) along the centerline marking the ostium. */
+  ostiumFraction: number | null;
 };
 
 /** Vessel display colors. */
@@ -31,30 +31,19 @@ const ALL_VESSELS: Vessel[] = ['RCA', 'LAD', 'LCx'];
 
 /** Create a fresh empty vessel data object. */
 function emptyVesselData(): VesselData {
-  return { seeds: [], centerline: null };
+  return { seeds: [], centerline: null, ostiumFraction: null };
 }
 
 /**
- * Recompute the centerline from seeds.
- * First seed is ostium, rest are waypoints — all positions feed the spline.
+ * Recompute the centerline from seeds (preserving ostiumFraction).
  */
 function recomputeCenterline(data: VesselData): VesselData {
   if (data.seeds.length < 2) {
-    return { seeds: data.seeds, centerline: null };
+    return { ...data, centerline: null };
   }
   const points = data.seeds.map((s) => s.position);
   const centerline = computeSplineCenterline(points);
-  return { seeds: data.seeds, centerline };
-}
-
-/**
- * Assign seed types: first seed is 'ostium', rest are 'waypoint'.
- */
-function assignSeedTypes(seeds: Seed[]): Seed[] {
-  return seeds.map((s, i) => ({
-    ...s,
-    type: i === 0 ? 'ostium' : 'waypoint',
-  }));
+  return { ...data, centerline };
 }
 
 // --- Reactive state ---
@@ -119,11 +108,8 @@ export const seedStore = {
   addSeed(position: [number, number, number]) {
     const v = activeVessel;
     const current = vesselData[v];
-    const newSeeds = assignSeedTypes([
-      ...current.seeds,
-      { position, type: 'waypoint' },
-    ]);
-    vesselData[v] = recomputeCenterline({ seeds: newSeeds, centerline: null });
+    const newSeeds = [...current.seeds, { position }];
+    vesselData[v] = recomputeCenterline({ ...current, seeds: newSeeds });
     // Don't auto-select — it causes cascading effects that freeze the UI.
     // Navigation only happens when user explicitly clicks an existing seed.
     selectedSeedIndex = null;
@@ -138,11 +124,8 @@ export const seedStore = {
     const current = vesselData[v];
     if (index < 0 || index > current.seeds.length) return;
     const newSeeds = [...current.seeds];
-    newSeeds.splice(index, 0, { position, type: 'waypoint' });
-    vesselData[v] = recomputeCenterline({
-      seeds: assignSeedTypes(newSeeds),
-      centerline: null,
-    });
+    newSeeds.splice(index, 0, { position });
+    vesselData[v] = recomputeCenterline({ ...current, seeds: newSeeds });
     // Select the newly inserted seed
     selectedSeedIndex = index;
   },
@@ -154,10 +137,8 @@ export const seedStore = {
     const v = activeVessel;
     const current = vesselData[v];
     if (index < 0 || index >= current.seeds.length) return;
-    const newSeeds = assignSeedTypes(
-      current.seeds.filter((_, i) => i !== index),
-    );
-    vesselData[v] = recomputeCenterline({ seeds: newSeeds, centerline: null });
+    const newSeeds = current.seeds.filter((_, i) => i !== index);
+    vesselData[v] = recomputeCenterline({ ...current, seeds: newSeeds });
     // Clear selection if the removed seed was selected, or adjust index
     if (selectedSeedIndex !== null) {
       if (selectedSeedIndex === index) {
@@ -178,7 +159,41 @@ export const seedStore = {
     const newSeeds = current.seeds.map((s, i) =>
       i === index ? { ...s, position } : s,
     );
-    vesselData[v] = recomputeCenterline({ seeds: newSeeds, centerline: null });
+    vesselData[v] = recomputeCenterline({ ...current, seeds: newSeeds });
+  },
+
+  // --- Ostium fraction ---
+
+  /** Set the ostium marker at a fractional position along the active vessel's centerline. */
+  setOstiumFraction(fraction: number | null) {
+    const v = activeVessel;
+    vesselData[v] = { ...vesselData[v], ostiumFraction: fraction };
+  },
+
+  /** Get the ostium fraction for a vessel. */
+  getOstiumFraction(vessel: Vessel): number | null {
+    return vesselData[vessel].ostiumFraction;
+  },
+
+  /**
+   * Get the interpolated 3D world position at the ostium for a vessel.
+   * Returns null if no ostiumFraction is set or no centerline exists.
+   */
+  getOstiumWorldPosForVessel(vessel: Vessel): [number, number, number] | null {
+    const data = vesselData[vessel];
+    if (data.ostiumFraction === null || !data.centerline || data.centerline.length < 2) {
+      return null;
+    }
+    const cl = data.centerline;
+    const fIdx = data.ostiumFraction * (cl.length - 1);
+    const i0 = Math.floor(fIdx);
+    const i1 = Math.min(i0 + 1, cl.length - 1);
+    const t = fIdx - i0;
+    return [
+      cl[i0][0] + t * (cl[i1][0] - cl[i0][0]),
+      cl[i0][1] + t * (cl[i1][1] - cl[i0][1]),
+      cl[i0][2] + t * (cl[i1][2] - cl[i0][2]),
+    ];
   },
 
   // --- Bulk operations ---

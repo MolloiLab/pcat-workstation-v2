@@ -21,7 +21,14 @@
    */
   import { invoke } from '@tauri-apps/api/core';
   import { navigateToWorldPos } from '$lib/navigation';
-  import { seedStore } from '$lib/stores/seedStore.svelte';
+  import { seedStore, VESSEL_COLORS } from '$lib/stores/seedStore.svelte';
+  import {
+    type CprProjectionInfo,
+    worldToStraightenedCpr,
+    worldToCurvedCpr,
+    straightenedCprToWorld,
+    curvedCprToWorld,
+  } from '$lib/cprProjection';
   import CrossSection from './CrossSection.svelte';
 
   // ---- Reactive state ----
@@ -49,6 +56,13 @@
 
   // Phase 1: frame readiness
   let frameReady = $state(false);
+
+  // Projection info for seed overlay (fetched after each render)
+  let projectionInfo = $state<CprProjectionInfo | null>(null);
+
+  // Seed dragging state on CPR canvas
+  let draggingSeedIndex = $state<number | null>(null);
+  let hoverSeedIndex = $state<number | null>(null);
 
   // Current centerline from seed store
   let centerline = $derived(seedStore.activeVesselData?.centerline ?? null);
@@ -262,6 +276,83 @@
       }
     }
 
+    // --- Ostium marker ---
+    const ostiumFrac = seedStore.getOstiumFraction(seedStore.activeVessel);
+    if (ostiumFrac !== null) {
+      const ox = Math.round(ostiumFrac * w);
+
+      // Dashed magenta vertical line
+      ctx.beginPath();
+      ctx.strokeStyle = '#ff00ff';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.moveTo(ox, 0);
+      ctx.lineTo(ox, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // "O" label at top
+      ctx.font = 'bold 11px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff00ff';
+      ctx.fillText('O', ox, 14);
+    }
+
+    // --- Seed markers on CPR ---
+    if (projectionInfo) {
+      const vessel = seedStore.activeVessel;
+      const data = seedStore.activeVesselData;
+      const color = VESSEL_COLORS[vessel];
+      const selectedIdx = seedStore.selectedSeedIndex;
+
+      for (let i = 0; i < data.seeds.length; i++) {
+        const seedPos = data.seeds[i].position;
+        // Seeds are in [x,y,z] world coords; projection expects [z,y,x]
+        const seedZyx: [number, number, number] = [seedPos[2], seedPos[1], seedPos[0]];
+
+        const projected = cprMode === 'curved'
+          ? worldToCurvedCpr(seedZyx, projectionInfo, w, h)
+          : worldToStraightenedCpr(seedZyx, projectionInfo, w, h);
+
+        if (!projected) continue;
+        const [cx, cy] = projected;
+
+        const isSelected = i === selectedIdx;
+        const isHovered = i === hoverSeedIndex;
+        const radius = isSelected || isHovered ? 5 : 4;
+
+        // Glow ring for selected/hovered
+        if (isSelected) {
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else if (isHovered) {
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius + 2, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+
+        // Seed circle
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        // Index label
+        ctx.font = 'bold 9px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'white';
+        ctx.fillText(`${i}`, cx, cy - radius - 3);
+      }
+    }
+
     // Mode badge (top-right area, below W/L)
     ctx.font = '9px -apple-system, sans-serif';
     ctx.fillStyle = cprMode === 'curved' ? '#ff9500' : '#98989d';
@@ -367,7 +458,7 @@
       if (cprMode === 'curved') {
         buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
           rotationDeg,
-          widthMm: 25.0,
+          widthMm: 40.0,
           pixelsWide: 768,
           pixelsHigh: 384,
           slabMm: 1.0,
@@ -375,7 +466,7 @@
       } else {
         buffer = await invoke<ArrayBuffer>('render_cpr_image', {
           rotationDeg,
-          widthMm: 25.0,
+          widthMm: 40.0,
           pixelsHigh: 384,
           slabMm: 1.0,
         });
@@ -386,10 +477,30 @@
       cprHeight = decoded.height;
       arclengths = decoded.arclengths;
       cprImageData = decoded.image;
+
+      // Fetch projection info for seed overlay (lightweight JSON)
+      fetchProjectionInfo();
     } catch (e) {
       console.error('CprView: render CPR failed', e);
     } finally {
       renderingCpr = false;
+    }
+  }
+
+  /** Fetch projection info from Rust for seed overlay mapping. */
+  async function fetchProjectionInfo() {
+    if (!frameReady) {
+      projectionInfo = null;
+      return;
+    }
+    try {
+      projectionInfo = await invoke<CprProjectionInfo>('get_cpr_projection_info', {
+        rotationDeg,
+        widthMm: 40.0,
+      });
+    } catch (e) {
+      console.error('CprView: get_cpr_projection_info failed', e);
+      projectionInfo = null;
     }
   }
 
@@ -407,6 +518,11 @@
     // Track seed state for centerline overlay dots
     void seedStore.activeVesselData;
     void seedStore.selectedSeedIndex;
+    // Track ostium for overlay update
+    void seedStore.getOstiumFraction(seedStore.activeVessel);
+    // Track projection info for seed overlay
+    void projectionInfo;
+    void hoverSeedIndex;
 
     repaintCanvas();
   });
@@ -506,14 +622,68 @@
 
   let dragging = $state(false);
 
+  /** Find the seed index nearest to the given canvas position, within hitRadius. */
+  function findSeedAtCanvasPos(canvasX: number, canvasY: number, hitRadius: number): number | null {
+    if (!projectionInfo || !cprCanvas) return null;
+    const data = seedStore.activeVesselData;
+    const w = cprCanvas.width;
+    const h = cprCanvas.height;
+
+    let bestIdx: number | null = null;
+    let bestDist = hitRadius * hitRadius;
+
+    for (let i = 0; i < data.seeds.length; i++) {
+      const seedPos = data.seeds[i].position;
+      const seedZyx: [number, number, number] = [seedPos[2], seedPos[1], seedPos[0]];
+      const projected = cprMode === 'curved'
+        ? worldToCurvedCpr(seedZyx, projectionInfo, w, h)
+        : worldToStraightenedCpr(seedZyx, projectionInfo, w, h);
+      if (!projected) continue;
+
+      // Scale from canvas pixels to CSS pixels
+      const rect = cprCanvas.getBoundingClientRect();
+      const scaleX = rect.width / w;
+      const scaleY = rect.height / h;
+      const dx = canvasX - projected[0] * scaleX;
+      const dy = canvasY - projected[1] * scaleY;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
   function onCanvasMouseDown(event: MouseEvent) {
     if (event.button !== 0 || !cprCanvas) return;
 
+    // Shift+click sets ostium marker
+    if (event.shiftKey) {
+      const rect = cprCanvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const fraction = Math.max(0, Math.min(1, x / rect.width));
+      seedStore.setOstiumFraction(fraction);
+      event.preventDefault();
+      return;
+    }
+
     const rect = cprCanvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+
+    // Priority 2: Check if near a seed (8px hit radius)
+    const seedIdx = findSeedAtCanvasPos(x, y, 8);
+    if (seedIdx !== null) {
+      seedStore.selectSeed(seedIdx);
+      draggingSeedIndex = seedIdx;
+      event.preventDefault();
+      return;
+    }
+
     const fraction = x / rect.width;
 
-    // Check if click is near needle B (within ~8px)
+    // Priority 3: Check if click is near needle B (within ~8px)
     const bPixel = needleBFraction * rect.width;
     if (Math.abs(x - bPixel) < 8) {
       dragging = true;
@@ -526,14 +696,47 @@
   }
 
   function onCanvasMouseMove(event: MouseEvent) {
-    if (!dragging || !cprCanvas) return;
+    if (!cprCanvas) return;
     const rect = cprCanvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
-    needleBFraction = Math.max(0, Math.min(1, x / rect.width));
-    navigateToNeedlePos();
+    const y = event.clientY - rect.top;
+
+    // Seed dragging takes priority
+    if (draggingSeedIndex !== null && projectionInfo) {
+      // Map canvas CSS position to canvas pixel position
+      const canvasPixelX = (x / rect.width) * cprCanvas.width;
+      const canvasPixelY = (y / rect.height) * cprCanvas.height;
+
+      // Unproject to 3D
+      const worldZyx = cprMode === 'curved'
+        ? curvedCprToWorld(canvasPixelX, canvasPixelY, projectionInfo, cprCanvas.width, cprCanvas.height)
+        : straightenedCprToWorld(canvasPixelX, canvasPixelY, projectionInfo, cprCanvas.width, cprCanvas.height);
+
+      // Convert [z,y,x] back to [x,y,z] for seedStore
+      const worldXyz: [number, number, number] = [worldZyx[2], worldZyx[1], worldZyx[0]];
+      seedStore.moveSeed(draggingSeedIndex, worldXyz);
+      return;
+    }
+
+    // Needle B dragging
+    if (dragging) {
+      needleBFraction = Math.max(0, Math.min(1, x / rect.width));
+      navigateToNeedlePos();
+      return;
+    }
+
+    // Hover detection for seed highlighting
+    const seedIdx = findSeedAtCanvasPos(x, y, 8);
+    if (seedIdx !== hoverSeedIndex) {
+      hoverSeedIndex = seedIdx;
+    }
   }
 
   function onCanvasMouseUp() {
+    if (draggingSeedIndex !== null) {
+      draggingSeedIndex = null;
+      return;
+    }
     if (dragging) {
       navigateToNeedlePos();
     }
@@ -591,8 +794,9 @@
   }
 
   function handleMouseMove(event: MouseEvent) {
-    if (dragging) onCanvasMouseMove(event);
-    if (wlDragging) onCanvasRightMove(event);
+    if (draggingSeedIndex !== null || dragging) onCanvasMouseMove(event);
+    else if (wlDragging) onCanvasRightMove(event);
+    else onCanvasMouseMove(event); // hover detection
   }
 
   function handleMouseUp(event: MouseEvent) {
@@ -643,7 +847,8 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <canvas
           bind:this={cprCanvas}
-          class="min-h-0 flex-1 cursor-crosshair"
+          class="min-h-0 flex-1"
+          style:cursor={draggingSeedIndex !== null ? 'grabbing' : hoverSeedIndex !== null ? 'grab' : 'crosshair'}
           style="image-rendering: pixelated; width: 100%; height: 100%;"
           onmousedown={handleMouseDown}
           oncontextmenu={onCanvasContextMenu}
@@ -755,10 +960,19 @@
       {/if}
     </span>
 
+    {#if seedStore.getOstiumFraction(seedStore.activeVessel) !== null}
+      <span class="text-[10px] tabular-nums" style="color: #ff00ff;">
+        O: {((seedStore.getOstiumFraction(seedStore.activeVessel) ?? 0) * 100).toFixed(0)}%
+        {#if arclengths.length > 0}
+          ({((seedStore.getOstiumFraction(seedStore.activeVessel) ?? 0) * arclengths[arclengths.length - 1]).toFixed(1)} mm)
+        {/if}
+      </span>
+    {/if}
+
     <span class="text-[10px] text-text-secondary/40">|</span>
 
     <span class="text-[10px] text-text-secondary/40">
-      Scroll: move B &middot; Right-drag: W/L
+      Scroll: move B &middot; Shift+click: set ostium &middot; Right-drag: W/L
     </span>
   </div>
 </div>

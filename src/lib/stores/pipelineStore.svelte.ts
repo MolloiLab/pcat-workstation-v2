@@ -67,10 +67,13 @@ function buildSeedsPayload(): Record<string, SeedPayload> {
 
   for (const vessel of ALL_VESSELS) {
     const data = seedStore.vessels[vessel];
-    if (data.seeds.length < 2) continue; // need ostium + at least 1 waypoint
+    if (data.seeds.length < 2) continue;
 
-    const ostium = data.seeds[0].position;
-    const waypoints = data.seeds.slice(1).map((s) => s.position);
+    // Use ostiumFraction position if set, otherwise fall back to first seed
+    const ostium = seedStore.getOstiumWorldPosForVessel(vessel) ?? data.seeds[0].position;
+
+    // All seeds are waypoints now
+    const waypoints = data.seeds.map((s) => s.position);
 
     seeds[vessel] = {
       ostium_mm: ostium,

@@ -32,9 +32,14 @@
     cy: number;
     vessel: Vessel;
     seedIndex: number;
-    type: 'ostium' | 'waypoint';
     inBounds: boolean;
     isSelected: boolean;
+  };
+
+  type ProjectedOstiumDiamond = {
+    cx: number;
+    cy: number;
+    vessel: Vessel;
   };
 
   type ProjectedCenterline = {
@@ -46,6 +51,7 @@
   let projectedSeeds = $state<ProjectedSeed[]>([]);
   let projectedCenterlines = $state<ProjectedCenterline[]>([]);
   let projectedGhostDot = $state<{ cx: number; cy: number; color: string } | null>(null);
+  let projectedOstiumDiamonds = $state<ProjectedOstiumDiamond[]>([]);
   /** Crosshair position for the selected seed (projected onto this viewport). */
   let crosshairPos = $state<{ cx: number; cy: number; width: number; height: number } | null>(null);
 
@@ -124,6 +130,7 @@
       projectedSeeds = [];
       projectedCenterlines = [];
       projectedGhostDot = null;
+      projectedOstiumDiamonds = [];
       return;
     }
 
@@ -134,6 +141,7 @@
       projectedSeeds = [];
       projectedCenterlines = [];
       projectedGhostDot = null;
+      projectedOstiumDiamonds = [];
       return;
     }
 
@@ -142,6 +150,7 @@
       projectedSeeds = [];
       projectedCenterlines = [];
       projectedGhostDot = null;
+      projectedOstiumDiamonds = [];
       return;
     }
 
@@ -181,7 +190,6 @@
           cy,
           vessel,
           seedIndex: i,
-          type: seed.type,
           inBounds,
           isSelected,
         });
@@ -235,6 +243,26 @@
     } else {
       projectedGhostDot = null;
     }
+
+    // --- Project ostium diamonds (at ostiumFraction on centerline) ---
+    const diamonds: ProjectedOstiumDiamond[] = [];
+    for (const vessel of vesselNames) {
+      const fraction = seedStore.getOstiumFraction(vessel);
+      if (fraction === null) continue;
+      const worldPos = seedStore.getOstiumWorldPosForVessel(vessel);
+      if (!worldPos) continue;
+      // Depth filter: same as seeds (+/-3 slices)
+      if (sliceInfo && focalPoint) {
+        const tolerance = sliceInfo.spacing * 3;
+        if (!isNearSlice(worldPos, focalPoint, sliceInfo.axisIndex, tolerance)) {
+          continue;
+        }
+      }
+      const canvasPos = vp.worldToCanvas(worldPos);
+      if (!canvasPos || !isFinite(canvasPos[0]) || !isFinite(canvasPos[1])) continue;
+      diamonds.push({ cx: canvasPos[0], cy: canvasPos[1], vessel });
+    }
+    projectedOstiumDiamonds = diamonds;
 
     // --- Crosshair lines at selected seed position ---
     if (currentSelectedIndex !== null) {
@@ -317,56 +345,44 @@
 
     <!-- Selected seed glow ring (drawn behind the marker) -->
     {#if seed.isSelected}
-      {#if seed.type === 'ostium'}
-        <rect
-          x={seed.cx - 5}
-          y={seed.cy - 5}
-          width="10"
-          height="10"
-          fill="none"
-          stroke="white"
-          stroke-width="2"
-          stroke-opacity="0.5"
-          rx="1"
-        />
-      {:else}
-        <circle
-          cx={seed.cx}
-          cy={seed.cy}
-          r="5"
-          fill="none"
-          stroke="white"
-          stroke-width="2"
-          stroke-opacity="0.5"
-        />
-      {/if}
-    {/if}
-
-    {#if seed.type === 'ostium'}
-      <!-- Ostium: filled square -->
-      <rect
-        x={seed.cx - 3}
-        y={seed.cy - 3}
-        width="6"
-        height="6"
-        fill={color}
-        fill-opacity={opacity * 0.9}
-        stroke={color}
-        stroke-width="1"
-        stroke-opacity={opacity}
-      />
-    {:else}
-      <!-- Waypoint: filled circle -->
       <circle
         cx={seed.cx}
         cy={seed.cy}
-        r="2.5"
-        fill={color}
-        fill-opacity={opacity * 0.9}
-        stroke={color}
-        stroke-width="1"
-        stroke-opacity={opacity}
+        r="5"
+        fill="none"
+        stroke="white"
+        stroke-width="2"
+        stroke-opacity="0.5"
       />
     {/if}
+
+    <!-- Seed: filled circle -->
+    <circle
+      cx={seed.cx}
+      cy={seed.cy}
+      r="2.5"
+      fill={color}
+      fill-opacity={opacity * 0.9}
+      stroke={color}
+      stroke-width="1"
+      stroke-opacity={opacity}
+    />
+  {/each}
+
+  <!-- Ostium diamond markers (at ostiumFraction on centerline) -->
+  {#each projectedOstiumDiamonds as diamond}
+    {@const color = VESSEL_COLORS[diamond.vessel]}
+    <rect
+      x={diamond.cx - 5}
+      y={diamond.cy - 5}
+      width="10"
+      height="10"
+      fill={color}
+      fill-opacity="0.9"
+      stroke="white"
+      stroke-width="1.5"
+      rx="1"
+      transform="rotate(45 {diamond.cx} {diamond.cy})"
+    />
   {/each}
 </svg>

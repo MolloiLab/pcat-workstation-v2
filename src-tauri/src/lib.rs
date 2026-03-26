@@ -26,6 +26,7 @@ pub fn run() {
             commands::cpr::compute_cpr_image,
             commands::cpr::compute_cross_section_image,
             commands::cpr::compute_cross_sections_batch,
+            commands::cpr::get_cpr_projection_info,
             commands::pipeline::run_pipeline,
         ])
         .run(tauri::generate_context!())
