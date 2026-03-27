@@ -8,6 +8,7 @@
    */
   import { seedStore } from '$lib/stores/seedStore.svelte';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
+  import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
 
   const VESSEL_LABELS: Record<string, string> = {
     RCA: 'RCA',
@@ -35,8 +36,15 @@
       return 'Drag to move \u00b7 Del to remove \u00b7 Esc to deselect \u00b7 Arrow keys to cycle';
     }
 
-    // "Experienced" detection: 5+ seeds means user knows the workflow
+    // After enough seeds: prompt for ostium if not set, or show ready state
     if (seedCount >= 5) {
+      const hasOstium = data.ostiumFraction !== null;
+      if (!hasOstium) {
+        return 'Scroll CPR to the ostium (where coronary exits aorta) \u00b7 Click "Set Ostium" in the CPR toolbar';
+      }
+      if (pipelineStore.canRun && pipelineStore.status === 'idle') {
+        return 'Ready to analyze \u00b7 Click "Run Pipeline" to compute PCAT';
+      }
       return '';
     }
 
@@ -63,7 +71,7 @@
    * When it changes, show the hint and reset the fade timer.
    */
   let stateKey = $derived(
-    `${seedStore.activeVessel}:${seedStore.activeVesselData.seeds.length}:${seedStore.selectedSeedIndex}`
+    `${seedStore.activeVessel}:${seedStore.activeVesselData.seeds.length}:${seedStore.selectedSeedIndex}:${seedStore.activeVesselData.ostiumFraction}`
   );
 
   // React to state changes: show hint and start fade timer

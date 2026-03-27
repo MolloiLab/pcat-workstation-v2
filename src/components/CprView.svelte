@@ -338,24 +338,54 @@
     }
 
     // --- Ostium marker ---
-    if (activeOstiumFrac !== null) {
+    if (activeOstiumFrac !== null && cprMode === 'straightened') {
       const ox = Math.round(activeOstiumFrac * w);
 
-      // Dashed magenta vertical line
+      // Shaded region: proximal side (before ostium) is dimmed
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(0, 0, ox, h);
+
+      // Solid magenta vertical line
       ctx.beginPath();
       ctx.strokeStyle = '#ff00ff';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
       ctx.moveTo(ox, 0);
       ctx.lineTo(ox, h);
       ctx.stroke();
-      ctx.setLineDash([]);
 
-      // "O" label at top
-      ctx.font = 'bold 11px -apple-system, sans-serif';
+      // Label with background
+      ctx.font = 'bold 10px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ff00ff';
-      ctx.fillText('O', ox, 14);
+      ctx.fillText('OSTIUM', ox, h - 6);
+    } else if (activeOstiumFrac !== null && cprMode === 'curved' && projectionInfo) {
+      // In curved mode, draw ostium marker at the projected position
+      const nPos = projectionInfo.positions.length;
+      const idx = Math.round(activeOstiumFrac * (nPos - 1));
+      const clampedIdx = Math.min(idx, nPos - 1);
+      const pos = projectionInfo.positions[clampedIdx];
+      const projected = worldToCurvedCpr(pos, projectionInfo, w, h);
+      if (projected) {
+        const [cx, cy] = projected;
+
+        // Diamond marker
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = 'rgba(255,0,255,0.7)';
+        ctx.fillRect(-5, -5, 10, 10);
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-5, -5, 10, 10);
+        ctx.restore();
+
+        // Label
+        ctx.font = 'bold 10px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#ff00ff';
+        ctx.fillText('OSTIUM', cx, cy - 12);
+      }
     }
 
     // --- Centerline polyline on CPR ---
@@ -1101,13 +1131,34 @@
       <span class="w-6 text-right tabular-nums">{(needleOffset * 100).toFixed(0)}%</span>
     </label>
 
+    <span class="text-[10px] text-text-secondary/40">|</span>
+
+    <button
+      class="rounded px-2 py-0.5 text-[10px] font-medium transition-colors"
+      style={activeOstiumFrac !== null
+        ? 'background-color: rgba(255,0,255,0.15); color: #ff00ff;'
+        : 'color: #ff00ff;'}
+      onclick={() => seedStore.setOstiumFraction(needleBFraction)}
+      title="Mark current needle B position as the ostium (where coronary exits aorta)"
+    >
+      {activeOstiumFrac !== null ? 'Ostium set' : 'Set Ostium'}
+    </button>
+
     {#if activeOstiumFrac !== null}
       <span class="text-[10px] tabular-nums" style="color: #ff00ff;">
-        O: {(activeOstiumFrac * 100).toFixed(0)}%
         {#if arclengths.length > 0}
-          ({(activeOstiumFrac * arclengths[arclengths.length - 1]).toFixed(1)} mm)
+          {(activeOstiumFrac * arclengths[arclengths.length - 1]).toFixed(1)} mm
+        {:else}
+          {(activeOstiumFrac * 100).toFixed(0)}%
         {/if}
       </span>
+      <button
+        class="text-[10px] text-text-secondary/40 hover:text-error"
+        onclick={() => seedStore.setOstiumFraction(null)}
+        title="Clear ostium"
+      >
+        &times;
+      </button>
     {/if}
 
     <span class="text-[10px] text-text-secondary/40">|</span>
