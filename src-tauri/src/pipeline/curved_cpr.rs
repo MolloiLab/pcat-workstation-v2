@@ -457,7 +457,7 @@ pub(crate) fn render_curved_direct(
     // The two-layer composite ensures smooth rendering at all rotations:
     // oblique layer shows vessel in the PCA plane even when CPR sampling
     // direction is parallel to the viewing plane.
-    let (view_forward, view_right, view_up) = compute_view_basis_pca(positions);
+    let (_view_forward, view_right, view_up) = compute_view_basis_pca(positions);
 
     // 2. Project centerline for bounding box
     let mid_idx = n / 2;
@@ -508,22 +508,7 @@ pub(crate) fn render_curved_direct(
             let y_mm = max_y - (row as f64) * view_height / ((pixels_high - 1) as f64);
             let pixel_3d = center_vec + x_mm * view_right + y_mm * view_up;
 
-            // --- Layer 1: Oblique slab MIP (always computed, no artifacts) ---
-            let mut oblique_val = f32::NEG_INFINITY;
-            for &slab_off in &slab_offsets {
-                let s = pixel_3d + slab_off * view_forward;
-                let vz = (s[0] - origin[0]) * inv_spacing[0];
-                let vy = (s[1] - origin[1]) * inv_spacing[1];
-                let vx = (s[2] - origin[2]) * inv_spacing[2];
-                let val = trilinear(volume, vz, vy, vx);
-                if !val.is_nan() && val > oblique_val {
-                    oblique_val = val;
-                }
-            }
-            let oblique_val = if oblique_val == f32::NEG_INFINITY { f32::NAN } else { oblique_val };
-
-            // --- Layer 2: CPR sampling (only near vessel) ---
-            // Find nearest 3D segment + track second-nearest distance
+            // --- Find nearest 3D segment first (needed for both layers) --- + track second-nearest distance
             let mut best_j = 0usize;
             let mut best_frac = 0.0f64;
             let mut best_dist_sq = f64::MAX;
@@ -549,9 +534,6 @@ pub(crate) fn render_curved_direct(
                 }
             }
 
-            let best_dist = best_dist_sq.sqrt();
-            let _ = best_dist; // suppress unused warning
-
             // Interpolate frame at nearest segment
             let j1 = best_j + 1;
             let interp_pos = pos_vecs[best_j] + best_frac * (pos_vecs[j1] - pos_vecs[best_j]);
@@ -560,6 +542,22 @@ pub(crate) fn render_curved_direct(
 
             let offset = pixel_3d - interp_pos;
             let lateral = offset.dot(&interp_normal);
+
+            // --- Layer 1: Oblique slab MIP using rotated binormal ---
+            // Uses the nearest segment's binormal so the oblique layer
+            // rotates with the slider (different tissue at different angles).
+            let mut oblique_val = f32::NEG_INFINITY;
+            for &slab_off in &slab_offsets {
+                let s = pixel_3d + slab_off * interp_binormal;
+                let vz = (s[0] - origin[0]) * inv_spacing[0];
+                let vy = (s[1] - origin[1]) * inv_spacing[1];
+                let vx = (s[2] - origin[2]) * inv_spacing[2];
+                let val = trilinear(volume, vz, vy, vx);
+                if !val.is_nan() && val > oblique_val {
+                    oblique_val = val;
+                }
+            }
+            let oblique_val = if oblique_val == f32::NEG_INFINITY { f32::NAN } else { oblique_val };
 
             // Voronoi ambiguity check: if second-nearest is close to nearest,
             // the segment assignment is ambiguous -> don't trust CPR sampling
