@@ -15,7 +15,7 @@ use super::interp::trilinear;
 /// Bounding box padding beyond the projected centerline (mm).
 /// Controls how much anatomical context surrounds the vessel.
 /// Shared with `commands/cpr.rs::get_cpr_projection_info`.
-pub const CONTEXT_PAD_MM: f64 = 35.0;
+pub const CONTEXT_PAD_MM: f64 = 25.0;
 
 // ---------------------------------------------------------------------------
 // 1. View basis from binormals
@@ -451,10 +451,13 @@ pub(crate) fn render_curved_direct(
     let n = positions.len();
     assert!(n >= 2);
 
-    // 1. Viewing plane from rotated binormals — rotates with the slider.
-    // This ensures the lateral sampling direction is always visible on screen.
-    // 3D segment search prevents fold-back artifacts.
-    let (view_forward, view_right, view_up) = compute_view_basis(binormals);
+    // 1. FIXED viewing plane via PCA — vessel is always visible because it
+    // lies in the best-fit plane. Rotation only changes CPR sampling angle
+    // (which tissue you see around the vessel), not the camera angle.
+    // The two-layer composite ensures smooth rendering at all rotations:
+    // oblique layer shows vessel in the PCA plane even when CPR sampling
+    // direction is parallel to the viewing plane.
+    let (view_forward, view_right, view_up) = compute_view_basis_pca(positions);
 
     // 2. Project centerline for bounding box
     let mid_idx = n / 2;

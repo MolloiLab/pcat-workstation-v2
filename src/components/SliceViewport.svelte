@@ -263,6 +263,7 @@
       navigateToWorldPos(seedPos as [number, number, number]);
 
       // Start drag
+      seedStore.beginDrag();
       isDragging = true;
       dragSeedIndex = nearestSeed.seedIndex;
 

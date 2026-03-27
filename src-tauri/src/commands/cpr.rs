@@ -272,10 +272,10 @@ pub async fn get_cpr_projection_info(
     };
 
     // Rotate frame
-    let (rot_normals, rot_binormals) = frame.rotated_frame(rotation_deg);
+    let (rot_normals, _rot_binormals) = frame.rotated_frame(rotation_deg);
 
-    // Binormal-based viewing plane (matches curved CPR renderer — rotates with slider)
-    let (_view_forward, view_right, view_up) = curved_cpr::compute_view_basis(&rot_binormals);
+    // Fixed PCA viewing plane (matches curved CPR renderer)
+    let (_view_forward, view_right, view_up) = curved_cpr::compute_view_basis_pca(&frame.positions);
 
     // Project centerline to 2D
     let n = frame.n_cols();
