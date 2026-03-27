@@ -34,13 +34,17 @@
     const tag = (event.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-    // Ctrl+Z / Cmd+Z: undo last seed
+    // Cmd+Shift+Z / Ctrl+Shift+Z: redo
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 'z') {
+      event.preventDefault();
+      seedStore.redo();
+      return;
+    }
+
+    // Cmd+Z / Ctrl+Z: undo
     if ((event.ctrlKey || event.metaKey) && event.key === 'z') {
       event.preventDefault();
-      const data = seedStore.activeVesselData;
-      if (data.seeds.length > 0) {
-        seedStore.removeSeed(data.seeds.length - 1);
-      }
+      seedStore.undo();
       return;
     }
 

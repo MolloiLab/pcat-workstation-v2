@@ -46,6 +46,31 @@ function recomputeCenterline(data: VesselData): VesselData {
   return { ...data, centerline };
 }
 
+// --- Undo / Redo ---
+
+type Snapshot = {
+  vessel: Vessel;
+  data: { seeds: [number, number, number][]; ostiumFraction: number | null };
+};
+
+const undoStack: Snapshot[] = [];
+const redoStack: Snapshot[] = [];
+const MAX_UNDO = 50;
+
+/** Save current state of active vessel before a mutation. */
+function pushUndo(vessel: Vessel) {
+  const vd = vesselData[vessel];
+  undoStack.push({
+    vessel,
+    data: {
+      seeds: vd.seeds.map((s) => [...s.position] as [number, number, number]),
+      ostiumFraction: vd.ostiumFraction,
+    },
+  });
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  redoStack.length = 0; // clear redo on new action
+}
+
 // --- Reactive state ---
 
 let activeVessel: Vessel = $state('RCA');
@@ -105,8 +130,60 @@ export const seedStore = {
    * Add a seed at the given world-space position.
    * The first seed becomes 'ostium'; subsequent seeds are 'waypoint'.
    */
+  // --- Undo / Redo ---
+
+  undo() {
+    const snap = undoStack.pop();
+    if (!snap) return;
+    // Save current state to redo stack
+    const vd = vesselData[snap.vessel];
+    redoStack.push({
+      vessel: snap.vessel,
+      data: {
+        seeds: vd.seeds.map((s) => [...s.position] as [number, number, number]),
+        ostiumFraction: vd.ostiumFraction,
+      },
+    });
+    // Restore snapshot
+    const seeds = snap.data.seeds.map((pos) => ({ position: pos }));
+    vesselData[snap.vessel] = recomputeCenterline({
+      seeds,
+      centerline: null,
+      ostiumFraction: snap.data.ostiumFraction,
+    });
+    selectedSeedIndex = null;
+  },
+
+  redo() {
+    const snap = redoStack.pop();
+    if (!snap) return;
+    // Save current state to undo stack
+    const vd = vesselData[snap.vessel];
+    undoStack.push({
+      vessel: snap.vessel,
+      data: {
+        seeds: vd.seeds.map((s) => [...s.position] as [number, number, number]),
+        ostiumFraction: vd.ostiumFraction,
+      },
+    });
+    // Restore snapshot
+    const seeds = snap.data.seeds.map((pos) => ({ position: pos }));
+    vesselData[snap.vessel] = recomputeCenterline({
+      seeds,
+      centerline: null,
+      ostiumFraction: snap.data.ostiumFraction,
+    });
+    selectedSeedIndex = null;
+  },
+
+  get canUndo(): boolean { return undoStack.length > 0; },
+  get canRedo(): boolean { return redoStack.length > 0; },
+
+  // --- Seed manipulation (operates on active vessel) ---
+
   addSeed(position: [number, number, number]) {
     const v = activeVessel;
+    pushUndo(v);
     const current = vesselData[v];
     const newSeeds = [...current.seeds, { position }];
     vesselData[v] = recomputeCenterline({ ...current, seeds: newSeeds });
@@ -121,6 +198,7 @@ export const seedStore = {
    */
   insertSeedAt(index: number, position: [number, number, number]) {
     const v = activeVessel;
+    pushUndo(v);
     const current = vesselData[v];
     if (index < 0 || index > current.seeds.length) return;
     const newSeeds = [...current.seeds];
@@ -135,6 +213,7 @@ export const seedStore = {
    */
   removeSeed(index: number) {
     const v = activeVessel;
+    pushUndo(v);
     const current = vesselData[v];
     if (index < 0 || index >= current.seeds.length) return;
     const newSeeds = current.seeds.filter((_, i) => i !== index);
@@ -154,6 +233,7 @@ export const seedStore = {
    */
   moveSeed(index: number, position: [number, number, number]) {
     const v = activeVessel;
+    pushUndo(v);
     const current = vesselData[v];
     if (index < 0 || index >= current.seeds.length) return;
     const newSeeds = current.seeds.map((s, i) =>
@@ -167,6 +247,7 @@ export const seedStore = {
   /** Set the ostium marker at a fractional position along the active vessel's centerline. */
   setOstiumFraction(fraction: number | null) {
     const v = activeVessel;
+    pushUndo(v);
     vesselData[v] = { ...vesselData[v], ostiumFraction: fraction };
   },
 
