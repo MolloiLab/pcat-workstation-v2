@@ -42,6 +42,9 @@
   let loading = $state(false);
   let pixels = $state(128);
   let vesselDiameterMm = $state<number | null>(null);
+  // Measurement endpoints in pixel coords for visual overlay
+  let measH = $state<{ left: number; right: number; y: number } | null>(null);
+  let measV = $state<{ top: number; bottom: number; x: number } | null>(null);
 
   type CrossSectionResult = {
     image_base64: string;
@@ -88,27 +91,32 @@
    * calcified plaque (also bright) is present. For display only.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
-    const widthMm = 15.0; // matches the render_cross_sections widthMm
-    const lumenThreshold = 150; // HU threshold for contrast-enhanced lumen
+    const widthMm = 15.0;
+    const lumenThreshold = 150;
     const center = Math.floor(sz / 2);
 
-    // Measure horizontal diameter through center
     let left = center;
     let right = center;
     while (left > 0 && data[center * sz + left] > lumenThreshold) left--;
     while (right < sz - 1 && data[center * sz + right] > lumenThreshold) right++;
     const hDiamPx = right - left;
 
-    // Measure vertical diameter through center
     let top = center;
     let bottom = center;
     while (top > 0 && data[top * sz + center] > lumenThreshold) top--;
     while (bottom < sz - 1 && data[bottom * sz + center] > lumenThreshold) bottom++;
     const vDiamPx = bottom - top;
 
-    // Average of horizontal and vertical, convert to mm
     const avgDiamPx = (hDiamPx + vDiamPx) / 2;
-    if (avgDiamPx < 2) return null; // no vessel detected
+    if (avgDiamPx < 2) {
+      measH = null;
+      measV = null;
+      return null;
+    }
+
+    // Store pixel positions for visual overlay
+    measH = { left, right, y: center };
+    measV = { top, bottom, x: center };
 
     const mmPerPixel = (2 * widthMm) / sz;
     return avgDiamPx * mmPerPixel;
@@ -196,7 +204,7 @@
     {/if}
     {#if vesselDiameterMm !== null}
       <span class="text-[10px] tabular-nums text-accent">
-        &empty;{vesselDiameterMm.toFixed(1)}
+        {vesselDiameterMm.toFixed(1)} mm
       </span>
     {/if}
   </div>
@@ -216,4 +224,31 @@
     height={pixels}
     style="image-rendering: pixelated;"
   ></canvas>
+
+  <!-- Diameter measurement overlay -->
+  {#if measH && measV && vesselDiameterMm !== null}
+    <svg class="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 {pixels} {pixels}" preserveAspectRatio="xMidYMid meet">
+      <!-- Horizontal caliper -->
+      <line x1={measH.left} y1={measH.y} x2={measH.right} y2={measH.y}
+        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+      <line x1={measH.left} y1={measH.y - 3} x2={measH.left} y2={measH.y + 3}
+        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+      <line x1={measH.right} y1={measH.y - 3} x2={measH.right} y2={measH.y + 3}
+        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+
+      <!-- Vertical caliper -->
+      <line x1={measV.x} y1={measV.top} x2={measV.x} y2={measV.bottom}
+        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+      <line x1={measV.x - 3} y1={measV.top} x2={measV.x + 3} y2={measV.top}
+        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+      <line x1={measV.x - 3} y1={measV.bottom} x2={measV.x + 3} y2={measV.bottom}
+        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+
+      <!-- Diameter label -->
+      <text x={measH.right + 3} y={measH.y - 2}
+        fill="#00ffcc" font-size="9" font-family="-apple-system, sans-serif" font-weight="bold">
+        {vesselDiameterMm.toFixed(1)}
+      </text>
+    </svg>
+  {/if}
 </div>
