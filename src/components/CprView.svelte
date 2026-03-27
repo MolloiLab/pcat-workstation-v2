@@ -786,7 +786,6 @@
     const seedIdx = findSeedAtCanvasPos(x, y, 8);
     if (seedIdx !== null) {
       seedStore.selectSeed(seedIdx);
-      seedStore.beginDrag();
       draggingSeedIndex = seedIdx;
       event.preventDefault();
       return;

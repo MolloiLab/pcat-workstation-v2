@@ -231,14 +231,9 @@ export const seedStore = {
   /**
    * Move an existing seed to a new position.
    */
-  /** Start a drag — saves undo state once. Call before moveSeed during drag. */
-  beginDrag() {
-    pushUndo(activeVessel);
-  },
-
   moveSeed(index: number, position: [number, number, number]) {
     const v = activeVessel;
-    // No pushUndo here — caller uses beginDrag() once at drag start
+    pushUndo(v);
     const current = vesselData[v];
     if (index < 0 || index >= current.seeds.length) return;
     const newSeeds = current.seeds.map((s, i) =>
