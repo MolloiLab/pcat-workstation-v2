@@ -347,7 +347,8 @@
 
   /**
    * Pinch-to-zoom: trackpad pinch generates wheel events with ctrlKey=true.
-   * Zooms toward cursor position by adjusting both parallelScale and focalPoint.
+   * Only adjusts parallelScale — NOT focalPoint, because in MPR views
+   * focalPoint controls which slice is displayed.
    */
   function handleWheel(event: WheelEvent) {
     if (!event.ctrlKey || !containerEl) return;
@@ -362,29 +363,8 @@
     const camera = vp.getCamera();
     if (camera?.parallelScale == null) return;
 
-    // Get cursor world position for zoom-toward-cursor
-    const rect = containerEl.getBoundingClientRect();
-    const canvasX = event.clientX - rect.left;
-    const canvasY = event.clientY - rect.top;
-    const worldPos = vp.canvasToWorld([canvasX, canvasY]);
-
-    const newScale = camera.parallelScale / zoomFactor;
-
-    if (worldPos && camera.focalPoint) {
-      // Shift focal point toward cursor proportionally to zoom change
-      const t = 1 - 1 / zoomFactor;
-      const fp = camera.focalPoint;
-      vp.setCamera({
-        parallelScale: newScale,
-        focalPoint: [
-          fp[0] + (worldPos[0] - fp[0]) * t,
-          fp[1] + (worldPos[1] - fp[1]) * t,
-          fp[2] + (worldPos[2] - fp[2]) * t,
-        ],
-      });
-    } else {
-      vp.setCamera({ parallelScale: newScale });
-    }
+    const newScale = Math.max(10, camera.parallelScale / zoomFactor);
+    vp.setCamera({ parallelScale: newScale });
     vp.render();
   }
 

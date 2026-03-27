@@ -83,7 +83,7 @@
     if (fadeTimer) clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
       visible = false;
-    }, 3500);
+    }, 8000);
   }
 
   /**
