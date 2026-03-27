@@ -544,10 +544,13 @@ pub(crate) fn render_curved_direct(
             let lateral = offset.dot(&interp_normal);
 
             // --- Layer 1: Oblique slab MIP using rotated binormal ---
-            // Uses the nearest segment's binormal so the oblique layer
-            // rotates with the slider (different tissue at different angles).
+            // Uses a thicker slab (5mm) than the CPR layer so the rotation
+            // produces visible tissue changes in the context area.
+            let oblique_slab_mm = 5.0;
+            let oblique_steps = 9usize;
             let mut oblique_val = f32::NEG_INFINITY;
-            for &slab_off in &slab_offsets {
+            for k in 0..oblique_steps {
+                let slab_off = -oblique_slab_mm / 2.0 + oblique_slab_mm * (k as f64) / ((oblique_steps - 1) as f64);
                 let s = pixel_3d + slab_off * interp_binormal;
                 let vz = (s[0] - origin[0]) * inv_spacing[0];
                 let vy = (s[1] - origin[1]) * inv_spacing[1];
