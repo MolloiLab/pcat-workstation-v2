@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="a8-top" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5b6578"/><stop offset="100%" stop-color="#4a5568"/></linearGradient>
+    <linearGradient id="a8-left" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#384252"/><stop offset="100%" stop-color="#2a3342"/></linearGradient>
+    <linearGradient id="a8-right" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#434d5e"/><stop offset="100%" stop-color="#333d4d"/></linearGradient>
+    <!-- More contrast: bright yellow → deep red, with a gap in the middle -->
+    <linearGradient id="a8-fai" gradientTransform="rotate(135)">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="30%" stop-color="#fbbf24"/>
+      <stop offset="55%" stop-color="#e05020"/>
+      <stop offset="100%" stop-color="#c41e1e"/>
+    </linearGradient>
+    <radialGradient id="a8-lumen"><stop offset="0%" stop-color="#ffffff"/><stop offset="60%" stop-color="#e5e7eb"/><stop offset="100%" stop-color="#b8bcc5"/></radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="100" fill="#0c0c12"/>
+
+  <!-- Slate cube -->
+  <polygon points="256,95 400,180 256,265 112,180" fill="url(#a8-top)"/>
+  <polygon points="112,180 256,265 256,410 112,325" fill="url(#a8-left)"/>
+  <polygon points="400,180 256,265 256,410 400,325" fill="url(#a8-right)"/>
+  <line x1="256" y1="95" x2="400" y2="180" stroke="#7a8595" stroke-width="0.8" opacity="0.4"/>
+  <line x1="256" y1="95" x2="112" y2="180" stroke="#7a8595" stroke-width="0.8" opacity="0.4"/>
+
+  <!-- Cross-section surface -->
+  <ellipse cx="256" cy="180" rx="105" ry="62" fill="#505a6a" opacity="0.9"/>
+
+  <!-- FAI ring — tighter to vessel wall, no big gap -->
+  <ellipse cx="256" cy="180" rx="68" ry="40" fill="none" stroke="url(#a8-fai)" stroke-width="22" opacity="0.95"/>
+  <!-- Glow -->
+  <ellipse cx="256" cy="180" rx="68" ry="40" fill="none" stroke="url(#a8-fai)" stroke-width="30" opacity="0.1"/>
+
+  <!-- Vessel wall — right next to the FAI ring -->
+  <ellipse cx="256" cy="180" rx="44" ry="26" fill="#6b7585" stroke="#8a95a5" stroke-width="1.5"/>
+
+  <!-- Lumen -->
+  <ellipse cx="256" cy="180" rx="30" ry="17" fill="url(#a8-lumen)"/>
+  <ellipse cx="252" cy="176" rx="10" ry="5" fill="white" opacity="0.4"/>
+</svg>
