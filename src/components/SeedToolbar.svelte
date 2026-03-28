@@ -7,7 +7,51 @@
    * Active vessel has a filled background; inactive vessels show an outline.
    */
   import { seedStore, VESSEL_COLORS, type Vessel } from '$lib/stores/seedStore.svelte';
+  import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { navigateToWorldPos } from '$lib/navigation';
+  import { saveSeeds, loadSeeds } from '$lib/api';
+  import { volumeStore } from '$lib/stores/volumeStore.svelte';
+
+  let saveStatus = $state('');
+
+  async function handleSaveSeeds() {
+    try {
+      const dicomPath = volumeStore.dicomPath;
+      if (!dicomPath) return;
+      // Combine seeds + pipeline results in one file
+      const data: any = JSON.parse(seedStore.exportJson());
+      if (pipelineStore.results) {
+        data.pipelineResults = pipelineStore.results;
+      }
+      await saveSeeds(JSON.stringify(data, null, 2), dicomPath);
+      saveStatus = 'Saved';
+      setTimeout(() => { saveStatus = ''; }, 2000);
+    } catch (e) {
+      console.error('Save seeds failed:', e);
+    }
+  }
+
+  async function handleLoadSeeds() {
+    try {
+      const dicomPath = volumeStore.dicomPath;
+      if (!dicomPath) return;
+      const json = await loadSeeds(dicomPath);
+      if (json) {
+        seedStore.importJson(json);
+        // Restore pipeline results if present
+        try {
+          const data = JSON.parse(json);
+          if (data.pipelineResults) {
+            pipelineStore.restoreResults(data.pipelineResults);
+          }
+        } catch { /* backward compat */ }
+        saveStatus = 'Loaded';
+        setTimeout(() => { saveStatus = ''; }, 2000);
+      }
+    } catch (e) {
+      console.error('Load seeds failed:', e);
+    }
+  }
 
   const vesselNames: Vessel[] = ['RCA', 'LAD', 'LCx'];
 
@@ -118,4 +162,24 @@
       Clear All
     </button>
   {/if}
+
+  <div class="flex items-center gap-0.5 ml-2 border-l border-border pl-2">
+    <button
+      class="rounded px-2 py-1 text-[11px] text-text-secondary hover:bg-surface-tertiary hover:text-text-primary"
+      onclick={handleSaveSeeds}
+      title="Save seeds to disk"
+    >
+      Save
+    </button>
+    <button
+      class="rounded px-2 py-1 text-[11px] text-text-secondary hover:bg-surface-tertiary hover:text-text-primary"
+      onclick={handleLoadSeeds}
+      title="Load seeds from disk"
+    >
+      Load
+    </button>
+    {#if saveStatus}
+      <span class="text-[10px] text-success">{saveStatus}</span>
+    {/if}
+  </div>
 </div>

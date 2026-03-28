@@ -11,7 +11,7 @@
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
-  import { openDicomDialog, loadDicom } from '$lib/api';
+  import { openDicomDialog, loadDicom, getRecentDicoms, loadSeeds } from '$lib/api';
   import { loadVolume } from '$lib/cornerstone/volumeLoader';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
@@ -20,6 +20,13 @@
   import { navigateToWorldPos } from '$lib/navigation';
 
   let errorMessage = $state('');
+  let recentPaths = $state<string[]>([]);
+  let showRecent = $state(false);
+
+  // Load recent paths on mount
+  $effect(() => {
+    getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
+  });
 
   // ---- Keyboard shortcuts ----
   function handleKeydown(event: KeyboardEvent) {
@@ -27,13 +34,17 @@
     const tag = (event.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-    // Ctrl+Z / Cmd+Z: undo last seed
+    // Cmd+Shift+Z / Ctrl+Shift+Z: redo
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 'z') {
+      event.preventDefault();
+      seedStore.redo();
+      return;
+    }
+
+    // Cmd+Z / Ctrl+Z: undo
     if ((event.ctrlKey || event.metaKey) && event.key === 'z') {
       event.preventDefault();
-      const data = seedStore.activeVesselData;
-      if (data.seeds.length > 0) {
-        seedStore.removeSeed(data.seeds.length - 1);
-      }
+      seedStore.undo();
       return;
     }
 
@@ -88,25 +99,27 @@
     }
   }
 
-  /** Open DICOM folder, load into Rust backend, then into cornerstone3D. */
-  async function handleOpenDicom() {
+  /** Counter for unique volume IDs across loads. */
+  let volumeCounter = 0;
+
+  /** Load DICOM from a specific folder path. */
+  async function loadFromPath(path: string) {
     errorMessage = '';
+    showRecent = false;
 
     try {
-      // 1. Native folder picker
-      const path = await openDicomDialog();
-      if (!path) return; // user cancelled
+      // Clear previous state
+      seedStore.clearAll();
+      volumeStore.clear();
 
-      // 2. Begin loading
       volumeStore.setLoading(true);
       volumeStore.setLoadProgress(0);
 
-      // 3. Rust loads DICOM directory -> returns snake_case metadata
       const info = await loadDicom(path);
 
-      // 4. Map Rust snake_case -> TS camelCase and store metadata
+      volumeCounter++;
       const meta: VolumeMetadata = {
-        volumeId: 'vol-1',
+        volumeId: `vol-${volumeCounter}`,
         shape: info.shape,
         spacing: info.spacing,
         origin: info.origin,
@@ -115,26 +128,40 @@
         windowWidth: info.window_width,
         patientName: info.patient_name,
         studyDescription: info.study_description,
+        dicomPath: path,
       };
       volumeStore.set(meta);
 
-      // 5. Fetch all slices into cornerstone3D volume (with progress)
       const csId = await loadVolume(meta, (p) => volumeStore.setLoadProgress(p));
-
-      // 6. Set cornerstone volume ID -> triggers MprPanel $effect
       volumeStore.setCornerstoneVolumeId(csId);
-
-      // 7. Done
       volumeStore.setLoading(false);
+
+      // Auto-load seeds for this patient
+      try {
+        const seedsJson = await loadSeeds(path);
+        if (seedsJson) {
+          seedStore.importJson(seedsJson);
+        }
+      } catch { /* no saved seeds for this patient */ }
+
+      // Refresh recent list
+      getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
     } catch (e) {
       volumeStore.setLoading(false);
       errorMessage = e instanceof Error ? e.message : String(e);
       console.error('Failed to load DICOM:', e);
     }
   }
+
+  /** Open DICOM folder picker, then load. */
+  async function handleOpenDicom() {
+    const path = await openDicomDialog();
+    if (!path) return;
+    loadFromPath(path);
+  }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { showRecent = false; }} />
 
 <div class="flex h-screen flex-col">
   <!-- ===== Header toolbar ===== -->
@@ -159,10 +186,10 @@
       <!-- Pipeline action button -->
       {#if pipelineStore.status === 'complete'}
         <button
-          class="rounded bg-success/10 px-3 py-1 text-xs font-medium text-success hover:bg-success/20"
-          onclick={() => pipelineStore.reset()}
+          class="rounded bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20"
+          onclick={() => { pipelineStore.reset(); pipelineStore.run(); }}
         >
-          View Results
+          Re-run Pipeline
         </button>
       {:else if pipelineStore.canRun}
         <button
@@ -174,18 +201,46 @@
         </button>
       {/if}
 
-      <button
-        class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
-        onclick={handleOpenDicom}
-        disabled={volumeStore.loading}
-      >
-        Open DICOM
-      </button>
-      <button
-        class="rounded px-3 py-1 text-xs text-text-secondary hover:bg-surface-tertiary hover:text-text-primary"
-      >
-        Settings
-      </button>
+      <div class="relative flex items-center">
+        <button
+          class="rounded-l px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+          onclick={handleOpenDicom}
+          disabled={volumeStore.loading}
+        >
+          Open DICOM
+        </button>
+        {#if recentPaths.length > 0}
+          <button
+            class="rounded-r border-l border-border px-1.5 py-1 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
+            onclick={(e: MouseEvent) => { e.stopPropagation(); showRecent = !showRecent; }}
+            disabled={volumeStore.loading}
+            title="Recent files"
+          >
+            &#9662;
+          </button>
+        {/if}
+
+        <!-- Recent files dropdown -->
+        {#if showRecent && recentPaths.length > 0}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="absolute right-0 top-full z-50 mt-1 max-h-64 w-80 overflow-y-auto rounded border border-border bg-surface-secondary shadow-lg"
+          >
+            <div class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary/60">
+              Recent
+            </div>
+            {#each recentPaths as rp}
+              <button
+                class="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-accent/10 truncate"
+                onclick={() => loadFromPath(rp)}
+                title={rp}
+              >
+                {rp.split('/').slice(-2).join('/')}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
 
@@ -220,6 +275,9 @@
             Loading volume... {volumeStore.loadProgress}%
           </span>
         </div>
+      {:else if pipelineStore.status === 'error'}
+        <span class="h-1.5 w-1.5 rounded-full bg-error"></span>
+        <span class="truncate text-[11px] text-error">Pipeline: {pipelineStore.error}</span>
       {:else if errorMessage}
         <span class="h-1.5 w-1.5 rounded-full bg-error"></span>
         <span class="truncate text-[11px] text-error">{errorMessage}</span>

@@ -31,6 +31,22 @@ export type FaiStats = {
   fai_risk: string; // "HIGH" or "LOW"
   histogram_bins: number[];
   histogram_counts: number[];
+  radial_profile: {
+    distances_mm: number[];
+    mean_hu: number[];
+    std_hu: number[];
+  } | null;
+  angular_asymmetry: {
+    sectors: {
+      label: string;
+      angle_deg: number;
+      hu_mean: number;
+      hu_std: number;
+      n_voxels: number;
+      fai_risk: string;
+    }[];
+    per_position_mean: number[][];
+  } | null;
 };
 
 type PipelineProgressPayload = {
@@ -62,19 +78,24 @@ const ALL_VESSELS: Vessel[] = ['LAD', 'LCx', 'RCA'];
  * Build the seeds payload from the seed store.
  * Only includes vessels that have at least an ostium + 1 waypoint.
  */
+/** Swap cornerstone [x,y,z] to pipeline [z,y,x] ordering. */
+function toZyx(p: [number, number, number]): [number, number, number] {
+  return [p[2], p[1], p[0]];
+}
+
 function buildSeedsPayload(): Record<string, SeedPayload> {
   const seeds: Record<string, SeedPayload> = {};
 
   for (const vessel of ALL_VESSELS) {
     const data = seedStore.vessels[vessel];
-    if (data.seeds.length < 2) continue; // need ostium + at least 1 waypoint
+    if (data.seeds.length < 2) continue;
 
-    const ostium = data.seeds[0].position;
-    const waypoints = data.seeds.slice(1).map((s) => s.position);
+    // Use ostiumFraction position if set, otherwise fall back to first seed
+    const ostiumXyz = seedStore.getOstiumWorldPosForVessel(vessel) ?? data.seeds[0].position;
 
     seeds[vessel] = {
-      ostium_mm: ostium,
-      waypoints_mm: waypoints,
+      ostium_mm: toZyx(ostiumXyz),
+      waypoints_mm: data.seeds.map((s) => toZyx(s.position)),
       segment_start_mm: 0,
       segment_length_mm: 40,
     };
@@ -162,6 +183,13 @@ export const pipelineStore = {
     status = 'idle';
     progress = {};
     results = null;
+    errorMsg = '';
+  },
+
+  /** Restore saved pipeline results (from loaded file). */
+  restoreResults(savedResults: Record<string, FaiStats>) {
+    results = savedResults;
+    status = 'complete';
     errorMsg = '';
   },
 };

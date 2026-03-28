@@ -5,6 +5,8 @@
  * Import `volumeStore` from any `.svelte` or `.svelte.ts` file.
  */
 
+import { cache } from '@cornerstonejs/core';
+
 export type VolumeMetadata = {
   volumeId: string;
   /** Dimensions in Python/NumPy order: [Z, Y, X] (slices, rows, columns). */
@@ -18,6 +20,7 @@ export type VolumeMetadata = {
   windowWidth: number;
   patientName: string;
   studyDescription: string;
+  dicomPath: string;
 };
 
 let currentVolume = $state<VolumeMetadata | null>(null);
@@ -28,6 +31,9 @@ let loadProgress = $state(0);
 export const volumeStore = {
   get current() {
     return currentVolume;
+  },
+  get dicomPath(): string | null {
+    return currentVolume?.dicomPath ?? null;
   },
   get cornerstoneVolumeId() {
     return cornerstoneVolumeId;
@@ -53,6 +59,10 @@ export const volumeStore = {
     loadProgress = v;
   },
   clear() {
+    // Purge old volume from cornerstone cache
+    if (cornerstoneVolumeId) {
+      try { cache.removeVolumeLoadObject(cornerstoneVolumeId); } catch { /* ignore */ }
+    }
     currentVolume = null;
     cornerstoneVolumeId = null;
     loading = false;

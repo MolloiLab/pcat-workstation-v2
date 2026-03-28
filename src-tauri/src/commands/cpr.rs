@@ -4,6 +4,7 @@ use base64::Engine;
 use tauri::ipc::Response;
 
 use crate::pipeline::cpr::{self, CprFrame};
+use crate::pipeline::curved_cpr;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -236,6 +237,109 @@ pub async fn render_cross_sections(
     }
 
     Ok(Response::new(bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Projection info (lightweight JSON)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct CprProjectionInfo {
+    pub total_arc_mm: f64,
+    pub half_width_mm: f64,
+    pub view_right: [f64; 3],
+    pub view_up: [f64; 3],
+    pub view_center: [f64; 3],
+    pub bbox_mm: [f64; 4],          // [min_x, max_x, min_y, max_y]
+    pub positions: Vec<[f64; 3]>,   // per-column centerline positions in [z,y,x]
+    pub arclengths: Vec<f64>,
+    pub normals: Vec<[f64; 3]>,     // rotated normals (for lateral offset computation)
+}
+
+/// Return the projection parameters needed to map 3D seed positions
+/// to/from 2D CPR canvas coordinates.
+#[tauri::command]
+pub async fn get_cpr_projection_info(
+    rotation_deg: f64,
+    width_mm: f64,
+    pixels_wide: usize,
+    pixels_high: usize,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<CprProjectionInfo, String> {
+    let frame = {
+        let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+        let frame_ref = guard.cpr_frame.as_ref()
+            .ok_or_else(|| "no CPR frame built".to_string())?;
+        clone_frame(frame_ref)
+    };
+
+    // Rotate frame
+    let (rot_normals, _rot_binormals) = frame.rotated_frame(rotation_deg);
+
+    // PCA-based viewing plane (matches curved CPR renderer — rotates around principal axis)
+    let (_view_forward, view_right, view_up) =
+        curved_cpr::compute_view_basis_pca_with_rotation(&frame.positions, rotation_deg);
+
+    // Project centerline to 2D
+    let n = frame.n_cols();
+    let mid_idx = n / 2;
+    let center = frame.positions[mid_idx];
+    let projected = curved_cpr::project_centerline_2d(&frame.positions, center, &view_right, &view_up);
+
+    // Compute bounding box with padding
+    let mut min_x = f64::MAX;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::MAX;
+    let mut max_y = f64::NEG_INFINITY;
+    for &(px, py) in &projected {
+        if px < min_x { min_x = px; }
+        if px > max_x { max_x = px; }
+        if py < min_y { min_y = py; }
+        if py > max_y { max_y = py; }
+    }
+    let context_pad = curved_cpr::CONTEXT_PAD_MM;
+    min_x -= context_pad;
+    max_x += context_pad;
+    min_y -= context_pad;
+    max_y += context_pad;
+
+    // Isotropic correction — match renderer's bbox-to-pixel mapping
+    if pixels_wide >= 2 && pixels_high >= 2 {
+        let vw = max_x - min_x;
+        let vh = max_y - min_y;
+        let target_ratio = pixels_wide as f64 / pixels_high as f64;
+        let bbox_ratio = vw / vh;
+        if bbox_ratio < target_ratio {
+            let new_w = vh * target_ratio;
+            let extra = (new_w - vw) / 2.0;
+            min_x -= extra;
+            max_x += extra;
+        } else {
+            let new_h = vw / target_ratio;
+            let extra = (new_h - vh) / 2.0;
+            min_y -= extra;
+            max_y += extra;
+        }
+    }
+
+    let total_arc = *frame.arclengths.last().unwrap_or(&0.0);
+
+    // Convert rotated normals to arrays
+    let normals_arr: Vec<[f64; 3]> = rot_normals.iter()
+        .map(|n| [n[0], n[1], n[2]])
+        .collect();
+
+    Ok(CprProjectionInfo {
+        total_arc_mm: total_arc,
+        half_width_mm: width_mm,
+        view_right: [view_right[0], view_right[1], view_right[2]],
+        view_up: [view_up[0], view_up[1], view_up[2]],
+        view_center: center,
+        bbox_mm: [min_x, max_x, min_y, max_y],
+        positions: frame.positions.clone(),
+        arclengths: frame.arclengths.clone(),
+        normals: normals_arr,
+    })
 }
 
 // ---------------------------------------------------------------------------

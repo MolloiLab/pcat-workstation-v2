@@ -142,7 +142,9 @@
 
     let best: { vessel: Vessel; seedIndex: number; distance: number } | null = null;
 
-    for (const vessel of vesselNames) {
+    // Only search the active vessel — prevents accidental vessel switches
+    const activeVessel = seedStore.activeVessel;
+    for (const vessel of [activeVessel]) {
       const data = seedStore.vessels[vessel];
       for (let i = 0; i < data.seeds.length; i++) {
         const seed = data.seeds[i];
@@ -346,6 +348,29 @@
   }
 
   /**
+   * Pinch-to-zoom: trackpad pinch generates wheel events with ctrlKey=true.
+   * Only adjusts parallelScale — NOT focalPoint, because in MPR views
+   * focalPoint controls which slice is displayed.
+   */
+  function handleWheel(event: WheelEvent) {
+    if (!event.ctrlKey || !containerEl) return;
+    event.preventDefault();
+
+    let engine;
+    try { engine = getRenderingEngine(); } catch { return; }
+    const vp = engine.getViewport(viewportId) as any;
+    if (!vp) return;
+
+    const zoomFactor = 1 - event.deltaY * 0.01;
+    const camera = vp.getCamera();
+    if (camera?.parallelScale == null) return;
+
+    const newScale = Math.max(10, camera.parallelScale / zoomFactor);
+    vp.setCamera({ parallelScale: newScale });
+    vp.render();
+  }
+
+  /**
    * Clear hover state when mouse leaves the viewport.
    */
   function handleMouseLeave() {
@@ -374,6 +399,7 @@
     onmousedown={handleMouseDown}
     onmousemove={handleMouseMove}
     onmouseleave={handleMouseLeave}
+    onwheel={handleWheel}
     oncontextmenu={(e) => e.preventDefault()}
   ></div>
 

@@ -42,6 +42,8 @@ pub struct VesselResult {
     pub hu_median: f64,
     pub histogram_bins: Vec<f64>,
     pub histogram_counts: Vec<usize>,
+    pub radial_profile: Option<crate::pipeline::stats::RadialProfile>,
+    pub angular_asymmetry: Option<crate::pipeline::stats::AngularAsymmetry>,
 }
 
 /// Application state managed by Tauri.

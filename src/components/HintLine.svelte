@@ -8,6 +8,7 @@
    */
   import { seedStore } from '$lib/stores/seedStore.svelte';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
+  import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
 
   const VESSEL_LABELS: Record<string, string> = {
     RCA: 'RCA',
@@ -32,27 +33,34 @@
 
     // Seed selected — show selection actions
     if (selected !== null) {
-      return 'Drag to move \u00b7 Backspace to delete \u00b7 Escape to deselect';
+      return 'Drag to move \u00b7 Del to remove \u00b7 Esc to deselect \u00b7 Arrow keys to cycle';
     }
 
-    // "Experienced" detection: 3+ seeds means user knows the workflow
-    if (seedCount >= 3) {
+    // After enough seeds: prompt for ostium if not set, or show ready state
+    if (seedCount >= 5) {
+      const hasOstium = data.ostiumFraction !== null;
+      if (!hasOstium) {
+        return 'Scroll CPR to the ostium (where coronary exits aorta) \u00b7 Click "Set Ostium" in the CPR toolbar';
+      }
+      if (pipelineStore.canRun && pipelineStore.status === 'idle') {
+        return 'Ready to analyze \u00b7 Click "Run Pipeline" to compute PCAT';
+      }
       return '';
     }
 
-    // No seeds — prompt for ostium
+    // No seeds — prompt to start in aorta
     if (seedCount === 0) {
-      return `Click on any view to place ostium for ${VESSEL_LABELS[vessel]}`;
+      return `Start in the aorta, then trace into ${VESSEL_LABELS[vessel]} \u00b7 Click on any MPR view to place seeds`;
     }
 
-    // Has ostium only — prompt for waypoints
+    // 1 seed — continue tracing
     if (seedCount === 1) {
-      return 'Click to add waypoints along the vessel';
+      return 'Continue clicking along the vessel to add waypoints';
     }
 
-    // Has 2 seeds — show extended hints
-    if (seedCount === 2) {
-      return 'Click to add more waypoints \u00b7 Click on centerline to insert';
+    // 2-4 seeds — show CPR hints
+    if (seedCount >= 2) {
+      return 'CPR generated \u00b7 Shift+click on CPR to mark ostium \u00b7 Scroll CPR to move needle';
     }
 
     return '';
@@ -63,7 +71,7 @@
    * When it changes, show the hint and reset the fade timer.
    */
   let stateKey = $derived(
-    `${seedStore.activeVessel}:${seedStore.activeVesselData.seeds.length}:${seedStore.selectedSeedIndex}`
+    `${seedStore.activeVessel}:${seedStore.activeVesselData.seeds.length}:${seedStore.selectedSeedIndex}:${seedStore.activeVesselData.ostiumFraction}`
   );
 
   // React to state changes: show hint and start fade timer
@@ -83,7 +91,7 @@
     if (fadeTimer) clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
       visible = false;
-    }, 3500);
+    }, 8000);
   }
 
   /**

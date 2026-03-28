@@ -2,28 +2,38 @@
   /**
    * Bottom-right context panel in the 2x2 MPR grid.
    *
-   * Displays content based on the current workflow phase:
-   *   - 'empty'    -> prompt to load DICOM
-   *   - 'dicom'    -> patient & volume metadata
-   *   - 'seeds'    -> CPR compound view (straightened CPR + cross-sections)
-   *   - 'analysis' -> FAI analysis dashboard with results
+   * When pipeline results exist AND centerline is available, shows tabs
+   * to switch between CPR view and Analysis dashboard — user never loses
+   * access to either.
    */
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import CprView from './CprView.svelte';
   import AnalysisDashboard from './AnalysisDashboard.svelte';
+  import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
 
   type Props = {
     phase: 'empty' | 'dicom' | 'seeds' | 'analysis';
   };
 
   let { phase }: Props = $props();
-
   let meta = $derived(volumeStore.current);
+
+  // When both CPR and analysis are available, let user switch
+  let contextTab = $state<'cpr' | 'analysis'>('cpr');
+  let hasResults = $derived(pipelineStore.status === 'complete');
+  let hasCpr = $derived(phase === 'seeds' || phase === 'analysis');
+
+  // Auto-switch to analysis tab when pipeline first completes
+  $effect(() => {
+    if (pipelineStore.status === 'complete') {
+      contextTab = 'analysis';
+    }
+  });
 </script>
 
 <div
   class="flex h-full w-full flex-col bg-surface-secondary text-text-primary"
-  class:p-4={phase !== 'seeds' && phase !== 'analysis'}
+  class:p-4={phase === 'empty' || phase === 'dicom'}
 >
   {#if phase === 'empty'}
     <div class="flex flex-1 flex-col items-center justify-center gap-2">
@@ -45,34 +55,25 @@
         Open a DICOM directory to begin
       </p>
     </div>
+
   {:else if phase === 'dicom' && meta}
     <div class="flex flex-col gap-3">
-      <h3
-        class="border-b border-border pb-2 text-xs font-semibold tracking-wider text-text-secondary"
-      >
+      <h3 class="border-b border-border pb-2 text-xs font-semibold tracking-wider text-text-secondary">
         PATIENT INFO
       </h3>
-
       <div class="flex flex-col gap-2 text-sm">
         <div>
           <span class="text-xs text-text-secondary">Patient Name</span>
           <p class="truncate text-text-primary">{meta.patientName || 'N/A'}</p>
         </div>
-
         <div>
           <span class="text-xs text-text-secondary">Study Description</span>
-          <p class="truncate text-text-primary">
-            {meta.studyDescription || 'N/A'}
-          </p>
+          <p class="truncate text-text-primary">{meta.studyDescription || 'N/A'}</p>
         </div>
       </div>
-
-      <h3
-        class="mt-2 border-b border-border pb-2 text-xs font-semibold tracking-wider text-text-secondary"
-      >
+      <h3 class="mt-2 border-b border-border pb-2 text-xs font-semibold tracking-wider text-text-secondary">
         VOLUME
       </h3>
-
       <div class="flex flex-col gap-2 text-sm">
         <div>
           <span class="text-xs text-text-secondary">Dimensions (Z, Y, X)</span>
@@ -80,14 +81,12 @@
             {meta.shape[0]} x {meta.shape[1]} x {meta.shape[2]}
           </p>
         </div>
-
         <div>
           <span class="text-xs text-text-secondary">Spacing (mm)</span>
           <p class="font-mono text-xs text-text-primary">
             {meta.spacing[0].toFixed(2)} x {meta.spacing[1].toFixed(2)} x {meta.spacing[2].toFixed(2)}
           </p>
         </div>
-
         <div>
           <span class="text-xs text-text-secondary">Window</span>
           <p class="font-mono text-xs text-text-primary">
@@ -96,13 +95,42 @@
         </div>
       </div>
     </div>
-  {:else if phase === 'seeds'}
-    <CprView />
-  {:else if phase === 'analysis'}
-    <AnalysisDashboard />
-  {:else}
-    <div class="flex flex-1 items-center justify-center">
-      <p class="text-sm text-text-secondary">Phase: {phase}</p>
+
+  {:else if hasCpr}
+    <!-- CPR + Analysis: tabbed when results exist -->
+    {#if hasResults}
+      <!-- Tab bar -->
+      <div class="flex shrink-0 border-b border-border bg-surface-secondary">
+        <button
+          class="px-3 py-1.5 text-[11px] font-medium transition-colors"
+          class:text-accent={contextTab === 'cpr'}
+          class:border-b-2={contextTab === 'cpr'}
+          class:border-accent={contextTab === 'cpr'}
+          class:text-text-secondary={contextTab !== 'cpr'}
+          onclick={() => (contextTab = 'cpr')}
+        >
+          CPR
+        </button>
+        <button
+          class="px-3 py-1.5 text-[11px] font-medium transition-colors"
+          class:text-accent={contextTab === 'analysis'}
+          class:border-b-2={contextTab === 'analysis'}
+          class:border-accent={contextTab === 'analysis'}
+          class:text-text-secondary={contextTab !== 'analysis'}
+          onclick={() => (contextTab = 'analysis')}
+        >
+          Analysis
+        </button>
+      </div>
+    {/if}
+
+    <!-- Content -->
+    <div class="min-h-0 flex-1">
+      {#if hasResults && contextTab === 'analysis'}
+        <AnalysisDashboard />
+      {:else}
+        <CprView />
+      {/if}
     </div>
   {/if}
 </div>

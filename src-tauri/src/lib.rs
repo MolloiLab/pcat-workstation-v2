@@ -1,6 +1,6 @@
 mod commands;
 mod error;
-mod pipeline;
+pub mod pipeline;
 mod state;
 
 use state::AppState;
@@ -18,6 +18,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::dicom::open_dicom_dialog,
             commands::dicom::load_dicom,
+            commands::dicom::get_recent_dicoms,
+            commands::dicom::save_seeds,
+            commands::dicom::load_seeds,
             commands::volume::get_slice,
             commands::cpr::build_cpr_frame,
             commands::cpr::render_cpr_image,
@@ -26,6 +29,7 @@ pub fn run() {
             commands::cpr::compute_cpr_image,
             commands::cpr::compute_cross_section_image,
             commands::cpr::compute_cross_sections_batch,
+            commands::cpr::get_cpr_projection_info,
             commands::pipeline::run_pipeline,
         ])
         .run(tauri::generate_context!())
