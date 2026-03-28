@@ -1,131 +1,168 @@
-# PCAT Workstation v2
+# PCAT Workstation
 
-A clinical workstation for **Pericoronary Adipose Tissue (PCAT)** analysis — Fat Attenuation Index (FAI) measurement around coronary arteries from cardiac CT.
+A desktop application for measuring **Fat Attenuation Index (FAI)** around coronary arteries from cardiac CT scans. FAI quantifies pericoronary adipose tissue inflammation — a biomarker for coronary artery disease risk.
 
-Built with **Tauri v2** (Rust backend) + **Svelte 5** frontend + **cornerstone3D** for medical image viewing.
+> **Research use only.** Not for clinical diagnosis.
 
-## Features
+---
 
-### DICOM Viewer
-- Load DICOM CT volumes from folder
-- 3-pane MPR (Axial, Coronal, Sagittal) with synchronized crosshairs
-- Window/Level adjustment (right-drag), scroll through slices
-- Pinch-to-zoom on trackpad
-- Recent DICOM history
+## Quick Start
 
-### Seed Placement & Centerline
-- Click-to-place seeds on MPR views for RCA, LAD, LCx
-- Per-vessel color coding (RCA green, LAD orange, LCx blue)
-- Drag-to-move seeds, Delete/Backspace to remove
-- Cubic spline centerline with real-time update
-- Ostium marker (Shift+click on CPR)
-- Undo/Redo (Cmd+Z / Cmd+Shift+Z)
-- Per-patient seed save/load (auto-loads on volume change)
+### 1. Install
 
-### CPR Views
-- **Straightened CPR**: vessel unrolled into columns, cross-sections at 3 needle positions (A/B/C)
-- **Curved CPR**: vessel follows natural projected path (PCA-based viewing with rotation)
-  - Depth-centered average intensity — perivascular fat visible alongside vessel
-  - Isotropic pixels — no aspect-ratio distortion
-  - Works at all rotation angles
-- **FAI overlay**: toggle button colors fat-range pixels green (healthy) to red (inflamed)
-- Vessel diameter measurement on cross-sections
-- Rotation slider, needle offset control
+Download the latest `.dmg` from [Releases](https://github.com/MolloiLab/pcat-workstation-v2/releases), open it, and drag **PCAT Workstation** to your Applications folder.
 
-### FAI Analysis Pipeline
-- **6-stage pipeline**: centerline densification, arc-length clipping (0-40mm), radius estimation, contour extraction (360 angles), VOI construction (CRISP-CT: 1mm gap + 3mm ring), FAI statistics
-- **Overview**: per-vessel risk cards (HIGH/LOW based on -70.1 HU threshold)
-- **HU Histogram**: distribution within FAI window (-190 to -30 HU)
-- **Radial Profile**: mean HU vs distance from vessel wall (1-20mm)
-- **Angular Asymmetry**: 8-sector ring visualization with per-sector mean HU
-- Pipeline results saved/loaded with seeds
+### 2. Open a CT scan
 
-## Tech Stack
+Click **Open DICOM** and select the folder containing your cardiac CT DICOM files. The application loads the volume and displays it in three views: Axial, Coronal, and Sagittal.
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | Rust (Tauri v2) — DICOM loading, volume processing, CPR rendering, FAI computation |
-| Frontend | Svelte 5, TypeScript, Tailwind CSS v4 |
-| Medical Imaging | cornerstone3D (MPR viewing) |
-| Charts | Plotly.js (histograms, radial profiles) |
-| IPC | Tauri commands with raw binary responses |
+<!-- ![Step 2: MPR Views](docs/screenshots/mpr-views.png) -->
 
-## Development
+- **Scroll** through slices with the mouse wheel
+- **Adjust brightness/contrast** by right-clicking and dragging
+- **Zoom** with pinch gesture on trackpad
+- Recently opened scans appear in the dropdown next to "Open DICOM"
+
+### 3. Trace the coronary arteries
+
+Select a vessel (RCA, LAD, or LCx) from the toolbar, then **click on the MPR views** to place seed points along the artery. Start from the aorta and trace distally.
+
+<!-- ![Step 3: Seed Placement](docs/screenshots/seed-placement.png) -->
+
+- Place at least **2 seeds** per vessel (more = smoother centerline)
+- Seeds appear as colored dots; a spline centerline connects them automatically
+- **Drag** a seed to adjust its position
+- **Delete/Backspace** removes the selected seed
+- **Cmd+Z** to undo, **Cmd+Shift+Z** to redo
+- Click **Save** to store your work (auto-loads next time you open this patient)
+
+### 4. Review the CPR
+
+Once you have 2+ seeds, the bottom-right panel shows the **Curved Planar Reformation (CPR)** — a reformatted view that follows the vessel through the anatomy.
+
+<!-- ![Step 4: CPR View](docs/screenshots/cpr-view.png) -->
+
+- Switch between **Straightened** and **Curved** modes
+- **Rotate** the view with the slider at the bottom
+- Three **cross-sections** (A, B, C) show the vessel at different positions
+- Click **FAI** to toggle the fat attenuation overlay:
+  - **Green** = healthy pericoronary fat
+  - **Red** = inflamed pericoronary fat
+- **Shift+click** on the CPR to mark the ostium position
+
+### 5. Run the FAI analysis
+
+Click **Run Pipeline** in the toolbar. The analysis takes a few seconds and includes:
+
+1. Centerline refinement along the proximal 40mm segment
+2. Vessel wall boundary detection
+3. Perivascular VOI construction (CRISP-CT protocol: 1mm gap + 3mm ring)
+4. FAI measurement within the -190 to -30 HU fat window
+
+### 6. View the results
+
+After the pipeline completes, click the **Analysis** tab (next to CPR) to see:
+
+#### Overview
+Per-vessel FAI summary with risk classification (HIGH if mean HU > -70.1, LOW otherwise).
+
+<!-- ![Step 6a: Overview](docs/screenshots/analysis-overview.png) -->
+
+#### Histograms
+HU distribution within the FAI window, with reference lines at -190, -30, and -70.1 HU.
+
+<!-- ![Step 6b: Histograms](docs/screenshots/analysis-histogram.png) -->
+
+#### Radial Profile
+How mean HU changes with distance from the vessel wall (1–20mm). Shows whether inflammation is localized near the vessel or diffuse.
+
+<!-- ![Step 6c: Radial Profile](docs/screenshots/analysis-radial.png) -->
+
+#### Angular Analysis
+Cross-sectional ring showing mean HU in 8 sectors around the vessel. Identifies whether inflammation is focal (one side) or circumferential.
+
+<!-- ![Step 6d: Angular](docs/screenshots/analysis-angular.png) -->
+
+### 7. Save and compare
+
+- Click **Save** to store seeds + analysis results together
+- You can trace multiple vessels (RCA, LAD, LCx) and run the pipeline for each
+- Switch between CPR and Analysis tabs anytime — your MPR views stay visible
+- Click **Re-run Pipeline** after adjusting seeds to update results
+
+---
+
+## Keyboard Shortcuts
+
+| Action | Shortcut |
+|--------|----------|
+| Undo | Cmd + Z |
+| Redo | Cmd + Shift + Z |
+| Delete seed | Delete / Backspace |
+| Switch vessel | 1 (RCA), 2 (LAD), 3 (LCx) |
+| Navigate seeds | Left / Right arrow |
+| Deselect seed | Escape |
+| Set ostium | Shift + click on CPR |
+
+---
+
+## Analysis Parameters
+
+| Parameter | Value | Reference |
+|-----------|-------|-----------|
+| FAI window | -190 to -30 HU | Antonopoulos et al., *Sci Transl Med* 2017 |
+| Risk threshold | -70.1 HU | Oikonomou et al., *Eur Heart J* 2018 |
+| VOI protocol | 1mm gap + 3mm ring (CRISP-CT) | CRISP-CT study |
+| Segment length | Proximal 40mm from ostium | Standard clinical protocol |
+| Radial profile | 1–20mm from vessel wall, 1mm bins | |
+| Angular sectors | 8 sectors around vessel circumference | |
+
+---
+
+## For Developers
+
+<details>
+<summary>Build from source</summary>
 
 ### Prerequisites
-
 - [Rust](https://rustup.rs/) (stable)
 - [Node.js](https://nodejs.org/) >= 18
 - [Tauri CLI](https://tauri.app/start/): `cargo install tauri-cli`
 
-### Setup
-
+### Run
 ```bash
-git clone <repo-url>
+git clone https://github.com/MolloiLab/pcat-workstation-v2.git
 cd pcat-workstation-v2
 npm install
-```
-
-### Run (dev)
-
-```bash
 cargo tauri dev
 ```
 
-### Build (release)
-
+### Build release
 ```bash
 cargo tauri build
 ```
 
-The `.dmg` / `.app` output is in `src-tauri/target/release/bundle/`.
+Output: `src-tauri/target/release/bundle/dmg/PCAT Workstation_0.1.0_aarch64.dmg`
 
-## Project Structure
+### Tech stack
+Tauri v2 (Rust) + Svelte 5 + cornerstone3D + Plotly.js
 
-```
-src/                          # Svelte frontend
-  components/
-    MprPanel.svelte           # 2x2 MPR grid
-    SliceViewport.svelte      # Single cornerstone viewport
-    CprView.svelte            # CPR + cross-sections + FAI overlay
-    AnalysisDashboard.svelte  # FAI results (4 tabs)
-    SeedOverlay.svelte        # SVG seed/centerline overlay
-    CrossSection.svelte       # Single cross-section panel
-    ContextPanel.svelte       # Bottom-right panel (CPR | Analysis tabs)
-  lib/
-    stores/                   # Svelte 5 reactive stores
-      seedStore.svelte.ts     # Per-vessel seeds, undo/redo
-      volumeStore.svelte.ts   # Loaded volume metadata
-      pipelineStore.svelte.ts # Pipeline state + results
-    api.ts                    # Tauri IPC wrappers
-    cprProjection.ts          # 3D <-> 2D CPR coordinate mapping
-    navigation.ts             # Cross-view MPR navigation
+</details>
 
-src-tauri/                    # Rust backend
-  src/
-    commands/
-      dicom.rs                # DICOM loading, seed save/load
-      cpr.rs                  # CPR frame + rendering commands
-      pipeline.rs             # FAI analysis pipeline orchestration
-    pipeline/
-      cpr.rs                  # Straightened CPR, cross-sections, Bishop frame
-      curved_cpr.rs           # Curved CPR renderer (PCA + depth-centered AIP)
-      spline.rs               # Cubic spline interpolation
-      contour.rs              # Vessel boundary extraction (polar radial)
-      voi.rs                  # Perivascular VOI mask (CRISP-CT)
-      stats.rs                # FAI stats, radial profile, angular asymmetry
-      centerline.rs           # Centerline clipping, radius estimation
-      dicom_loader.rs         # DICOM directory parsing
-      interp.rs               # Trilinear interpolation
-    state.rs                  # AppState (volume, results, CPR frame cache)
-```
+---
 
 ## References
 
-- Oikonomou EK et al. "Non-invasive detection of coronary inflammation using computed tomography and prediction of residual cardiovascular risk." *Eur Heart J*. 2018.
-- CRISP-CT: Coronary Inflammation and Structural Plaque characteristics by CT.
-- Antonopoulos AS et al. "Detecting human coronary inflammation by imaging perivascular fat." *Sci Transl Med*. 2017.
+1. Oikonomou EK et al. "Non-invasive detection of coronary inflammation using computed tomography and prediction of residual cardiovascular risk." *Eur Heart J*. 2018.
+2. Antonopoulos AS et al. "Detecting human coronary inflammation by imaging perivascular fat." *Sci Transl Med*. 2017.
+3. CRISP-CT: Coronary Inflammation and Structural Plaque characteristics by CT.
+
+---
 
 ## License
 
-Research use only. Not for clinical diagnosis.
+MIT License. See [LICENSE](LICENSE) for details.
+
+**Not intended for clinical diagnosis** — research use only.
+
+*Developed at the [Molloi Lab](https://github.com/MolloiLab), University of California, Irvine.*
