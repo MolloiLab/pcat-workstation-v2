@@ -30,6 +30,7 @@
     curvedCprToWorld,
   } from '$lib/cprProjection';
   import CrossSection from './CrossSection.svelte';
+  import { volumeStore } from '$lib/stores/volumeStore.svelte';
 
   // ---- Constants ----
   const CPR_WIDTH_MM = 25.0;
@@ -37,11 +38,15 @@
   // ---- Reactive state ----
   let cprCanvas: HTMLCanvasElement | undefined = $state();
   let rotationDeg = $state(0);
-  let windowCenter = $state(40);
-  let windowWidth = $state(400);
+  // Initialize W/L from DICOM metadata (same as MPR views)
+  let windowCenter = $state(volumeStore.current?.windowCenter ?? 40);
+  let windowWidth = $state(volumeStore.current?.windowWidth ?? 400);
 
   // CPR mode: straightened (classic) vs curved (natural vessel path)
   let cprMode: 'straightened' | 'curved' = $state('curved');
+
+  // FAI overlay toggle
+  let showFaiOverlay = $state(false);
 
   // Needle B position as fraction (0..1); A and C are offset
   let needleBFraction = $state(0.5);
@@ -173,20 +178,28 @@
     const range = ww;
     for (let i = 0; i < data.length; i++) {
       const raw = data[i];
-      // NaN pixels (outside volume / curved CPR gaps) -> black transparent
       if (raw !== raw) {
-        // NaN
         imgData.data[i * 4] = 0;
         imgData.data[i * 4 + 1] = 0;
         imgData.data[i * 4 + 2] = 0;
         imgData.data[i * 4 + 3] = 255;
         continue;
       }
-      const v = Math.round(((raw - lo) / range) * 255);
-      const clamped = Math.max(0, Math.min(255, v));
-      imgData.data[i * 4] = clamped;
-      imgData.data[i * 4 + 1] = clamped;
-      imgData.data[i * 4 + 2] = clamped;
+      const gray = Math.max(0, Math.min(255, Math.round(((raw - lo) / range) * 255)));
+
+      // FAI overlay: color fat-range pixels green→red (full color, no grayscale blend)
+      if (showFaiOverlay && raw >= -190 && raw <= -30) {
+        const t = (raw - (-190)) / ((-30) - (-190));
+        const r = Math.round(t < 0.5 ? t * 2 * 255 : 255);
+        const g = Math.round(t < 0.5 ? 255 : (1 - (t - 0.5) * 2) * 255);
+        imgData.data[i * 4]     = r;
+        imgData.data[i * 4 + 1] = g;
+        imgData.data[i * 4 + 2] = 20;
+      } else {
+        imgData.data[i * 4]     = gray;
+        imgData.data[i * 4 + 1] = gray;
+        imgData.data[i * 4 + 2] = gray;
+      }
       imgData.data[i * 4 + 3] = 255;
     }
     ctx.putImageData(imgData, 0, 0);
@@ -489,6 +502,12 @@
     drawOverlays(cprCanvas);
   }
 
+  // Re-render when FAI overlay is toggled (uses cached image data)
+  $effect(() => {
+    showFaiOverlay; // track dependency
+    repaintCanvas();
+  });
+
   // ---- Phase 1: Build frame when centerline changes ----
 
   let frameDebounce: ReturnType<typeof setTimeout> | undefined;
@@ -570,8 +589,8 @@
         buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
           rotationDeg,
           widthMm: CPR_WIDTH_MM,
-          pixelsWide: 768,
-          pixelsHigh: 384,
+          pixelsWide: 512,
+          pixelsHigh: 512,
           slabMm: 1.0,
         });
       } else {
@@ -608,6 +627,8 @@
       projectionInfo = await invoke<CprProjectionInfo>('get_cpr_projection_info', {
         rotationDeg,
         widthMm: CPR_WIDTH_MM,
+        pixelsWide: 512,
+        pixelsHigh: 512,
       });
     } catch (e) {
       console.error('CprView: get_cpr_projection_info failed', e);
@@ -1032,6 +1053,7 @@
             batchImageData={batchXsA?.imageData ?? null}
             batchPixels={batchXsA?.pixels ?? null}
             arcMmProp={batchXsA?.arc_mm ?? null}
+            showFaiOverlay={showFaiOverlay}
           />
         </div>
         <div class="flex min-h-0 flex-1 flex-col bg-black">
@@ -1046,6 +1068,7 @@
             batchImageData={batchXsB?.imageData ?? null}
             batchPixels={batchXsB?.pixels ?? null}
             arcMmProp={batchXsB?.arc_mm ?? null}
+            showFaiOverlay={showFaiOverlay}
           />
         </div>
         <div class="flex min-h-0 flex-1 flex-col bg-black">
@@ -1060,6 +1083,7 @@
             batchImageData={batchXsC?.imageData ?? null}
             batchPixels={batchXsC?.pixels ?? null}
             arcMmProp={batchXsC?.arc_mm ?? null}
+            showFaiOverlay={showFaiOverlay}
           />
         </div>
       {:else}
@@ -1107,6 +1131,17 @@
       onclick={() => { cprMode = 'curved'; }}
     >
       Curved
+    </button>
+
+    <button
+      class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
+        {showFaiOverlay
+          ? 'bg-error/20 text-error'
+          : 'text-text-secondary/60 hover:text-text-secondary'}"
+      onclick={() => { showFaiOverlay = !showFaiOverlay; }}
+      title="Toggle FAI color overlay (green=healthy fat, red=inflamed)"
+    >
+      FAI
     </button>
 
     <span class="text-[10px] text-text-secondary/40">|</span>

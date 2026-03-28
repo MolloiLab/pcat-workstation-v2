@@ -7,15 +7,23 @@
    * Active vessel has a filled background; inactive vessels show an outline.
    */
   import { seedStore, VESSEL_COLORS, type Vessel } from '$lib/stores/seedStore.svelte';
+  import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { navigateToWorldPos } from '$lib/navigation';
   import { saveSeeds, loadSeeds } from '$lib/api';
+  import { volumeStore } from '$lib/stores/volumeStore.svelte';
 
   let saveStatus = $state('');
 
   async function handleSaveSeeds() {
     try {
-      const json = seedStore.exportJson();
-      await saveSeeds(json);
+      const dicomPath = volumeStore.dicomPath;
+      if (!dicomPath) return;
+      // Combine seeds + pipeline results in one file
+      const data: any = JSON.parse(seedStore.exportJson());
+      if (pipelineStore.results) {
+        data.pipelineResults = pipelineStore.results;
+      }
+      await saveSeeds(JSON.stringify(data, null, 2), dicomPath);
       saveStatus = 'Saved';
       setTimeout(() => { saveStatus = ''; }, 2000);
     } catch (e) {
@@ -25,9 +33,18 @@
 
   async function handleLoadSeeds() {
     try {
-      const json = await loadSeeds();
+      const dicomPath = volumeStore.dicomPath;
+      if (!dicomPath) return;
+      const json = await loadSeeds(dicomPath);
       if (json) {
         seedStore.importJson(json);
+        // Restore pipeline results if present
+        try {
+          const data = JSON.parse(json);
+          if (data.pipelineResults) {
+            pipelineStore.restoreResults(data.pipelineResults);
+          }
+        } catch { /* backward compat */ }
         saveStatus = 'Loaded';
         setTimeout(() => { saveStatus = ''; }, 2000);
       }

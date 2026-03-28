@@ -22,6 +22,8 @@
     batchPixels?: number | null;
     /** Pre-computed arc-length in mm from batch call. */
     arcMmProp?: number | null;
+    /** Whether to show FAI color overlay. */
+    showFaiOverlay?: boolean;
   };
 
   let {
@@ -35,6 +37,7 @@
     batchImageData = null,
     batchPixels = null,
     arcMmProp = null,
+    showFaiOverlay = false,
   }: Props = $props();
 
   let canvas: HTMLCanvasElement | undefined = $state();
@@ -74,11 +77,20 @@
     const lo = wc - ww / 2;
     const hi = wc + ww / 2;
     for (let i = 0; i < data.length; i++) {
-      const v = Math.round(((data[i] - lo) / (hi - lo)) * 255);
-      const clamped = Math.max(0, Math.min(255, v));
-      imgData.data[i * 4] = clamped;
-      imgData.data[i * 4 + 1] = clamped;
-      imgData.data[i * 4 + 2] = clamped;
+      const raw = data[i];
+      const gray = Math.max(0, Math.min(255, Math.round(((raw - lo) / (hi - lo)) * 255)));
+      if (showFaiOverlay && raw >= -190 && raw <= -30) {
+        const t = (raw - (-190)) / ((-30) - (-190));
+        const r = Math.round(t < 0.5 ? t * 2 * 255 : 255);
+        const g = Math.round(t < 0.5 ? 255 : (1 - (t - 0.5) * 2) * 255);
+        imgData.data[i * 4]     = r;
+        imgData.data[i * 4 + 1] = g;
+        imgData.data[i * 4 + 2] = 20;
+      } else {
+        imgData.data[i * 4] = gray;
+        imgData.data[i * 4 + 1] = gray;
+        imgData.data[i * 4 + 2] = gray;
+      }
       imgData.data[i * 4 + 3] = 255;
     }
     ctx.putImageData(imgData, 0, 0);

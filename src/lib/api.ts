@@ -30,14 +30,14 @@ export async function getRecentDicoms(): Promise<string[]> {
   return invoke<string[]>('get_recent_dicoms');
 }
 
-/** Save seeds JSON to app data directory. Returns the file path. */
-export async function saveSeeds(seedsJson: string): Promise<string> {
-  return invoke<string>('save_seeds', { seedsJson });
+/** Save seeds JSON to app data directory, keyed by DICOM path. Returns the file path. */
+export async function saveSeeds(seedsJson: string, dicomPath: string): Promise<string> {
+  return invoke<string>('save_seeds', { seedsJson, dicomPath });
 }
 
-/** Load seeds JSON from app data directory. Returns null if no file. */
-export async function loadSeeds(): Promise<string | null> {
-  return invoke<string | null>('load_seeds');
+/** Load seeds JSON from app data directory, keyed by DICOM path. Returns null if no file. */
+export async function loadSeeds(dicomPath: string): Promise<string | null> {
+  return invoke<string | null>('load_seeds', { dicomPath });
 }
 
 /**

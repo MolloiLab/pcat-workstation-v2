@@ -110,21 +110,38 @@ pub async fn get_recent_dicoms(app: tauri::AppHandle) -> Result<Vec<String>, Str
     Ok(load_recent_list(&app))
 }
 
-/// Save seeds JSON to app data directory.
+/// Sanitize a path string into a safe filename component.
+fn sanitize_for_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect::<String>()
+        .replace("..", "_")
+}
+
+/// Save seeds JSON keyed by DICOM folder path.
 #[tauri::command]
-pub async fn save_seeds(app: tauri::AppHandle, seeds_json: String) -> Result<String, String> {
-    let dir = app.path().app_data_dir().expect("app data dir");
+pub async fn save_seeds(app: tauri::AppHandle, seeds_json: String, dicom_path: String) -> Result<String, String> {
+    let dir = app.path().app_data_dir().expect("app data dir").join("seeds");
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("seeds.json");
+    // Use last path component as human-readable key
+    let key = Path::new(&dicom_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| sanitize_for_filename(&dicom_path));
+    let path = dir.join(format!("{}.json", sanitize_for_filename(&key)));
     std::fs::write(&path, &seeds_json).map_err(|e| format!("write failed: {e}"))?;
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Load seeds JSON from app data directory.
+/// Load seeds JSON keyed by DICOM folder path.
 #[tauri::command]
-pub async fn load_seeds(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let dir = app.path().app_data_dir().expect("app data dir");
-    let path = dir.join("seeds.json");
+pub async fn load_seeds(app: tauri::AppHandle, dicom_path: String) -> Result<Option<String>, String> {
+    let dir = app.path().app_data_dir().expect("app data dir").join("seeds");
+    let key = Path::new(&dicom_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| sanitize_for_filename(&dicom_path));
+    let path = dir.join(format!("{}.json", sanitize_for_filename(&key)));
     if path.exists() {
         let data = std::fs::read_to_string(&path).map_err(|e| format!("read failed: {e}"))?;
         Ok(Some(data))

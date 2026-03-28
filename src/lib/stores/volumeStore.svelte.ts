@@ -20,6 +20,7 @@ export type VolumeMetadata = {
   windowWidth: number;
   patientName: string;
   studyDescription: string;
+  dicomPath: string;
 };
 
 let currentVolume = $state<VolumeMetadata | null>(null);
@@ -30,6 +31,9 @@ let loadProgress = $state(0);
 export const volumeStore = {
   get current() {
     return currentVolume;
+  },
+  get dicomPath(): string | null {
+    return currentVolume?.dicomPath ?? null;
   },
   get cornerstoneVolumeId() {
     return cornerstoneVolumeId;

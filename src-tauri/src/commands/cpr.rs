@@ -262,6 +262,8 @@ pub struct CprProjectionInfo {
 pub async fn get_cpr_projection_info(
     rotation_deg: f64,
     width_mm: f64,
+    pixels_wide: usize,
+    pixels_high: usize,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<CprProjectionInfo, String> {
     let frame = {
@@ -272,10 +274,11 @@ pub async fn get_cpr_projection_info(
     };
 
     // Rotate frame
-    let (rot_normals, rot_binormals) = frame.rotated_frame(rotation_deg);
+    let (rot_normals, _rot_binormals) = frame.rotated_frame(rotation_deg);
 
-    // Binormal-based viewing plane (matches curved CPR renderer — rotates with slider)
-    let (_view_forward, view_right, view_up) = curved_cpr::compute_view_basis(&rot_binormals);
+    // PCA-based viewing plane (matches curved CPR renderer — rotates around principal axis)
+    let (_view_forward, view_right, view_up) =
+        curved_cpr::compute_view_basis_pca_with_rotation(&frame.positions, rotation_deg);
 
     // Project centerline to 2D
     let n = frame.n_cols();
@@ -299,6 +302,25 @@ pub async fn get_cpr_projection_info(
     max_x += context_pad;
     min_y -= context_pad;
     max_y += context_pad;
+
+    // Isotropic correction — match renderer's bbox-to-pixel mapping
+    if pixels_wide >= 2 && pixels_high >= 2 {
+        let vw = max_x - min_x;
+        let vh = max_y - min_y;
+        let target_ratio = pixels_wide as f64 / pixels_high as f64;
+        let bbox_ratio = vw / vh;
+        if bbox_ratio < target_ratio {
+            let new_w = vh * target_ratio;
+            let extra = (new_w - vw) / 2.0;
+            min_x -= extra;
+            max_x += extra;
+        } else {
+            let new_h = vw / target_ratio;
+            let extra = (new_h - vh) / 2.0;
+            min_y -= extra;
+            max_y += extra;
+        }
+    }
 
     let total_arc = *frame.arclengths.last().unwrap_or(&0.0);
 

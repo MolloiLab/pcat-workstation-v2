@@ -47,6 +47,7 @@ fn build_dense_centerline(
     ostium_mm: &[f64; 3],
     waypoints_mm: &[[f64; 3]],
     spacing: [f64; 3],
+    origin: [f64; 3],
     step_mm: f64,
 ) -> Vec<[f64; 3]> {
     // Collect all control points in order: ostium, then waypoints
@@ -58,10 +59,14 @@ fn build_dense_centerline(
         return control_pts;
     }
 
-    // Convert mm to voxel coords
+    // Convert mm to voxel coords: voxel = (mm - origin) / spacing
     let control_vox: Vec<[f64; 3]> = control_pts
         .iter()
-        .map(|pt| [pt[0] / spacing[0], pt[1] / spacing[1], pt[2] / spacing[2]])
+        .map(|pt| [
+            (pt[0] - origin[0]) / spacing[0],
+            (pt[1] - origin[1]) / spacing[1],
+            (pt[2] - origin[2]) / spacing[2],
+        ])
         .collect();
 
     // Densely interpolate between consecutive control points at step_mm intervals
@@ -118,13 +123,13 @@ pub async fn run_pipeline(
     }
 
     // Extract volume data under the lock, then release immediately
-    let (volume_data, spacing) = {
+    let (volume_data, spacing, origin) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard
             .volume
             .as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
-        (vol.data.clone(), vol.spacing)
+        (vol.data.clone(), vol.spacing, vol.origin)
     };
 
     let volume_shape = [
@@ -165,6 +170,7 @@ pub async fn run_pipeline(
                 &vessel_seeds.ostium_mm,
                 &vessel_seeds.waypoints_mm,
                 spacing,
+                origin,
                 0.5, // 0.5mm step
             );
 
@@ -182,6 +188,8 @@ pub async fn run_pipeline(
                         fai_risk: "N/A".to_string(),
                         histogram_bins: vec![],
                         histogram_counts: vec![],
+                        radial_profile: None,
+                        angular_asymmetry: None,
                     },
                 );
                 continue;
@@ -211,6 +219,8 @@ pub async fn run_pipeline(
                         fai_risk: "N/A".to_string(),
                         histogram_bins: vec![],
                         histogram_counts: vec![],
+                        radial_profile: None,
+                        angular_asymmetry: None,
                     },
                 );
                 continue;
@@ -219,7 +229,7 @@ pub async fn run_pipeline(
             // --- Stage 3: Estimate radii ---
             emit_progress("radii", 0.2);
 
-            let _radii = centerline::estimate_radii(
+            let radii = centerline::estimate_radii(
                 &volume_data,
                 &clipped,
                 spacing,
@@ -246,20 +256,50 @@ pub async fn run_pipeline(
                 &contours,
                 spacing,
                 voi::VoiMode::Crisp {
-                    gap_mm: 0.0,
+                    gap_mm: 1.0,
                     ring_mm: 3.0,
                 },
             );
 
             // --- Stage 6: Compute FAI stats ---
-            emit_progress("stats", 0.9);
+            emit_progress("stats", 0.85);
 
-            let stats = crate::pipeline::stats::compute_pcat_stats(
+            let mut stats = crate::pipeline::stats::compute_pcat_stats(
                 &volume_data,
                 &voi_mask,
                 vessel_name,
                 (-190.0, -30.0),
             );
+
+            // --- Stage 7: Radial profile ---
+            emit_progress("radial_profile", 0.92);
+
+            let radial = crate::pipeline::stats::compute_radial_profile(
+                &volume_data,
+                &clipped,
+                &radii,
+                spacing,
+                20.0,    // max_distance_mm
+                1.0,     // ring_step_mm
+                (-190.0, -30.0),
+            );
+
+            // --- Stage 8: Angular asymmetry ---
+            emit_progress("angular_asymmetry", 0.96);
+
+            let angular = crate::pipeline::stats::compute_angular_asymmetry(
+                &volume_data,
+                &clipped,
+                &radii,
+                spacing,
+                8,       // n_sectors
+                (-190.0, -30.0),
+                1.0,     // gap_mm (CRISP-CT)
+                3.0,     // ring_mm
+            );
+
+            stats.radial_profile = Some(radial);
+            stats.angular_asymmetry = Some(angular);
 
             emit_progress("done", 1.0);
             all_stats.insert(vessel_name.clone(), stats);
@@ -288,6 +328,8 @@ pub async fn run_pipeline(
                         hu_median: stats.hu_median,
                         histogram_bins: stats.histogram_bins.clone(),
                         histogram_counts: stats.histogram_counts.clone(),
+                        radial_profile: stats.radial_profile.clone(),
+                        angular_asymmetry: stats.angular_asymmetry.clone(),
                     },
                 );
             }

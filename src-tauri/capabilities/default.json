@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for PCAT Workstation",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "dialog:default"
+  ]
+}

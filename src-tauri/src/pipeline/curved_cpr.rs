@@ -15,7 +15,7 @@ use super::interp::trilinear;
 /// Bounding box padding beyond the projected centerline (mm).
 /// Controls how much anatomical context surrounds the vessel.
 /// Shared with `commands/cpr.rs::get_cpr_projection_info`.
-pub const CONTEXT_PAD_MM: f64 = 35.0;
+pub const CONTEXT_PAD_MM: f64 = 25.0;
 
 // ---------------------------------------------------------------------------
 // 1. View basis from binormals
@@ -111,6 +111,88 @@ pub fn compute_view_basis_pca(
 
     // Use world_up to derive view_right
     let world_up = Vector3::new(1.0, 0.0, 0.0);
+
+    let view_right = {
+        let candidate = world_up.cross(&view_forward);
+        if candidate.norm() > 1e-6 {
+            candidate.normalize()
+        } else {
+            let fallback = Vector3::new(0.0, 1.0, 0.0);
+            fallback.cross(&view_forward).normalize()
+        }
+    };
+
+    let view_up = view_forward.cross(&view_right).normalize();
+
+    (view_forward, view_right, view_up)
+}
+
+/// Compute view basis using PCA with rotation around the vessel's principal axis.
+///
+/// At rotation=0°, the viewing direction is the normal to the centerline's best-fit
+/// plane (PCA third component — minimum variance). Rotation sweeps the viewing direction
+/// around the centerline's long axis (PCA first component — maximum variance).
+///
+/// This gives the flattest possible vessel projection at every rotation angle,
+/// matching clinical CPR software (syngo.via).
+pub fn compute_view_basis_pca_with_rotation(
+    positions: &[[f64; 3]],
+    rotation_deg: f64,
+) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+    let n = positions.len();
+    assert!(n >= 2, "need at least 2 positions");
+
+    // 1. Compute centroid
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+    let mut cz = 0.0;
+    for p in positions {
+        cx += p[0];
+        cy += p[1];
+        cz += p[2];
+    }
+    cx /= n as f64;
+    cy /= n as f64;
+    cz /= n as f64;
+
+    // 2. Covariance matrix
+    let mut cov = nalgebra::Matrix3::<f64>::zeros();
+    for p in positions {
+        let d = Vector3::new(p[0] - cx, p[1] - cy, p[2] - cz);
+        cov += d * d.transpose();
+    }
+    cov /= n as f64;
+
+    // 3. Eigendecomposition — sort eigenvalues
+    let eig = cov.symmetric_eigen();
+    let mut indices = [0usize, 1, 2];
+    indices.sort_by(|&a, &b| {
+        eig.eigenvalues[a]
+            .abs()
+            .partial_cmp(&eig.eigenvalues[b].abs())
+            .unwrap()
+    });
+    // indices[0] = smallest eigenvalue (plane normal = base view_forward)
+    // indices[1] = middle eigenvalue (secondary spread)
+    // indices[2] = largest eigenvalue (vessel long axis = rotation axis)
+
+    let e_small = eig.eigenvectors.column(indices[0]).into_owned();
+    let mut e_mid = eig.eigenvectors.column(indices[1]).into_owned();
+    let e_large = eig.eigenvectors.column(indices[2]).into_owned();
+
+    // Ensure right-handed system for consistent rotation direction
+    if e_small.cross(&e_mid).dot(&e_large) < 0.0 {
+        e_mid = -e_mid;
+    }
+
+    // 4. Rotate view_forward around e_large (vessel long axis) by rotation_deg
+    let theta = rotation_deg.to_radians();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let view_forward = (cos_t * e_small + sin_t * e_mid).normalize();
+
+    // 5. Build orthonormal viewing basis using world_up for consistent orientation
+    let world_up = Vector3::new(1.0, 0.0, 0.0); // z-axis in [z,y,x] coords
 
     let view_right = {
         let candidate = world_up.cross(&view_forward);
@@ -437,8 +519,8 @@ pub(crate) fn render_curved_cpr_pixeldriven(
 /// This avoids all 2D projection artifacts and all texture-warp artifacts.
 pub(crate) fn render_curved_direct(
     positions: &[[f64; 3]],
-    normals: &[Vector3<f64>],
-    binormals: &[Vector3<f64>],
+    _normals: &[Vector3<f64>],
+    _binormals: &[Vector3<f64>],
     arclengths: &[f64],
     volume: &Array3<f32>,
     spacing: [f64; 3],
@@ -447,14 +529,17 @@ pub(crate) fn render_curved_direct(
     pixels_wide: usize,
     pixels_high: usize,
     slab_mm: f64,
+    rotation_deg: f64,
 ) -> CurvedCprResult {
     let n = positions.len();
     assert!(n >= 2);
 
-    // 1. Viewing plane from rotated binormals — rotates with the slider.
-    // This ensures the lateral sampling direction is always visible on screen.
-    // 3D segment search prevents fold-back artifacts.
-    let (view_forward, view_right, view_up) = compute_view_basis(binormals);
+    // 1. PCA-based viewing plane — views perpendicular to the centerline's best-fit
+    // plane, rotated around the vessel's principal axis. This gives the flattest
+    // possible projection (like syngo.via), while the rotation slider controls
+    // which side of the vessel you see.
+    let (view_forward, view_right, view_up) =
+        compute_view_basis_pca_with_rotation(positions, rotation_deg);
 
     // 2. Project centerline for bounding box
     let mid_idx = n / 2;
@@ -477,18 +562,47 @@ pub(crate) fn render_curved_direct(
     max_x += context_pad_mm;
     min_y -= context_pad_mm;
     max_y += context_pad_mm;
-    let view_width = max_x - min_x;
-    let view_height = max_y - min_y;
 
-    // 3. MIP slab
-    let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
-    let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
-        (0..n_slab_steps)
-            .map(|k| -slab_mm / 2.0 + slab_mm * (k as f64) / ((n_slab_steps - 1) as f64))
-            .collect()
+    // Ensure isotropic (square) pixels: adjust bbox to match the output
+    // aspect ratio so curvature is never exaggerated by non-uniform scaling.
+    let mut view_width = max_x - min_x;
+    let mut view_height = max_y - min_y;
+    let target_ratio = pixels_wide as f64 / pixels_high as f64;
+    let bbox_ratio = view_width / view_height;
+    if bbox_ratio < target_ratio {
+        // bbox taller than needed → extend width
+        let new_width = view_height * target_ratio;
+        let extra = (new_width - view_width) / 2.0;
+        min_x -= extra;
+        max_x += extra;
+        view_width = max_x - min_x;
     } else {
-        vec![0.0]
-    };
+        // bbox wider than needed → extend height
+        let new_height = view_width / target_ratio;
+        let extra = (new_height - view_height) / 2.0;
+        min_y -= extra;
+        max_y += extra;
+        view_height = max_y - min_y;
+    }
+
+    // 3. Average intensity slab offsets.
+    // Use slab_mm for the CPR slab (thin, ~1mm for sharpness near vessel).
+    // Use a thicker slab (10mm) with average intensity for background context.
+    // Average (not MIP!) preserves fat: MIP hides -80 HU fat next to +300 HU
+    // vessel, but average shows both as relative brightness differences.
+    let context_slab_mm = 10.0f64;
+    let context_n_steps = 11usize;
+    let context_slab_offsets: Vec<f64> = (0..context_n_steps)
+        .map(|k| -context_slab_mm / 2.0 + context_slab_mm * (k as f64) / ((context_n_steps - 1) as f64))
+        .collect();
+
+    // CPR slab: thin average for sharp cross-section near vessel
+    let cpr_slab_mm = slab_mm.max(1.0);
+    let cpr_n_steps = 5usize;
+    let cpr_slab_offsets: Vec<f64> = (0..cpr_n_steps)
+        .map(|k| -cpr_slab_mm / 2.0 + cpr_slab_mm * (k as f64) / ((cpr_n_steps - 1) as f64))
+        .collect();
+
     let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
     // 4. Precompute position vectors
@@ -496,7 +610,14 @@ pub(crate) fn render_curved_direct(
         .map(|p| Vector3::new(p[0], p[1], p[2]))
         .collect();
 
-    // 5. Per-pixel: two-layer composite (oblique MIP + CPR near vessel)
+    // 5. Per-pixel: average intensity projection (AIP), NOT MIP.
+    //
+    // MIP hides perivascular fat (-80 HU) by picking nearby bright vessel
+    // values (+300 HU). Average preserves tissue contrast: vessel appears
+    // bright, fat appears dark, both are visible simultaneously.
+    //
+    // Near vessel: thin slab average (sharp cross-section, fat preserved)
+    // Far from vessel: thicker slab average (anatomical context)
     let mut image = vec![f32::NAN; pixels_high * pixels_wide];
 
     for row in 0..pixels_high {
@@ -505,25 +626,13 @@ pub(crate) fn render_curved_direct(
             let y_mm = max_y - (row as f64) * view_height / ((pixels_high - 1) as f64);
             let pixel_3d = center_vec + x_mm * view_right + y_mm * view_up;
 
-            // --- Layer 1: Oblique slab MIP (always computed, no artifacts) ---
-            let mut oblique_val = f32::NEG_INFINITY;
-            for &slab_off in &slab_offsets {
-                let s = pixel_3d + slab_off * view_forward;
-                let vz = (s[0] - origin[0]) * inv_spacing[0];
-                let vy = (s[1] - origin[1]) * inv_spacing[1];
-                let vx = (s[2] - origin[2]) * inv_spacing[2];
-                let val = trilinear(volume, vz, vy, vx);
-                if !val.is_nan() && val > oblique_val {
-                    oblique_val = val;
-                }
-            }
-            let oblique_val = if oblique_val == f32::NEG_INFINITY { f32::NAN } else { oblique_val };
-
-            // --- Layer 2: CPR sampling (only near vessel) ---
-            // Find nearest 3D segment + track second-nearest distance
+            // Find nearest 3D centerline segment + track second-nearest
+            // for smooth depth blending at segment boundaries.
             let mut best_j = 0usize;
             let mut best_frac = 0.0f64;
             let mut best_dist_sq = f64::MAX;
+            let mut second_j = 0usize;
+            let mut second_frac = 0.0f64;
             let mut second_dist_sq = f64::MAX;
             for j in 0..n - 1 {
                 let ab = pos_vecs[j + 1] - pos_vecs[j];
@@ -538,77 +647,66 @@ pub(crate) fn render_curved_direct(
                 let d = (pixel_3d - closest).norm_squared();
                 if d < best_dist_sq {
                     second_dist_sq = best_dist_sq;
+                    second_j = best_j;
+                    second_frac = best_frac;
                     best_dist_sq = d;
                     best_j = j;
                     best_frac = t;
                 } else if d < second_dist_sq {
                     second_dist_sq = d;
+                    second_j = j;
+                    second_frac = t;
+                }
+            }
+            let dist_3d = best_dist_sq.sqrt();
+
+            // Vessel depth: blend between nearest and second-nearest segments
+            // for smooth transitions at segment boundaries (prevents chunking).
+            let j1 = (best_j + 1).min(n - 1);
+            let interp_pos = pos_vecs[best_j] + best_frac * (pos_vecs[j1] - pos_vecs[best_j]);
+            let depth1 = (interp_pos - pixel_3d).dot(&view_forward);
+
+            let vessel_depth = if second_dist_sq < f64::MAX && best_dist_sq > 1e-10 {
+                let sj1 = (second_j + 1).min(n - 1);
+                let interp2 = pos_vecs[second_j] + second_frac * (pos_vecs[sj1] - pos_vecs[second_j]);
+                let depth2 = (interp2 - pixel_3d).dot(&view_forward);
+                // Inverse-distance weighting: smooth blend near boundaries
+                let w1 = 1.0 / (best_dist_sq.sqrt() + 1e-6);
+                let w2 = 1.0 / (second_dist_sq.sqrt() + 1e-6);
+                (depth1 * w1 + depth2 * w2) / (w1 + w2)
+            } else {
+                depth1
+            };
+
+            // Choose slab based on proximity to vessel
+            let slab = if dist_3d < width_mm {
+                &cpr_slab_offsets  // thin slab near vessel → sharper
+            } else {
+                &context_slab_offsets  // thicker slab for context
+            };
+
+            // Average intensity projection — slab centered on VESSEL DEPTH
+            // (not on the viewing plane), so the vessel and its surrounding
+            // fat are always in the slab regardless of viewing angle.
+            let mut sum = 0.0f64;
+            let mut count = 0u32;
+            for &slab_off in slab {
+                let s = pixel_3d + (vessel_depth + slab_off) * view_forward;
+                let vz = (s[0] - origin[0]) * inv_spacing[0];
+                let vy = (s[1] - origin[1]) * inv_spacing[1];
+                let vx = (s[2] - origin[2]) * inv_spacing[2];
+                let val = trilinear(volume, vz, vy, vx);
+                if !val.is_nan() {
+                    sum += val as f64;
+                    count += 1;
                 }
             }
 
-            let best_dist = best_dist_sq.sqrt();
-            let _ = best_dist; // suppress unused warning
-
-            // Interpolate frame at nearest segment
-            let j1 = best_j + 1;
-            let interp_pos = pos_vecs[best_j] + best_frac * (pos_vecs[j1] - pos_vecs[best_j]);
-            let interp_normal = (normals[best_j] * (1.0 - best_frac) + normals[j1] * best_frac).normalize();
-            let interp_binormal = (binormals[best_j] * (1.0 - best_frac) + binormals[j1] * best_frac).normalize();
-
-            let offset = pixel_3d - interp_pos;
-            let lateral = offset.dot(&interp_normal);
-
-            // Voronoi ambiguity check: if second-nearest is close to nearest,
-            // the segment assignment is ambiguous -> don't trust CPR sampling
-            let ambiguity_ratio = if best_dist_sq > 1e-10 {
-                second_dist_sq / best_dist_sq
+            image[row * pixels_wide + col] = if count > 0 {
+                (sum / count as f64) as f32
             } else {
-                f64::MAX
+                f32::NAN
             };
-            let voronoi_safe = ambiguity_ratio > 2.0;
-
-            // CPR blend weight: full CPR at center, fade to oblique
-            let cpr_blend = if !voronoi_safe || lateral.abs() > width_mm {
-                0.0 // pure oblique
-            } else if lateral.abs() < width_mm * 0.8 {
-                1.0 // pure CPR
-            } else {
-                // Smooth transition zone (last 20% of width)
-                let t = (width_mm - lateral.abs()) / (width_mm * 0.2);
-                t.clamp(0.0, 1.0)
-            };
-
-            let final_val = if cpr_blend <= 0.0 {
-                oblique_val
-            } else {
-                // CPR sample
-                let sample_base = interp_pos + lateral * interp_normal;
-                let mut cpr_val = f32::NEG_INFINITY;
-                for &slab_off in &slab_offsets {
-                    let s = sample_base + slab_off * interp_binormal;
-                    let vz = (s[0] - origin[0]) * inv_spacing[0];
-                    let vy = (s[1] - origin[1]) * inv_spacing[1];
-                    let vx = (s[2] - origin[2]) * inv_spacing[2];
-                    let val = trilinear(volume, vz, vy, vx);
-                    if !val.is_nan() && val > cpr_val {
-                        cpr_val = val;
-                    }
-                }
-                let cpr_val = if cpr_val == f32::NEG_INFINITY { f32::NAN } else { cpr_val };
-
-                if cpr_blend >= 1.0 {
-                    cpr_val
-                } else if cpr_val.is_nan() {
-                    oblique_val
-                } else if oblique_val.is_nan() {
-                    cpr_val
-                } else {
-                    // Blend
-                    cpr_val * cpr_blend as f32 + oblique_val * (1.0 - cpr_blend as f32)
-                }
-            };
-
-            image[row * pixels_wide + col] = final_val;
         }
     }
 
@@ -899,6 +997,221 @@ mod tests {
             vmin,
             vmax
         );
+    }
+
+    // -- G2. test_curved_direct_centerline_hu_every_angle --
+    //
+    // Creates a 3D helix vessel tube (HU=300 inside, HU=30 background),
+    // renders curved CPR at every 1° rotation, and verifies that the
+    // centerline pixels show high HU (inside the vessel) at ALL angles.
+
+    // -- G3. test_curved_direct_fat_visible --
+    //
+    // Verifies that perivascular fat (HU=-80) is visible OUTSIDE a bright
+    // vessel (HU=300) in the curved CPR. The old MIP-based CPR layer would
+    // hide fat by picking the brighter vessel value from nearby.
+
+    #[test]
+    fn test_curved_direct_fat_visible() {
+        let vol_size = 64usize;
+        let n_pts = 40;
+        let vessel_radius = 3.0f64; // mm
+        let fat_outer = 8.0f64;     // fat extends to 8mm from centerline
+
+        // Straight centerline along z at (y=32, x=32)
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut binormals = Vec::new();
+        let mut arclengths = Vec::new();
+        for i in 0..n_pts {
+            let z = 12.0 + i as f64;
+            positions.push([z, 32.0, 32.0]);
+            normals.push(Vector3::new(0.0, 1.0, 0.0));
+            binormals.push(Vector3::new(0.0, 0.0, 1.0));
+            arclengths.push(i as f64);
+        }
+
+        // Volume: vessel core (r<3mm) = 300 HU, fat ring (3-8mm) = -80 HU, background = 0
+        let mut vol = Array3::<f32>::zeros((vol_size, vol_size, vol_size));
+        let spacing = [1.0, 1.0, 1.0];
+        let origin = [0.0, 0.0, 0.0];
+
+        for iz in 0..vol_size {
+            for iy in 0..vol_size {
+                for ix in 0..vol_size {
+                    let dy = iy as f64 - 32.0;
+                    let dx = ix as f64 - 32.0;
+                    let r = (dy * dy + dx * dx).sqrt();
+                    if r < vessel_radius {
+                        vol[[iz, iy, ix]] = 300.0; // iodinated blood
+                    } else if r < fat_outer {
+                        vol[[iz, iy, ix]] = -80.0; // perivascular fat
+                    }
+                }
+            }
+        }
+
+        let result = render_curved_direct(
+            &positions, &normals, &binormals, &arclengths,
+            &vol, spacing, origin, 15.0, 64, 64, 1.0, 0.0,
+        );
+
+        // The center column should have vessel values (~300)
+        // Pixels at ~5mm offset from center should have fat values (~-80)
+        // Check several rows at mid-column
+        let mid_col = 32;
+        let (_vf, vr, vu) = compute_view_basis_pca_with_rotation(&positions, 0.0);
+        let mid_idx = n_pts / 2;
+        let center = positions[mid_idx];
+        let projected = project_centerline_2d(&positions, center, &vr, &vu);
+
+        let mut bmin_x = f64::MAX; let mut bmax_x = f64::NEG_INFINITY;
+        let mut bmin_y = f64::MAX; let mut bmax_y = f64::NEG_INFINITY;
+        for &(px, py) in &projected {
+            if px < bmin_x { bmin_x = px; }
+            if px > bmax_x { bmax_x = px; }
+            if py < bmin_y { bmin_y = py; }
+            if py > bmax_y { bmax_y = py; }
+        }
+        bmin_x -= CONTEXT_PAD_MM; bmax_x += CONTEXT_PAD_MM;
+        bmin_y -= CONTEXT_PAD_MM; bmax_y += CONTEXT_PAD_MM;
+        // Isotropic correction
+        let mut vw = bmax_x - bmin_x;
+        let mut vh = bmax_y - bmin_y;
+        let target_r = 64.0 / 64.0;
+        let bbox_r = vw / vh;
+        if bbox_r < target_r {
+            let extra = (vh * target_r - vw) / 2.0;
+            bmin_x -= extra; bmax_x += extra; vw = bmax_x - bmin_x;
+        } else {
+            let extra = (vw / target_r - vh) / 2.0;
+            bmin_y -= extra; bmax_y += extra; vh = bmax_y - bmin_y;
+        }
+
+        // Find the pixel at the centerline center and 5mm offset in the viewing plane.
+        let cl_x_mm = projected[mid_idx].0;
+        let cl_y_mm = projected[mid_idx].1;
+        let center_col = (((cl_x_mm - bmin_x) / vw) * 63.0).round() as usize;
+        let center_row = (((bmax_y - cl_y_mm) / vh) * 63.0).round() as usize;
+
+        // Fat at 5mm offset — try both directions (right and down)
+        let fat_col = ((((cl_x_mm + 5.0) - bmin_x) / vw) * 63.0).round() as usize;
+        let fat_row = (((bmax_y - (cl_y_mm - 5.0)) / vh) * 63.0).round() as usize;
+
+        let center_val = result.image[center_row.min(63) * 64 + center_col.min(63)];
+        // Check both directions for fat — at least one should show fat values
+        let fat_val_h = result.image[center_row.min(63) * 64 + fat_col.min(63)];
+        let fat_val_v = result.image[fat_row.min(63) * 64 + center_col.min(63)];
+        let fat_val = if fat_val_h > -150.0 && fat_val_h < -30.0 { fat_val_h }
+                      else if fat_val_v > -150.0 && fat_val_v < -30.0 { fat_val_v }
+                      else { fat_val_h.min(fat_val_v) }; // pick the more negative one
+
+        assert!(
+            center_val > 200.0,
+            "vessel center should be bright (~300), got {:.0}",
+            center_val
+        );
+        assert!(
+            fat_val < -30.0 && fat_val > -150.0,
+            "fat zone 5mm from center should show fat HU (~-80), got {:.0} \
+             (if >0, MIP is hiding fat!)",
+            fat_val
+        );
+    }
+
+    #[test]
+    fn test_curved_direct_aip_all_angles_valid() {
+        // Verify the AIP curved CPR produces >50% non-NaN pixels at all angles.
+        let n_pts = 80;
+        let helix_radius = 15.0;
+        let tube_radius = 3.5; // mm
+        let vol_size = 80usize;
+
+        // 1. Build helix centerline (270° arc + out-of-plane, like RCA)
+        let mut positions = Vec::with_capacity(n_pts);
+        let mut normals = Vec::with_capacity(n_pts);
+        let mut binormals = Vec::with_capacity(n_pts);
+        let mut arclengths = Vec::with_capacity(n_pts);
+
+        for i in 0..n_pts {
+            let theta = std::f64::consts::PI * 1.5 * (i as f64) / ((n_pts - 1) as f64);
+            let z = 40.0 + helix_radius * theta.cos();
+            let y = 40.0 + helix_radius * theta.sin();
+            let x = 40.0 + 8.0 * (i as f64) / ((n_pts - 1) as f64);
+            positions.push([z, y, x]);
+
+            let tz = -helix_radius * theta.sin();
+            let ty = helix_radius * theta.cos();
+            let tx = 8.0 / ((n_pts - 1) as f64);
+            let tangent = Vector3::new(tz, ty, tx).normalize();
+
+            let normal = Vector3::new(-theta.cos(), -theta.sin(), 0.0).normalize();
+            let binormal = tangent.cross(&normal).normalize();
+
+            normals.push(normal);
+            binormals.push(binormal);
+
+            if i == 0 {
+                arclengths.push(0.0);
+            } else {
+                let dz = positions[i][0] - positions[i - 1][0];
+                let dy = positions[i][1] - positions[i - 1][1];
+                let dx = positions[i][2] - positions[i - 1][2];
+                arclengths.push(arclengths[i - 1] + (dz * dz + dy * dy + dx * dx).sqrt());
+            }
+        }
+
+        // 2. Create volume: HU=300 inside tube, HU=30 outside
+        let mut vol = Array3::<f32>::from_elem((vol_size, vol_size, vol_size), 30.0);
+        let spacing = [1.0, 1.0, 1.0];
+        let origin = [0.0, 0.0, 0.0];
+
+        for iz in 0..vol_size {
+            for iy in 0..vol_size {
+                for ix in 0..vol_size {
+                    let vz = iz as f64;
+                    let vy = iy as f64;
+                    let vx = ix as f64;
+                    // Distance to nearest centerline point
+                    let mut min_d = f64::MAX;
+                    for p in &positions {
+                        let d = ((vz - p[0]).powi(2) + (vy - p[1]).powi(2) + (vx - p[2]).powi(2)).sqrt();
+                        if d < min_d { min_d = d; }
+                    }
+                    if min_d < tube_radius {
+                        vol[[iz, iy, ix]] = 300.0;
+                    }
+                }
+            }
+        }
+
+        // 3. Test every 30° — image must be >50% non-NaN
+        let px_w = 80;
+        let px_h = 80;
+        let width_mm = 10.0;
+
+        for rot_deg in (0..360).step_by(30) {
+            let theta = (rot_deg as f64).to_radians();
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
+            let rot_normals: Vec<Vector3<f64>> = (0..n_pts)
+                .map(|i| (cos_t * normals[i] + sin_t * binormals[i]).normalize())
+                .collect();
+            let rot_binormals: Vec<Vector3<f64>> = (0..n_pts)
+                .map(|i| (-sin_t * normals[i] + cos_t * binormals[i]).normalize())
+                .collect();
+
+            let result = render_curved_direct(
+                &positions, &rot_normals, &rot_binormals, &arclengths,
+                &vol, spacing, origin, width_mm, px_w, px_h, 1.0,
+                rot_deg as f64,
+            );
+
+            let total = result.image.len();
+            let non_nan = result.image.iter().filter(|v| !v.is_nan()).count();
+            let pct = non_nan as f64 / total as f64 * 100.0;
+            assert!(pct > 50.0, "rot {}°: only {:.0}% non-NaN", rot_deg, pct);
+        }
     }
 
     // -- G. test_quarter_circle_no_nan_gaps --

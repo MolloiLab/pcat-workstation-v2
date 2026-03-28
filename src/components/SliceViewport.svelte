@@ -142,7 +142,9 @@
 
     let best: { vessel: Vessel; seedIndex: number; distance: number } | null = null;
 
-    for (const vessel of vesselNames) {
+    // Only search the active vessel — prevents accidental vessel switches
+    const activeVessel = seedStore.activeVessel;
+    for (const vessel of [activeVessel]) {
       const data = seedStore.vessels[vessel];
       for (let i = 0; i < data.seeds.length; i++) {
         const seed = data.seeds[i];

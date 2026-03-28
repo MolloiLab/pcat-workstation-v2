@@ -48,13 +48,11 @@
   // Derive the current workflow phase for the context panel
   // Priority: analysis > seeds (centerline) > dicom > empty
   let phase = $derived<'empty' | 'dicom' | 'seeds' | 'analysis'>(
-    pipelineStore.status === 'complete'
-      ? 'analysis'
-      : hasCenterline
-        ? 'seeds'
-        : volumeStore.current
-          ? 'dicom'
-          : 'empty',
+    hasCenterline
+      ? 'seeds'
+      : volumeStore.current
+        ? 'dicom'
+        : 'empty',
   );
 
   // ---------- Initialise cornerstone3D on mount ----------

@@ -11,7 +11,7 @@
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
-  import { openDicomDialog, loadDicom, getRecentDicoms } from '$lib/api';
+  import { openDicomDialog, loadDicom, getRecentDicoms, loadSeeds } from '$lib/api';
   import { loadVolume } from '$lib/cornerstone/volumeLoader';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
@@ -128,12 +128,21 @@
         windowWidth: info.window_width,
         patientName: info.patient_name,
         studyDescription: info.study_description,
+        dicomPath: path,
       };
       volumeStore.set(meta);
 
       const csId = await loadVolume(meta, (p) => volumeStore.setLoadProgress(p));
       volumeStore.setCornerstoneVolumeId(csId);
       volumeStore.setLoading(false);
+
+      // Auto-load seeds for this patient
+      try {
+        const seedsJson = await loadSeeds(path);
+        if (seedsJson) {
+          seedStore.importJson(seedsJson);
+        }
+      } catch { /* no saved seeds for this patient */ }
 
       // Refresh recent list
       getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
@@ -177,10 +186,10 @@
       <!-- Pipeline action button -->
       {#if pipelineStore.status === 'complete'}
         <button
-          class="rounded bg-success/10 px-3 py-1 text-xs font-medium text-success hover:bg-success/20"
-          onclick={() => pipelineStore.reset()}
+          class="rounded bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20"
+          onclick={() => { pipelineStore.reset(); pipelineStore.run(); }}
         >
-          View Results
+          Re-run Pipeline
         </button>
       {:else if pipelineStore.canRun}
         <button
@@ -266,6 +275,9 @@
             Loading volume... {volumeStore.loadProgress}%
           </span>
         </div>
+      {:else if pipelineStore.status === 'error'}
+        <span class="h-1.5 w-1.5 rounded-full bg-error"></span>
+        <span class="truncate text-[11px] text-error">Pipeline: {pipelineStore.error}</span>
       {:else if errorMessage}
         <span class="h-1.5 w-1.5 rounded-full bg-error"></span>
         <span class="truncate text-[11px] text-error">{errorMessage}</span>
