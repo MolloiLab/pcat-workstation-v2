@@ -171,4 +171,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Contact
 
-For questions, collaboration, or issues: [Shu Nie](https://github.com/nieshuuuu) — snie3@uci.edu
+For questions, collaboration, or issues: [Shu Nie](https://github.com/nieshuuuu) — nies1@uci.edu
