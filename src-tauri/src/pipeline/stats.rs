@@ -333,7 +333,7 @@ pub fn compute_angular_asymmetry(
     radii_mm: &[f32],
     spacing: [f64; 3],
     n_sectors: usize,
-    _hu_range: (f64, f64),
+    hu_range: (f64, f64),
     gap_mm: f64,
     ring_mm: f64,
 ) -> AngularAsymmetry {
