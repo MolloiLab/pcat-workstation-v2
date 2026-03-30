@@ -1107,6 +1107,7 @@
         step="1"
         bind:value={rotationDeg}
         class="h-1 w-24 cursor-pointer accent-accent"
+        title="Rotate the cross-section viewing angle"
       />
       <span class="w-7 text-right tabular-nums">{rotationDeg}&deg;</span>
     </label>
@@ -1139,7 +1140,7 @@
           ? 'bg-error/20 text-error'
           : 'text-text-secondary/60 hover:text-text-secondary'}"
       onclick={() => { showFaiOverlay = !showFaiOverlay; }}
-      title="Toggle FAI color overlay (green=healthy fat, red=inflamed)"
+      title="Fat Attenuation Index overlay: green = healthy fat, red = inflamed fat"
     >
       FAI
     </button>
@@ -1154,7 +1155,7 @@
     </span>
 
     <label class="flex items-center gap-1 text-[10px] text-text-secondary">
-      <span>A-C</span>
+      <span>Spread</span>
       <input
         type="range"
         min="0.01"
@@ -1162,6 +1163,7 @@
         step="0.01"
         bind:value={needleOffset}
         class="h-1 w-16 cursor-pointer accent-accent"
+        title="Spacing between cross-section positions A and C"
       />
       <span class="w-6 text-right tabular-nums">{(needleOffset * 100).toFixed(0)}%</span>
     </label>
@@ -1174,9 +1176,9 @@
         ? 'background-color: rgba(255,0,255,0.15); color: #ff00ff;'
         : 'color: #ff00ff;'}
       onclick={() => seedStore.setOstiumFraction(needleBFraction)}
-      title="Mark current needle B position as the ostium (where coronary exits aorta)"
+      title="Mark where the coronary artery exits the aorta (proximal reference point for analysis)"
     >
-      {activeOstiumFrac !== null ? 'Ostium set' : 'Set Ostium'}
+      {activeOstiumFrac !== null ? 'Ostium Set' : 'Set Ostium'}
     </button>
 
     {#if activeOstiumFrac !== null}

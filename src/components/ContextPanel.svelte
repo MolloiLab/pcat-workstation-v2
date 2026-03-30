@@ -50,9 +50,12 @@
           d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 0 0-1.883 2.542l.857 6a2.25 2.25 0 0 0 2.227 1.932H19.05a2.25 2.25 0 0 0 2.227-1.932l.857-6a2.25 2.25 0 0 0-1.883-2.542m-16.5 0V6A2.25 2.25 0 0 1 6 3.75h3.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H18A2.25 2.25 0 0 1 20.25 9v.776"
         />
       </svg>
-      <p class="text-sm text-text-secondary">No DICOM loaded</p>
-      <p class="text-xs text-text-secondary/60">
-        Open a DICOM directory to begin
+      <p class="text-sm font-semibold text-text-primary">PCAT Workstation</p>
+      <p class="text-xs text-text-secondary">
+        Measure pericoronary fat inflammation (FAI) from cardiac CT
+      </p>
+      <p class="mt-1 text-xs text-text-secondary/60">
+        Open a DICOM folder to begin
       </p>
     </div>
 
@@ -102,7 +105,7 @@
       <!-- Tab bar -->
       <div class="flex shrink-0 border-b border-border bg-surface-secondary">
         <button
-          class="px-3 py-1.5 text-[11px] font-medium transition-colors"
+          class="px-3 py-1.5 text-xs font-medium transition-colors"
           class:text-accent={contextTab === 'cpr'}
           class:border-b-2={contextTab === 'cpr'}
           class:border-accent={contextTab === 'cpr'}
@@ -112,14 +115,14 @@
           CPR
         </button>
         <button
-          class="px-3 py-1.5 text-[11px] font-medium transition-colors"
+          class="px-3 py-1.5 text-xs font-medium transition-colors"
           class:text-accent={contextTab === 'analysis'}
           class:border-b-2={contextTab === 'analysis'}
           class:border-accent={contextTab === 'analysis'}
           class:text-text-secondary={contextTab !== 'analysis'}
           onclick={() => (contextTab = 'analysis')}
         >
-          Analysis
+          Analysis <span class="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-success"></span>
         </button>
       </div>
     {/if}

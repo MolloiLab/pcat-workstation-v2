@@ -101,7 +101,7 @@
 </script>
 
 <div class="flex items-center gap-1.5">
-  <span class="mr-1 text-[11px] text-text-secondary">Seeds:</span>
+  <span class="mr-1 text-[11px] text-text-secondary">Trace:</span>
 
   {#each vesselNames as vessel}
     {@const data = seedStore.vessels[vessel]}

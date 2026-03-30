@@ -189,7 +189,7 @@
           class="rounded bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20"
           onclick={() => { pipelineStore.reset(); pipelineStore.run(); }}
         >
-          Re-run Pipeline
+          Re-analyze
         </button>
       {:else if pipelineStore.canRun}
         <button
@@ -197,7 +197,7 @@
           onclick={() => pipelineStore.run()}
           disabled={pipelineStore.status === 'running'}
         >
-          {pipelineStore.status === 'running' ? 'Running...' : 'Run Pipeline'}
+          {pipelineStore.status === 'running' ? 'Analyzing...' : 'Analyze'}
         </button>
       {/if}
 
@@ -277,7 +277,7 @@
         </div>
       {:else if pipelineStore.status === 'error'}
         <span class="h-1.5 w-1.5 rounded-full bg-error"></span>
-        <span class="truncate text-[11px] text-error">Pipeline: {pipelineStore.error}</span>
+        <span class="truncate text-[11px] text-error">Analysis: {pipelineStore.error}</span>
       {:else if errorMessage}
         <span class="h-1.5 w-1.5 rounded-full bg-error"></span>
         <span class="truncate text-[11px] text-error">{errorMessage}</span>

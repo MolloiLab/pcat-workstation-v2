@@ -43,14 +43,14 @@
         return 'Scroll CPR to the ostium (where coronary exits aorta) \u00b7 Click "Set Ostium" in the CPR toolbar';
       }
       if (pipelineStore.canRun && pipelineStore.status === 'idle') {
-        return 'Ready to analyze \u00b7 Click "Run Pipeline" to compute PCAT';
+        return 'Ready to analyze \u00b7 Click "Analyze" to measure FAI';
       }
       return '';
     }
 
     // No seeds — prompt to start in aorta
     if (seedCount === 0) {
-      return `Start in the aorta, then trace into ${VESSEL_LABELS[vessel]} \u00b7 Click on any MPR view to place seeds`;
+      return `Start in the aorta, then trace into ${VESSEL_LABELS[vessel]} \u00b7 Click on any MPR view to place points`;
     }
 
     // 1 seed — continue tracing
@@ -60,7 +60,7 @@
 
     // 2-4 seeds — show CPR hints
     if (seedCount >= 2) {
-      return 'CPR generated \u00b7 Shift+click on CPR to mark ostium \u00b7 Scroll CPR to move needle';
+      return 'CPR preview ready \u00b7 Keep adding points, or Shift+click on CPR to mark ostium';
     }
 
     return '';
