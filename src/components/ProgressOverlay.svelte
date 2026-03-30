@@ -9,7 +9,7 @@
   import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { VESSEL_COLORS, type Vessel } from '$lib/stores/seedStore.svelte';
 
-  const vesselOrder: Vessel[] = ['LAD', 'LCx', 'RCA'];
+  const vesselOrder: Vessel[] = ['RCA', 'LAD', 'LCx'];
 
   let progressEntries = $derived(
     vesselOrder
