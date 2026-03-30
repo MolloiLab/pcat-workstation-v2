@@ -188,6 +188,7 @@
         <button
           class="rounded bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20"
           onclick={() => { pipelineStore.reset(); pipelineStore.run(); }}
+          title="Re-run: centerline → contour extraction → CRISP-CT VOI (1mm gap + 3mm ring) → FAI stats"
         >
           Re-analyze
         </button>
@@ -196,6 +197,7 @@
           class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
           onclick={() => pipelineStore.run()}
           disabled={pipelineStore.status === 'running'}
+          title="Run FAI pipeline: centerline → contour extraction → CRISP-CT VOI (1mm gap + 3mm ring) → FAI stats"
         >
           {pipelineStore.status === 'running' ? 'Analyzing...' : 'Analyze'}
         </button>

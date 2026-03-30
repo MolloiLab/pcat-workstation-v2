@@ -101,7 +101,7 @@
 </script>
 
 <div class="flex items-center gap-1.5">
-  <span class="mr-1 text-[11px] text-text-secondary">Trace:</span>
+  <span class="mr-1 text-[11px] text-text-secondary" title="Seed points for centerline extraction (cubic spline interpolation)">Trace:</span>
 
   {#each vesselNames as vessel}
     {@const data = seedStore.vessels[vessel]}
@@ -113,6 +113,7 @@
         ? `background-color: ${color}; color: #000;`
         : `background-color: transparent; color: ${color}; box-shadow: inset 0 0 0 1px ${color};`}
       onclick={() => seedStore.setActiveVessel(vessel)}
+      title="{vessel} — click to select, then place seed points on MPR views"
     >
       {vessel}
       {#if data.seeds.length > 0}
