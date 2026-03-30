@@ -162,8 +162,8 @@
   }
 
   /** Map HU value to color: green (low/healthy) → yellow → red (high/inflamed). */
-  function huToColor(hu: number): string {
-    if (!isFinite(hu)) return '#555';
+  function huToColor(hu: number | null): string {
+    if (hu == null || !isFinite(hu)) return '#555';
     // Map -190..-30 to 0..1
     const t = Math.max(0, Math.min(1, (hu - (-190)) / ((-30) - (-190))));
     // Green → Yellow → Red
@@ -320,7 +320,7 @@
                     />
                     <!-- HU value in sector -->
                     <text x={tx} y={ty} text-anchor="middle" dominant-baseline="central" fill="#000" font-size="13" font-weight="bold">
-                      {isFinite(sector.hu_mean) ? sector.hu_mean.toFixed(0) : '—'}
+                      {sector.hu_mean != null && isFinite(sector.hu_mean) ? sector.hu_mean.toFixed(0) : '—'}
                     </text>
                     <!-- Sector label outside -->
                     <text x={lx} y={ly} text-anchor="middle" dominant-baseline="central" fill="#c0c0c4" font-size="11" font-weight="500">
