@@ -14,6 +14,12 @@ A desktop application for measuring **Fat Attenuation Index (FAI)** around coron
 
 Download the latest `.dmg` from [Releases](https://github.com/MolloiLab/pcat-workstation-v2/releases), open it, and drag **PCAT Workstation** to your Applications folder.
 
+> **macOS note:** If you see "PCAT Workstation is damaged and can't be opened", open Terminal and run:
+> ```
+> xattr -cr /Applications/PCAT\ Workstation.app
+> ```
+> This removes the quarantine flag that macOS adds to unsigned downloaded apps.
+
 ### 2. Open a CT scan
 
 Click **Open DICOM** and select the folder containing your cardiac CT DICOM files. The application loads the volume and displays it in three views: Axial, Coronal, and Sagittal.
