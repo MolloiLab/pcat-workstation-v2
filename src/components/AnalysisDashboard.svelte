@@ -21,7 +21,7 @@
   let plotlyLoaded = $state(false);
   let Plotly: typeof import('plotly.js-dist-min') | null = $state(null);
 
-  const vesselOrder: Vessel[] = ['LAD', 'LCx', 'RCA'];
+  const vesselOrder: Vessel[] = ['RCA', 'LAD', 'LCx'];
 
   let vesselResults = $derived(
     pipelineStore.results

@@ -31,6 +31,7 @@
   } from '$lib/cprProjection';
   import CrossSection from './CrossSection.svelte';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
+  import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
 
   // ---- Constants ----
   const CPR_WIDTH_MM = 25.0;
@@ -47,6 +48,13 @@
 
   // FAI overlay toggle
   let showFaiOverlay = $state(false);
+
+  // Auto-enable FAI overlay when analysis completes
+  $effect(() => {
+    if (pipelineStore.status === 'complete') {
+      showFaiOverlay = true;
+    }
+  });
 
   // Needle B position as fraction (0..1); A and C are offset
   let needleBFraction = $state(0.5);
@@ -477,15 +485,7 @@
       }
     }
 
-    // Mode badge (top-right area, below W/L)
-    ctx.font = '9px -apple-system, sans-serif';
-    ctx.fillStyle = cprMode === 'curved' ? '#ff9500' : '#98989d';
-    ctx.textAlign = 'right';
-    ctx.fillText(
-      cprMode === 'curved' ? 'CURVED' : 'STRAIGHTENED',
-      w - 8,
-      24,
-    );
+    // Mode badge removed — toolbar already shows the mode.
   }
 
   /** Full re-render: image + overlays. */

@@ -98,25 +98,44 @@
 
   /**
    * Estimate vessel diameter from cross-section image.
-   * Scans from the center outward for bright lumen (HU > 150).
-   * Limitations: assumes vessel is centered, may overestimate if
-   * calcified plaque (also bright) is present. For display only.
+   * Uses valley detection: scans from center outward and stops at the
+   * first significant HU drop (vessel wall / gap between vessel and
+   * adjacent chamber). This prevents the measurement from extending
+   * through bright neighbouring structures like heart chambers.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
     const widthMm = 15.0;
-    const lumenThreshold = 150;
+    const absoluteThreshold = 100;   // stop if HU drops below this
+    const gradientDrop = 100;         // stop if HU drops by this much vs previous pixel
     const center = Math.floor(sz / 2);
 
-    let left = center;
-    let right = center;
-    while (left > 0 && data[center * sz + left] > lumenThreshold) left--;
-    while (right < sz - 1 && data[center * sz + right] > lumenThreshold) right++;
+    /** Scan from center outward in one direction. Returns boundary pixel index. */
+    function findBoundary(startIdx: number, step: number, getHU: (idx: number) => number, limit: number): number {
+      let idx = startIdx;
+      let prevHU = getHU(startIdx);
+      // Only start scanning if center is bright enough
+      if (prevHU < absoluteThreshold) return startIdx;
+      idx += step;
+      while (idx > 0 && idx < limit - 1) {
+        const hu = getHU(idx);
+        if (hu < absoluteThreshold) return idx;
+        if (prevHU - hu > gradientDrop) return idx;
+        prevHU = hu;
+        idx += step;
+      }
+      return idx;
+    }
+
+    // Horizontal scan
+    const getHUh = (col: number) => data[center * sz + col];
+    let left = findBoundary(center, -1, getHUh, sz);
+    let right = findBoundary(center, 1, getHUh, sz);
     const hDiamPx = right - left;
 
-    let top = center;
-    let bottom = center;
-    while (top > 0 && data[top * sz + center] > lumenThreshold) top--;
-    while (bottom < sz - 1 && data[bottom * sz + center] > lumenThreshold) bottom++;
+    // Vertical scan
+    const getHUv = (row: number) => data[row * sz + center];
+    let top = findBoundary(center, -1, getHUv, sz);
+    let bottom = findBoundary(center, 1, getHUv, sz);
     const vDiamPx = bottom - top;
 
     const avgDiamPx = (hDiamPx + vDiamPx) / 2;
@@ -215,7 +234,7 @@
       </span>
     {/if}
     {#if vesselDiameterMm !== null}
-      <span class="text-[10px] tabular-nums text-accent">
+      <span class="text-[10px] tabular-nums" style="color: #facc15;">
         {vesselDiameterMm.toFixed(1)} mm
       </span>
     {/if}
