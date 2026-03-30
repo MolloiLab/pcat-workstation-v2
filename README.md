@@ -60,7 +60,7 @@ Once you have 2+ seeds, the bottom-right panel shows the **Curved Planar Reforma
 
 ### 5. Run the FAI analysis
 
-Click **Run Pipeline** in the toolbar. The analysis takes a few seconds and includes:
+Click **Analyze** in the toolbar. The analysis takes a few seconds and includes:
 
 1. Centerline refinement along the proximal 40mm segment
 2. Vessel wall boundary detection
@@ -96,7 +96,7 @@ Cross-sectional ring showing mean HU in 8 sectors around the vessel. Identifies 
 - Click **Save** to store seeds + analysis results together
 - You can trace multiple vessels (RCA, LAD, LCx) and run the pipeline for each
 - Switch between CPR and Analysis tabs anytime — your MPR views stay visible
-- Click **Re-run Pipeline** after adjusting seeds to update results
+- Click **Re-analyze** after adjusting seeds to update results
 
 ---
 
