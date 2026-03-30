@@ -2,6 +2,8 @@
 
 A desktop application for measuring **Fat Attenuation Index (FAI)** around coronary arteries from cardiac CT scans. FAI quantifies pericoronary adipose tissue inflammation — a biomarker for coronary artery disease risk.
 
+**Author:** [Shu Nie](https://github.com/nieshuuuu) · University of California, Irvine
+
 > **Research use only.** Not for clinical diagnosis.
 
 ---
@@ -165,4 +167,8 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 **Not intended for clinical diagnosis** — research use only.
 
-*Developed at the [Molloi Lab](https://github.com/MolloiLab), University of California, Irvine.*
+*Created by [Shu Nie](https://github.com/nieshuuuu) at the [Molloi Lab](https://github.com/MolloiLab), University of California, Irvine.*
+
+## Contact
+
+For questions, collaboration, or issues: [Shu Nie](https://github.com/nieshuuuu) — snie3@uci.edu
