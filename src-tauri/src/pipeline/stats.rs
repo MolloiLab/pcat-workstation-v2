@@ -445,13 +445,8 @@ pub fn compute_angular_asymmetry(
                 }
 
                 let hu = volume[[uz, uy, ux]] as f64;
-                // Include ALL tissue in the perivascular ring (no HU filter).
-                // Higher mean HU = inflammation/water content.
-                // Lower mean HU = healthy fat.
-                // Filtering to FAI range would miss sectors where inflammation
-                // has pushed HU above -30 — exactly what we want to detect.
-                if hu < -500.0 || hu > 500.0 {
-                    continue; // skip air/bone outliers only
+                if hu < hu_range.0 || hu > hu_range.1 {
+                    continue;
                 }
 
                 sector_sum[s] += hu;
