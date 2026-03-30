@@ -1096,7 +1096,7 @@
 
   <!-- Bottom toolbar: rotation slider + mode toggle -->
   <div
-    class="flex h-8 shrink-0 items-center gap-3 border-t border-border bg-surface-secondary px-3"
+    class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border bg-surface-secondary px-3 py-1"
   >
     <label class="flex items-center gap-2 text-[10px] text-text-secondary">
       <span>Rot</span>
@@ -1149,9 +1149,6 @@
 
     <span class="text-[10px] tabular-nums text-text-secondary/50">
       B: {(needleBFraction * 100).toFixed(0)}%
-      {#if arclengths.length > 0}
-        ({(needleBFraction * arclengths[arclengths.length - 1]).toFixed(1)} mm)
-      {/if}
     </span>
 
     <label class="flex items-center gap-1 text-[10px] text-text-secondary">
@@ -1183,11 +1180,7 @@
 
     {#if activeOstiumFrac !== null}
       <span class="text-[10px] tabular-nums" style="color: #ff00ff;">
-        {#if arclengths.length > 0}
-          {(activeOstiumFrac * arclengths[arclengths.length - 1]).toFixed(1)} mm
-        {:else}
-          {(activeOstiumFrac * 100).toFixed(0)}%
-        {/if}
+        {(activeOstiumFrac * 100).toFixed(0)}%
       </span>
       <button
         class="text-[10px] text-text-secondary/40 hover:text-error"
@@ -1198,10 +1191,8 @@
       </button>
     {/if}
 
-    <span class="text-[10px] text-text-secondary/40">|</span>
-
-    <span class="text-[10px] text-text-secondary/40">
-      Scroll: move needle &middot; Shift+click: mark ostium &middot; Drag seed: refine path &middot; Right-drag: W/L
+    <span class="text-[10px] text-text-secondary/30">
+      Scroll: needle &middot; Shift+click: ostium &middot; Drag: refine &middot; Right-drag: W/L
     </span>
   </div>
 </div>

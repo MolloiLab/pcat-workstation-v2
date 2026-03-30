@@ -242,23 +242,23 @@
     <svg class="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 {pixels} {pixels}" preserveAspectRatio="xMidYMid meet">
       <!-- Horizontal caliper -->
       <line x1={measH.left} y1={measH.y} x2={measH.right} y2={measH.y}
-        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+        stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
       <line x1={measH.left} y1={measH.y - 3} x2={measH.left} y2={measH.y + 3}
-        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+        stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
       <line x1={measH.right} y1={measH.y - 3} x2={measH.right} y2={measH.y + 3}
-        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+        stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
 
       <!-- Vertical caliper -->
       <line x1={measV.x} y1={measV.top} x2={measV.x} y2={measV.bottom}
-        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+        stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
       <line x1={measV.x - 3} y1={measV.top} x2={measV.x + 3} y2={measV.top}
-        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+        stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
       <line x1={measV.x - 3} y1={measV.bottom} x2={measV.x + 3} y2={measV.bottom}
-        stroke="#00ffcc" stroke-width="1" stroke-opacity="0.8" />
+        stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
 
       <!-- Diameter label -->
       <text x={measH.right + 3} y={measH.y - 2}
-        fill="#00ffcc" font-size="9" font-family="-apple-system, sans-serif" font-weight="bold">
+        fill="#facc15" font-size="9" font-family="-apple-system, sans-serif" font-weight="bold">
         {vesselDiameterMm.toFixed(1)}
       </text>
     </svg>

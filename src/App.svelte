@@ -187,7 +187,7 @@
       {#if pipelineStore.status === 'complete'}
         <button
           class="rounded bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20"
-          onclick={() => { pipelineStore.reset(); pipelineStore.run(); }}
+          onclick={() => { pipelineStore.run(); }}
           title="Re-run: centerline → contour extraction → CRISP-CT VOI (1mm gap + 3mm ring) → FAI stats"
         >
           Re-analyze
