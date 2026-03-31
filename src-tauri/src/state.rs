@@ -19,6 +19,23 @@ pub struct LoadedVolume {
     pub study_description: String,
 }
 
+/// A set of co-registered mono-energetic CT volumes.
+pub struct MonoVolumes {
+    /// (keV, volume) pairs, sorted by keV.
+    pub volumes: Vec<(f64, Arc<Array3<f32>>)>,
+    pub spacing: [f64; 3],
+    pub origin: [f64; 3],
+    pub direction: [f64; 9],
+}
+
+/// Stored MMD decomposition result.
+pub struct StoredMmdResult {
+    pub water: Arc<Array3<f32>>,
+    pub lipid: Arc<Array3<f32>>,
+    pub iodine: Arc<Array3<f32>>,
+    pub residual: Arc<Array3<f32>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Vessel {
     LAD,
@@ -51,6 +68,8 @@ pub struct AppState {
     pub volume: Option<LoadedVolume>,
     pub cpr_frame: Option<Arc<CprFrame>>,
     pub analysis_results: Option<AnalysisResults>,
+    pub mono_volumes: Option<MonoVolumes>,
+    pub mmd_result: Option<StoredMmdResult>,
 }
 
 impl AppState {
@@ -59,6 +78,8 @@ impl AppState {
             volume: None,
             cpr_frame: None,
             analysis_results: None,
+            mono_volumes: None,
+            mmd_result: None,
         }
     }
 }

@@ -51,3 +51,47 @@ export async function getSlice(
   const bytes = await invoke<number[]>('get_slice', { axis, idx });
   return new Uint8Array(bytes).buffer;
 }
+
+// ---------------------------------------------------------------------------
+// MMD (Multi-Material Decomposition)
+// ---------------------------------------------------------------------------
+
+export type MonoVolumeInfo = {
+  energies: number[];
+  shape: [number, number, number];
+  spacing: [number, number, number];
+};
+
+export type MmdSummary = {
+  shape: [number, number, number];
+  elapsed_ms: number;
+  mean_water: number;
+  mean_lipid: number;
+  mean_iodine: number;
+  mean_residual: number;
+};
+
+/** Load mono-energetic DICOM volumes. paths: keV label → directory path. */
+export async function loadMonoVolumes(paths: Record<string, string>): Promise<MonoVolumeInfo> {
+  return invoke<MonoVolumeInfo>('load_mono_volumes', { paths });
+}
+
+/** Run multi-material decomposition on loaded mono-energetic volumes. */
+export async function runMmd(config: {
+  basis_lacs: number[][];
+  noise_variances: number[];
+  hu_upper: number;
+  hu_lower: number;
+}): Promise<MmdSummary> {
+  return invoke<MmdSummary>('run_mmd', { config });
+}
+
+/** Get a 2D slice from an MMD material fraction map. */
+export async function getMmdSlice(
+  material: string,
+  axis: string,
+  idx: number,
+): Promise<ArrayBuffer> {
+  const bytes = await invoke<number[]>('get_mmd_slice', { material, axis, idx });
+  return new Float32Array(new Uint8Array(bytes).buffer).buffer;
+}

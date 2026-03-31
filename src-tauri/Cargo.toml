@@ -30,6 +30,7 @@ dicom-pixeldata = { version = "0.9", features = ["ndarray"] }
 bytemuck = { version = "1", features = ["derive"] }
 walkdir = "2"
 base64 = "0.22"
+rayon = "1"
 
 [profile.dev]
 opt-level = 2

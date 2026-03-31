@@ -3104,6 +3104,7 @@ dependencies = [
  "dicom-pixeldata",
  "nalgebra",
  "ndarray",
+ "rayon",
  "serde",
  "serde_json",
  "tauri",

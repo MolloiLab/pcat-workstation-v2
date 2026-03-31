@@ -31,6 +31,9 @@ pub fn run() {
             commands::cpr::compute_cross_sections_batch,
             commands::cpr::get_cpr_projection_info,
             commands::pipeline::run_pipeline,
+            commands::mmd::load_mono_volumes,
+            commands::mmd::run_mmd,
+            commands::mmd::get_mmd_slice,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

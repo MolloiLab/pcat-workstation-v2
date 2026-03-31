@@ -8,6 +8,7 @@
    *   - Footer status bar (loading progress / ready state)
    */
   import MprPanel from './components/MprPanel.svelte';
+  import MmdPanel from './components/MmdPanel.svelte';
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
@@ -22,6 +23,7 @@
   let errorMessage = $state('');
   let recentPaths = $state<string[]>([]);
   let showRecent = $state(false);
+  let showMmd = $state(false);
 
   // Load recent paths on mount
   $effect(() => {
@@ -183,6 +185,14 @@
     {/if}
 
     <div class="flex items-center gap-1.5">
+      <!-- MMD button -->
+      <button
+        class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 {showMmd ? 'bg-accent/20' : ''}"
+        onclick={() => { showMmd = !showMmd; }}
+      >
+        MMD
+      </button>
+
       <!-- Pipeline action button -->
       {#if pipelineStore.status === 'complete'}
         <button
@@ -247,7 +257,15 @@
   </header>
 
   <!-- ===== Main viewport area ===== -->
-  <main class="relative min-h-0 flex-1">
+  <main class="relative min-h-0 flex-1 flex">
+    <!-- MMD side panel -->
+    {#if showMmd}
+      <aside class="w-72 shrink-0 overflow-y-auto border-r border-border bg-surface-secondary">
+        <MmdPanel />
+      </aside>
+    {/if}
+
+    <div class="relative min-w-0 flex-1">
     <MprPanel />
 
     <!-- Contextual hint line -->
@@ -257,6 +275,7 @@
     {#if pipelineStore.status === 'running'}
       <ProgressOverlay />
     {/if}
+    </div>
   </main>
 
   <!-- ===== Footer status bar ===== -->
