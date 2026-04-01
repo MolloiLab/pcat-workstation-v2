@@ -50,16 +50,9 @@ Once you have 2+ seeds, the bottom-right panel shows the **Curved Planar Reforma
 
 ![CPR View](docs/screenshots/cpr-view.jpg)
 
-- Click **FAI** to toggle the fat attenuation overlay on the CPR:
-
-![FAI Overlay on CPR](docs/screenshots/fai-on-cpr.jpg)
-
 - Switch between **Straightened** and **Curved** modes
 - **Rotate** the view with the slider at the bottom
 - Three **cross-sections** (A, B, C) show the vessel at different positions
-- The **FAI overlay** colors pericoronary fat:
-  - **Green** = healthy pericoronary fat
-  - **Red** = inflamed pericoronary fat
 - **Shift+click** on the CPR to mark the ostium position
 
 ### 5. Run the FAI analysis
@@ -70,6 +63,12 @@ Click **Analyze** in the toolbar. The analysis takes a few seconds and includes:
 2. Vessel wall boundary detection
 3. Perivascular VOI construction (CRISP-CT protocol: 1mm gap + 3mm ring)
 4. FAI measurement within the -190 to -30 HU fat window
+
+Click **FAI** on the CPR to toggle the fat attenuation overlay:
+- **Green** = healthy pericoronary fat
+- **Red** = inflamed pericoronary fat
+
+![FAI Overlay on CPR](docs/screenshots/fai-on-cpr.jpg)
 
 ### 6. View the results
 
