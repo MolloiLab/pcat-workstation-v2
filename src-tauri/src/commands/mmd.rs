@@ -32,8 +32,9 @@ pub struct MmdSummary {
 
 #[derive(Debug, Deserialize)]
 pub struct MmdRunConfig {
-    pub lipid_hu: [f64; 4],
-    pub iodine_hu: [f64; 4],
+    #[serde(default = "default_iodine_conc")]
+    pub iodine_concentration_mg_ml: f64,
+    #[serde(default = "default_noise")]
     pub noise_variances: [f64; 4],
     #[serde(default = "default_hu_upper")]
     pub hu_upper: f64,
@@ -41,6 +42,8 @@ pub struct MmdRunConfig {
     pub hu_lower: f64,
 }
 
+fn default_iodine_conc() -> f64 { 10.0 }
+fn default_noise() -> [f64; 4] { [100.0; 4] }
 fn default_hu_upper() -> f64 { 500.0 }
 fn default_hu_lower() -> f64 { -500.0 }
 
@@ -156,8 +159,7 @@ pub async fn run_mmd(
     }
 
     let mmd_config = MmdConfig {
-        lipid_hu: config.lipid_hu,
-        iodine_hu: config.iodine_hu,
+        iodine_concentration_mg_ml: config.iodine_concentration_mg_ml,
         noise_variances: config.noise_variances,
         hu_upper: config.hu_upper,
         hu_lower: config.hu_lower,
