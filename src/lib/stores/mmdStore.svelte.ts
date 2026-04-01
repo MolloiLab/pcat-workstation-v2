@@ -23,7 +23,8 @@ export type MmdSummary = {
 };
 
 export type MmdConfig = {
-  basis_lacs: [[number, number, number], [number, number, number], [number, number, number], [number, number, number]];
+  lipid_hu: [number, number, number, number];
+  iodine_hu: [number, number, number, number];
   noise_variances: [number, number, number, number];
   hu_upper: number;
   hu_lower: number;
@@ -41,16 +42,14 @@ function createMmdStore() {
   /** Paths for each mono-energy directory, keyed by keV label. */
   let monoPaths: Record<string, string> = $state({});
 
-  /** Default config — user can override via UI. */
+  /** Default config — user can override via UI.
+   *  lipid_hu / iodine_hu: measure from ROIs in your own mono-energetic images.
+   *  Defaults are rough starting points for cardiac CTA with iodine contrast. */
   let config: MmdConfig = $state({
-    basis_lacs: [
-      [0.0193, 0.0171, 0.0800],  // 70 keV
-      [0.0171, 0.0159, 0.0250],  // 100 keV
-      [0.0155, 0.0148, 0.0130],  // 140 keV
-      [0.0152, 0.0146, 0.0120],  // 150 keV
-    ],
-    noise_variances: [1e-8, 1e-8, 1e-8, 1e-8],
-    hu_upper: 150.0,
+    lipid_hu: [-95, -85, -78, -75],          // subcutaneous fat ROI at 70/100/140/150 keV
+    iodine_hu: [300, 150, 60, 50],           // contrast-enhanced aorta ROI
+    noise_variances: [100, 100, 100, 100],   // ~10 HU std per energy
+    hu_upper: 500.0,
     hu_lower: -500.0,
   });
 
