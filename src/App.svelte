@@ -9,6 +9,7 @@
    */
   import MprPanel from './components/MprPanel.svelte';
   import MmdPanel from './components/MmdPanel.svelte';
+  import MmdViewer from './components/MmdViewer.svelte';
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
@@ -18,6 +19,7 @@
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
   import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { seedStore, type Vessel } from '$lib/stores/seedStore.svelte';
+  import { mmdStore } from '$lib/stores/mmdStore.svelte';
   import { navigateToWorldPos } from '$lib/navigation';
 
   let errorMessage = $state('');
@@ -266,15 +268,19 @@
     {/if}
 
     <div class="relative min-w-0 flex-1">
-    <MprPanel />
+      {#if showMmd}
+        <MmdViewer />
+      {:else}
+        <MprPanel />
 
-    <!-- Contextual hint line -->
-    <HintLine />
+        <!-- Contextual hint line -->
+        <HintLine />
 
-    <!-- Pipeline progress overlay -->
-    {#if pipelineStore.status === 'running'}
-      <ProgressOverlay />
-    {/if}
+        <!-- Pipeline progress overlay -->
+        {#if pipelineStore.status === 'running'}
+          <ProgressOverlay />
+        {/if}
+      {/if}
     </div>
   </main>
 
