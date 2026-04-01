@@ -92,10 +92,9 @@ How mean HU changes with distance from the vessel wall (1–20mm). Shows whether
 #### Angular Analysis
 Cross-sectional ring showing mean HU in 8 sectors around the vessel. Identifies whether inflammation is focal (one side) or circumferential.
 
-<p>
-<img src="docs/screenshots/analysis-angular-rca.jpg" width="49%" alt="Angular Analysis — RCA">
-<img src="docs/screenshots/analysis-angular-lad.jpg" width="49%" alt="Angular Analysis — LAD">
-</p>
+| RCA | LAD |
+|:---:|:---:|
+| ![Angular — RCA](docs/screenshots/analysis-angular-rca.jpg) | ![Angular — LAD](docs/screenshots/analysis-angular-lad.jpg) |
 
 ### 7. Save and compare
 
