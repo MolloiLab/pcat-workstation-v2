@@ -24,7 +24,7 @@ Download the latest `.dmg` from [Releases](https://github.com/MolloiLab/pcat-wor
 
 Click **Open DICOM** and select the folder containing your cardiac CT DICOM files. The application loads the volume and displays it in three views: Axial, Coronal, and Sagittal.
 
-<!-- ![Step 2: MPR Views](docs/screenshots/mpr-views.png) -->
+![MPR Views](docs/screenshots/mpr-views.jpg)
 
 - **Scroll** through slices with the mouse wheel
 - **Adjust brightness/contrast** by right-clicking and dragging
@@ -35,7 +35,7 @@ Click **Open DICOM** and select the folder containing your cardiac CT DICOM file
 
 Select a vessel (RCA, LAD, or LCx) from the toolbar, then **click on the MPR views** to place seed points along the artery. Start from the aorta and trace distally.
 
-<!-- ![Step 3: Seed Placement](docs/screenshots/seed-placement.png) -->
+![Seed Placement](docs/screenshots/seed-placement.jpg)
 
 - Place at least **2 seeds** per vessel (more = smoother centerline)
 - Seeds appear as colored dots; a spline centerline connects them automatically
@@ -48,12 +48,16 @@ Select a vessel (RCA, LAD, or LCx) from the toolbar, then **click on the MPR vie
 
 Once you have 2+ seeds, the bottom-right panel shows the **Curved Planar Reformation (CPR)** — a reformatted view that follows the vessel through the anatomy.
 
-<!-- ![Step 4: CPR View](docs/screenshots/cpr-view.png) -->
+![CPR View](docs/screenshots/cpr-view.jpg)
+
+- Click **FAI** to toggle the fat attenuation overlay on the CPR:
+
+![FAI Overlay on CPR](docs/screenshots/fai-on-cpr.jpg)
 
 - Switch between **Straightened** and **Curved** modes
 - **Rotate** the view with the slider at the bottom
 - Three **cross-sections** (A, B, C) show the vessel at different positions
-- Click **FAI** to toggle the fat attenuation overlay:
+- The **FAI overlay** colors pericoronary fat:
   - **Green** = healthy pericoronary fat
   - **Red** = inflamed pericoronary fat
 - **Shift+click** on the CPR to mark the ostium position
@@ -74,22 +78,23 @@ After the pipeline completes, click the **Analysis** tab (next to CPR) to see:
 #### Overview
 Per-vessel FAI summary with risk classification (HIGH if mean HU > -70.1, LOW otherwise).
 
-<!-- ![Step 6a: Overview](docs/screenshots/analysis-overview.png) -->
+![Analysis Overview](docs/screenshots/analysis-overview.jpg)
 
 #### Histograms
 HU distribution within the FAI window, with reference lines at -190, -30, and -70.1 HU.
 
-<!-- ![Step 6b: Histograms](docs/screenshots/analysis-histogram.png) -->
+![Histograms](docs/screenshots/analysis-histogra.jpg)
 
 #### Radial Profile
 How mean HU changes with distance from the vessel wall (1–20mm). Shows whether inflammation is localized near the vessel or diffuse.
 
-<!-- ![Step 6c: Radial Profile](docs/screenshots/analysis-radial.png) -->
+![Radial Profile](docs/screenshots/analysis-radial.jpg)
 
 #### Angular Analysis
 Cross-sectional ring showing mean HU in 8 sectors around the vessel. Identifies whether inflammation is focal (one side) or circumferential.
 
-<!-- ![Step 6d: Angular](docs/screenshots/analysis-angular.png) -->
+![Angular Analysis — RCA](docs/screenshots/analysis-angular-rca.jpg)
+![Angular Analysis — LAD](docs/screenshots/analysis-angular-lad.jpg)
 
 ### 7. Save and compare
 
