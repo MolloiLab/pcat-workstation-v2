@@ -4,10 +4,10 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
-use crate::pipeline::centerline;
-use crate::pipeline::contour;
-use crate::pipeline::stats::FaiStats;
-use crate::pipeline::voi;
+use pcat_pipeline::centerline;
+use pcat_pipeline::contour;
+use pcat_pipeline::stats::FaiStats;
+use pcat_pipeline::voi;
 use crate::state::{AnalysisResults, AppState, Vessel, VesselResult};
 
 /// Seed points and segment specification for a single vessel.
@@ -264,7 +264,7 @@ pub async fn run_pipeline(
             // --- Stage 6: Compute FAI stats ---
             emit_progress("stats", 0.85);
 
-            let mut stats = crate::pipeline::stats::compute_pcat_stats(
+            let mut stats = pcat_pipeline::stats::compute_pcat_stats(
                 &volume_data,
                 &voi_mask,
                 vessel_name,
@@ -274,7 +274,7 @@ pub async fn run_pipeline(
             // --- Stage 7: Radial profile ---
             emit_progress("radial_profile", 0.92);
 
-            let radial = crate::pipeline::stats::compute_radial_profile(
+            let radial = pcat_pipeline::stats::compute_radial_profile(
                 &volume_data,
                 &clipped,
                 &radii,
@@ -287,7 +287,7 @@ pub async fn run_pipeline(
             // --- Stage 8: Angular asymmetry ---
             emit_progress("angular_asymmetry", 0.96);
 
-            let angular = crate::pipeline::stats::compute_angular_asymmetry(
+            let angular = pcat_pipeline::stats::compute_angular_asymmetry(
                 &volume_data,
                 &clipped,
                 &radii,

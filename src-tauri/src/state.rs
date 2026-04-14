@@ -1,23 +1,9 @@
-use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::pipeline::cpr::CprFrame;
-
-/// CT volume loaded from DICOM, stored in Rust memory.
-/// `data` is wrapped in `Arc` so commands can share it without
-/// cloning ~300MB on every render call.
-pub struct LoadedVolume {
-    pub data: Arc<Array3<f32>>,  // (Z, Y, X) HU values — shared, not cloned
-    pub spacing: [f64; 3],       // [sz, sy, sx] mm
-    pub origin: [f64; 3],        // [oz, oy, ox] mm
-    pub direction: [f64; 9],     // row-major 3x3
-    pub window_center: f64,
-    pub window_width: f64,
-    pub patient_name: String,
-    pub study_description: String,
-}
+use pcat_pipeline::cpr::CprFrame;
+pub use pcat_pipeline::types::LoadedVolume;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Vessel {
@@ -42,8 +28,8 @@ pub struct VesselResult {
     pub hu_median: f64,
     pub histogram_bins: Vec<f64>,
     pub histogram_counts: Vec<usize>,
-    pub radial_profile: Option<crate::pipeline::stats::RadialProfile>,
-    pub angular_asymmetry: Option<crate::pipeline::stats::AngularAsymmetry>,
+    pub radial_profile: Option<pcat_pipeline::stats::RadialProfile>,
+    pub angular_asymmetry: Option<pcat_pipeline::stats::AngularAsymmetry>,
 }
 
 /// Application state managed by Tauri.

@@ -1,6 +1,4 @@
 mod commands;
-mod error;
-pub mod pipeline;
 mod state;
 
 use state::AppState;

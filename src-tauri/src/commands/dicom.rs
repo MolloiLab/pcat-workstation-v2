@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::pipeline::dicom_loader;
+use pcat_pipeline::dicom_loader;
 use crate::state::AppState;
 
 const MAX_RECENT: usize = 10;
