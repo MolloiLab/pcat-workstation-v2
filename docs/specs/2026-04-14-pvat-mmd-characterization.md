@@ -46,11 +46,75 @@ pcat-workstation-v2/
       state.rs                  # extended with MmdVolumes, ContourAnnotations
   src/                          # Svelte frontend
     components/
+      AnalysisView.svelte       # NEW: unified analysis workspace (replaces separate FAI/MMD views)
+      OverlaySelector.svelte    # NEW: material + unit toggle controls
       SnakeEditor.svelte        # NEW: active contour annotation UI
-      MmdCrossSection.svelte    # NEW: cross-section with MMD overlay
       SurfacePlotPanel.svelte   # NEW: Plotly.js 3D surface plots
-      CrossSectionGrid.svelte   # NEW: grid of 20 cross-sections
+      CrossSectionStrip.svelte  # NEW: horizontal scrollable cross-section strip
 ```
+
+## UI Design: Unified Analysis View
+
+One workspace for both FAI and MMD. Same centerline + cross-section infrastructure.
+
+### Layout (Option C: Unified + Toggle Overlay)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ CPR | [Analysis]                    Display: [material selector]│
+├──────────────────────┬──────────────────────────────────────────┤
+│                      │  Surface Plot (θ × r × z)               │
+│  Cross-Section       │  ┌──────────────────────────────────┐   │
+│  (large, with        │  │  [3D Plotly surface]              │   │
+│   overlay +          │  └──────────────────────────────────┘   │
+│   contours)          │  Radial Profile (FAI dashed + MMD solid)│
+│                      │  ┌──────────────────────────────────┐   │
+│                      │  │  [dual-curve chart]               │   │
+│                      │  └──────────────────────────────────┘   │
+├──────────────────────┴──────────────────────────────────────────┤
+│ Cross-Section Strip: [0mm] [2mm] [4mm●] [6mm] ... [38mm]  →   │
+├─────────────────────────────────────────────────────────────────┤
+│ Contour: [Evolve] [Reset] [Accept] │ [Run FAI] [Run MMD] │ 3/20│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Overlay Selector (two-level toggle)
+
+Since each of 4 materials has 2 units (volume fraction + mass), plus HU and FAI, use a two-level selector:
+
+**Level 1 — Source** (radio chips):
+`HU` | `FAI mask` | `Water` | `Lipid` | `Iodine` | `Calcium` | `Total ρ`
+
+**Level 2 — Unit** (only shown when a material is selected):
+`Volume %` | `Mass (mg/mL)`
+
+Examples:
+- Select "HU" → shows Hounsfield Unit grayscale
+- Select "FAI mask" → shows -190 to -30 HU fat overlay (existing)
+- Select "Lipid" + "Volume %" → lipid volumetric fraction colormap (0→1)
+- Select "Lipid" + "Mass (mg/mL)" → lipid mass density colormap
+- Select "Total ρ" → total mass density (mg/mL) from all materials
+
+### Material Maps per Voxel (from MMD)
+
+Each decomposed voxel stores:
+```
+Volume fractions:  f_water + f_lipid + f_iodine + f_calcium = 1.0
+Mass densities:    m_water = f_water × ρ_water    (mg/mL)
+                   m_lipid = f_lipid × ρ_lipid    (mg/mL)
+                   m_iodine = f_iodine × ρ_iodine (mg/mL)
+                   m_calcium = f_calcium × ρ_calcium (mg/mL)
+Total density:     ρ_total = m_water + m_lipid + m_iodine + m_calcium
+```
+
+### Run FAI vs Run MMD
+
+Both buttons are in the same toolbar. They share the same cross-section and contour infrastructure:
+
+- **Run FAI**: Uses existing code. Computes mean HU, fat fraction, HU histogram, radial HU profile, angular asymmetry within the annotated contour. Works on single-energy HU.
+- **Run MMD**: Runs PWSQS decomposition on the ROI defined by contour annotations. Produces volume fraction + mass maps for all 4 materials. Requires dual-energy data (both 70 + 150 keV loaded).
+
+After both are run, the radial profile chart shows **both curves simultaneously** (FAI dashed, MMD solid) for direct comparison.
 
 ## Workflow (Per Patient)
 
@@ -207,18 +271,28 @@ where:
 
 ```rust
 pub struct MmdResult {
-    pub water: Array3<f32>,     // volume fraction [0, 1]
-    pub lipid: Array3<f32>,     // volume fraction [0, 1]
-    pub iodine: Array3<f32>,    // volume fraction [0, 1]
-    pub calcium: Array3<f32>,   // volume fraction [0, 1]
-    pub density: Array3<f32>,   // mass density (mg/mL)
-    pub mask: Array3<bool>,     // which voxels were decomposed
+    // Volume fractions (dimensionless, 0 to 1, sum to 1)
+    pub water_frac: Array3<f32>,
+    pub lipid_frac: Array3<f32>,
+    pub iodine_frac: Array3<f32>,
+    pub calcium_frac: Array3<f32>,
+    // Mass per voxel (mg/mL) — fraction × material density
+    pub water_mass: Array3<f32>,    // f_w × 1000 mg/mL
+    pub lipid_mass: Array3<f32>,    // f_l × 950 mg/mL
+    pub iodine_mass: Array3<f32>,   // f_i × 4930 mg/mL
+    pub calcium_mass: Array3<f32>,  // f_c × 3180 mg/mL
+    pub total_density: Array3<f32>, // sum of all mass components (mg/mL)
+    // Metadata
+    pub mask: Array3<bool>,         // which voxels were decomposed
     pub iterations: usize,
     pub converged: bool,
 }
 ```
 
-Mass density per voxel: `ρ(x) = f_w·ρ_water + f_l·ρ_lipid + f_i·ρ_iodine + f_c·ρ_calcium`
+Per-voxel relationships:
+- `f_water + f_lipid + f_iodine + f_calcium = 1.0` (volume conservation)
+- `m_material = f_material × ρ_material` (mass = fraction × intrinsic density)
+- `ρ_total = Σ m_material` (total density)
 
 ## Phase 4: Radial-Angular Sampling + Surface Plots
 
@@ -229,10 +303,12 @@ Per cross-section, within the annotated fat region:
 - **Radial sampling** from vessel wall (r=0) outward to min(20mm, outer contour), at 0.5mm steps
 - At each (θ, r): look up two values from MMD volumes via trilinear interpolation
 
-### Two Z-Values
+### Two Z-Values (matching overlay selector)
 
-1. **Z1: Pure lipid volumetric fraction** — from `mmd_result.lipid` (dimensionless, 0 to 1)
-2. **Z2: Mass density** — from `mmd_result.density` (mg/mL)
+1. **Z1: Pure lipid volumetric fraction** — from `mmd_result.lipid_frac` (dimensionless, 0 to 1)
+2. **Z2: Lipid mass density** — from `mmd_result.lipid_mass` (mg/mL)
+
+The surface plot updates when the overlay selector changes. If user selects "Water" + "Volume %", the surface shows water fraction. The surface plot always reflects the currently selected material + unit.
 
 ### Data Structure
 
