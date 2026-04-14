@@ -53,47 +53,71 @@ pcat-workstation-v2/
       CrossSectionStrip.svelte  # NEW: horizontal scrollable cross-section strip
 ```
 
-## UI Design: Unified Analysis View
+## UI Design: Top-Level Tabs with C-Style Layout
 
-One workspace for both FAI and MMD. Same centerline + cross-section infrastructure.
+FAI and MMD produce results in different units (HU vs volume fraction / mg/mL) that can't be overlaid on the same radial profile. Use **top-level tabs** for method selection, with identical **C-style layout** in each tab.
 
-### Layout (Option C: Unified + Toggle Overlay)
+### Top-Level Navigation
+
+```
+[CPR] [FAI Analysis] [MMD Analysis]
+```
+
+Both analysis tabs share the same cross-section + contour infrastructure (centerline, waypoints, snake contours). Switching tabs changes the overlay content and analysis panels, not the underlying geometry.
+
+### FAI Analysis Tab Layout
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ CPR | [Analysis]                    Display: [material selector]│
+│ CPR | [FAI Analysis] | MMD Analysis         Display: [HU] [FAI]│
 ├──────────────────────┬──────────────────────────────────────────┤
-│                      │  Surface Plot (θ × r × z)               │
+│                      │  Radial HU Profile                      │
 │  Cross-Section       │  ┌──────────────────────────────────┐   │
-│  (large, with        │  │  [3D Plotly surface]              │   │
-│   overlay +          │  └──────────────────────────────────┘   │
-│   contours)          │  Radial Profile (FAI dashed + MMD solid)│
+│  (HU image +         │  │  [mean HU vs r curve]             │   │
+│   FAI colormap +     │  └──────────────────────────────────┘   │
+│   contours)          │  HU Histogram + Angular Asymmetry       │
 │                      │  ┌──────────────────────────────────┐   │
-│                      │  │  [dual-curve chart]               │   │
+│                      │  │  [existing FAI charts]            │   │
 │                      │  └──────────────────────────────────┘   │
 ├──────────────────────┴──────────────────────────────────────────┤
 │ Cross-Section Strip: [0mm] [2mm] [4mm●] [6mm] ... [38mm]  →   │
 ├─────────────────────────────────────────────────────────────────┤
-│ Contour: [Evolve] [Reset] [Accept] │ [Run FAI] [Run MMD] │ 3/20│
+│ Contour: [Evolve] [Reset] [Accept]  │  [Run FAI]  │  3/20 done│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Overlay Selector (two-level toggle)
+### MMD Analysis Tab Layout
 
-Since each of 4 materials has 2 units (volume fraction + mass), plus HU and FAI, use a two-level selector:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ CPR | FAI Analysis | [MMD Analysis]   [Water|Lipid|Iodine|Ca|ρ]│
+│                                       [Volume % | Mass (mg/mL)]│
+├──────────────────────┬──────────────────────────────────────────┤
+│                      │  4D Surface Plot (θ × r × z)            │
+│  Cross-Section       │  ┌──────────────────────────────────┐   │
+│  (material overlay   │  │  [3D Plotly surface, animated]    │   │
+│   selected above +   │  │  ◄━━━━━━━━●━━━━━━━━━━► arc-len   │   │
+│   contours)          │  └──────────────────────────────────┘   │
+│                      │  Radial Material Profile                │
+│                      │  ┌──────────────────────────────────┐   │
+│                      │  │  [lipid fraction vs r curve]      │   │
+│                      │  └──────────────────────────────────┘   │
+├──────────────────────┴──────────────────────────────────────────┤
+│ Cross-Section Strip: [0mm] [2mm] [4mm●] [6mm] ... [38mm]  →   │
+├─────────────────────────────────────────────────────────────────┤
+│ Contour: [Evolve] [Reset] [Accept]  │  [Run MMD]  │  3/20 done│
+└─────────────────────────────────────────────────────────────────┘
+```
 
-**Level 1 — Source** (radio chips):
-`HU` | `FAI mask` | `Water` | `Lipid` | `Iodine` | `Calcium` | `Total ρ`
+### Overlay Selector (MMD tab, two-level toggle)
 
-**Level 2 — Unit** (only shown when a material is selected):
+**Level 1 — Material** (radio chips):
+`Water` | `Lipid` | `Iodine` | `Calcium` | `Total ρ`
+
+**Level 2 — Unit** (toggle):
 `Volume %` | `Mass (mg/mL)`
 
-Examples:
-- Select "HU" → shows Hounsfield Unit grayscale
-- Select "FAI mask" → shows -190 to -30 HU fat overlay (existing)
-- Select "Lipid" + "Volume %" → lipid volumetric fraction colormap (0→1)
-- Select "Lipid" + "Mass (mg/mL)" → lipid mass density colormap
-- Select "Total ρ" → total mass density (mg/mL) from all materials
+The cross-section overlay, radial profile, AND surface plot all update together when the selector changes.
 
 ### Material Maps per Voxel (from MMD)
 
@@ -107,14 +131,25 @@ Mass densities:    m_water = f_water × ρ_water    (mg/mL)
 Total density:     ρ_total = m_water + m_lipid + m_iodine + m_calcium
 ```
 
-### Run FAI vs Run MMD
+### 4D Surface Plot (animated slider)
 
-Both buttons are in the same toolbar. They share the same cross-section and contour infrastructure:
+One 3D surface (θ × r → selected material) displayed at a time. An arc-length slider below the plot sweeps through the 20 cross-section positions. The surface morphs as the slider moves, showing how the material profile changes along the vessel.
 
-- **Run FAI**: Uses existing code. Computes mean HU, fat fraction, HU histogram, radial HU profile, angular asymmetry within the annotated contour. Works on single-energy HU.
-- **Run MMD**: Runs PWSQS decomposition on the ROI defined by contour annotations. Produces volume fraction + mass maps for all 4 materials. Requires dual-energy data (both 70 + 150 keV loaded).
+- Slider range: 0mm → 38mm (20 positions at 2mm intervals)
+- Play/pause button for auto-animation
+- Linked to cross-section strip selection (click a cross-section → slider jumps there)
 
-After both are run, the radial profile chart shows **both curves simultaneously** (FAI dashed, MMD solid) for direct comparison.
+### Shared State Between Tabs
+
+Both tabs share:
+- Centerline + waypoints
+- Cross-section geometry (positions, Bishop frames)
+- Contour annotations (vessel wall + outer fat boundary)
+- Dual-energy volume data
+
+Each tab owns:
+- FAI tab: HU-based analysis results (mean HU, fat %, histogram, radial HU profile)
+- MMD tab: Material decomposition results (volume fractions, mass maps, surface data)
 
 ## Workflow (Per Patient)
 
