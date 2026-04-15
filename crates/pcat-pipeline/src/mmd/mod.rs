@@ -1,4 +1,5 @@
 pub mod direct;
+pub(crate) mod linalg;
 pub mod materials;
 pub mod pwsqs;
 

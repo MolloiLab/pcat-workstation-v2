@@ -2,6 +2,7 @@ use ndarray::Array3;
 use rayon::prelude::*;
 
 use super::direct::{decompose_volume_direct, MmdResult};
+use super::linalg::invert3;
 use super::materials::{Material, MaterialLibrary};
 
 /// Parameters for the PWSQS (Pixel-Wise Separable Quadratic Surrogate) solver.
@@ -25,44 +26,6 @@ impl Default for PwsqsParams {
             tol: 1e-5,
         }
     }
-}
-
-/// Determinant of a 3x3 matrix given as row-major [[r0], [r1], [r2]].
-#[inline]
-fn det3(m: [[f64; 3]; 3]) -> f64 {
-    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
-}
-
-/// Invert a 3x3 matrix using the adjugate formula.
-/// Returns `None` if the matrix is singular (|det| < eps).
-#[inline]
-fn invert3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
-    let d = det3(m);
-    if d.abs() < 1e-15 {
-        return None;
-    }
-    let inv_d = 1.0 / d;
-
-    // Cofactor matrix (transposed = adjugate)
-    Some([
-        [
-            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_d,
-            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_d,
-            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_d,
-        ],
-        [
-            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_d,
-            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_d,
-            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_d,
-        ],
-        [
-            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_d,
-            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_d,
-            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_d,
-        ],
-    ])
 }
 
 /// Huber-like weight function: w(t) = psi'(t)/t = 1 / sqrt(1 + 3*t^2/delta^2).
@@ -121,6 +84,8 @@ pub fn pwsqs_solve(
     params: &PwsqsParams,
     progress_cb: Option<&dyn Fn(usize, f64)>,
 ) -> MmdResult {
+    debug_assert!(params.delta > 0.0, "delta must be positive to avoid division by zero in Huber weight");
+
     let shape = low_energy.shape();
     assert_eq!(shape, high_energy.shape(), "low/high energy shape mismatch");
     assert_eq!(shape, mask.shape(), "mask shape mismatch");
@@ -172,6 +137,8 @@ pub fn pwsqs_solve(
     for iter in 0..params.max_iter {
         // Each iteration produces new fractions; we compute them in parallel
         // then swap. We need read access to `fracs` during the parallel phase.
+        // Jacobi update: all voxels read from the previous iteration's fractions.
+        // This is intentional for rayon safety — do NOT update fracs inside this closure.
         let new_fracs: Vec<[f64; 4]> = masked_indices
             .par_iter()
             .map(|&idx| {
@@ -386,7 +353,9 @@ fn solve_triplet(
         }
     }
 
-    // Clamp to [0, 1]
+    // Heuristic post-projection: clamp to [0,1] then normalize sum=1.
+    // This is not a true simplex projection (which would use an active-set method),
+    // but is adequate for soft-tissue mixtures where negative fractions are rare.
     for v in f_tri.iter_mut() {
         *v = v.clamp(0.0, 1.0);
     }
@@ -399,19 +368,17 @@ fn solve_triplet(
         }
     }
 
-    // Compute objective: f^T H_data f + q_data^T f + regularization cost
+    // Objective: (1/2) f^T H_data f + q_data^T f + regularization cost
     let mut obj = 0.0f64;
-    // Quadratic data term: f^T H_data f
+    // Quadratic data term: (1/2) f^T H_data f
     for i in 0..3 {
         for j in 0..3 {
-            obj += f_tri[i] * h_data[i][j] * f_tri[j];
+            obj += 0.5 * f_tri[i] * h_data[i][j] * f_tri[j];
         }
     }
-    // Linear data term: 2 * q_data^T f  (since objective = f^T H f + 2 q^T f + const)
-    // Actually our formulation: min f^T H f / 2 + q^T f => gradient = H f + q = 0
-    // The quadratic form value is f^T H_data f + 2 q_data^T f
+    // Linear data term: q_data^T f
     for i in 0..3 {
-        obj += 2.0 * q_data[i] * f_tri[i];
+        obj += q_data[i] * f_tri[i];
     }
 
     // Regularization cost: sum of Huber penalties
