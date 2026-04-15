@@ -131,6 +131,24 @@
       [{ volumeId: csVolumeId }],
       VIEWPORT_IDS,
     ).then(() => {
+      // Apply slab thickness to coronal/sagittal AFTER volume is bound.
+      // Without this the reformatted slice snaps to the nearest discrete
+      // voxel along the view normal, causing ~1px seed-vs-vessel offset.
+      // Axial is left thin (native acquisition direction).
+      try {
+        const SLAB_MM = 2.0;
+        for (const id of [VP_CORONAL, VP_SAGITTAL]) {
+          const vp = engine.getViewport(id) as any;
+          if (vp?.setSlabThickness) {
+            vp.setSlabThickness(SLAB_MM);
+          }
+          if (vp?.setBlendMode && (Enums as any).BlendModes?.AVERAGE_INTENSITY_BLEND !== undefined) {
+            vp.setBlendMode((Enums as any).BlendModes.AVERAGE_INTENSITY_BLEND);
+          }
+        }
+      } catch (e) {
+        console.warn('MprPanel: failed to set slab', e);
+      }
       engine.renderViewports(VIEWPORT_IDS);
     });
   });
