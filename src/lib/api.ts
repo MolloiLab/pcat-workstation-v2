@@ -186,3 +186,32 @@ export async function runMmdOnRoi(
 ): Promise<MmdSummary> {
   return invoke<MmdSummary>('run_mmd_on_roi', { method });
 }
+
+/* ── Surface sampling + MMD overlay ─────────────────────── */
+
+export type CrossSectionSurface = {
+  arc_mm: number;
+  theta_deg: number[];
+  r_mm: number[];
+  surface: number[];
+  n_theta: number;
+  n_radial: number;
+  max_r_per_theta: number[];
+};
+
+/** Sample radial-angular surface data from MMD result for all finalized cross-sections. */
+export async function sampleSurfaces(
+  material: string,
+  unit: string,
+): Promise<CrossSectionSurface[]> {
+  return invoke<CrossSectionSurface[]>('sample_surfaces', { material, unit });
+}
+
+/** Get MMD material overlay for a single cross-section (flat f32 array). */
+export async function getMmdOverlay(
+  targetIndex: number,
+  material: string,
+  unit: string,
+): Promise<number[]> {
+  return invoke<number[]>('get_mmd_overlay', { targetIndex, material, unit });
+}

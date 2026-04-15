@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ndarray::Array2;
@@ -10,7 +11,8 @@ use pcat_pipeline::active_contour::{
 };
 use pcat_pipeline::annotation::{self, AnnotationBatchParams, AnnotationTarget};
 use pcat_pipeline::cpr::CprFrame;
-use pcat_pipeline::mmd::{self, MaterialLibrary, PwsqsParams};
+use pcat_pipeline::mmd::{self, MaterialLibrary, MmdResult, PwsqsParams};
+use pcat_pipeline::radial_angular::{self, CrossSectionSurface, RadialAngularParams};
 use pcat_pipeline::roi;
 
 use crate::state::AppState;
@@ -545,4 +547,196 @@ pub async fn run_mmd_on_roi(
     );
 
     Ok(summary)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: select material array from MmdResult
+// ---------------------------------------------------------------------------
+
+fn select_material_array<'a>(
+    mmd_result: &'a MmdResult,
+    material: &str,
+    unit: &str,
+) -> Result<&'a ndarray::Array3<f32>, String> {
+    match (material, unit) {
+        ("water", "fraction") => Ok(&mmd_result.water_frac),
+        ("water", "mass") => Ok(&mmd_result.water_mass),
+        ("lipid", "fraction") => Ok(&mmd_result.lipid_frac),
+        ("lipid", "mass") => Ok(&mmd_result.lipid_mass),
+        ("iodine", "fraction") => Ok(&mmd_result.iodine_frac),
+        ("iodine", "mass") => Ok(&mmd_result.iodine_mass),
+        ("calcium", "fraction") => Ok(&mmd_result.calcium_frac),
+        ("calcium", "mass") => Ok(&mmd_result.calcium_mass),
+        ("density", _) => Ok(&mmd_result.total_density),
+        _ => Err(format!("unknown material/unit: {material}/{unit}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Surface sampling command
+// ---------------------------------------------------------------------------
+
+/// Sample radial-angular surface data from the MMD result.
+/// Returns surface data for all finalized cross-sections.
+#[tauri::command]
+pub async fn sample_surfaces(
+    material: String,
+    unit: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Vec<CrossSectionSurface>, String> {
+    // Extract everything under the lock, then release.
+    let (material_map, frame, targets, finalized_contours, spacing, origin) = {
+        let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let mmd_result = guard
+            .mmd_result
+            .as_ref()
+            .ok_or_else(|| "no MMD result — run decomposition first".to_string())?;
+
+        let material_map = select_material_array(mmd_result, &material, &unit)?.clone();
+
+        let targets = guard
+            .annotation_targets
+            .as_ref()
+            .ok_or_else(|| "no annotation targets generated".to_string())?
+            .clone();
+
+        // Collect finalized contours.
+        let mut finalized_contours: HashMap<usize, Vec<[f64; 2]>> = HashMap::new();
+        for (&idx, &is_final) in &guard.finalized {
+            if is_final {
+                if let Some(contour) = guard.snake_contours.get(&idx) {
+                    finalized_contours.insert(idx, contour.clone());
+                }
+            }
+        }
+
+        if finalized_contours.is_empty() {
+            return Err("no finalized contours — finalize at least one cross-section".into());
+        }
+
+        let frame = guard
+            .cpr_frame
+            .as_ref()
+            .ok_or_else(|| "no CPR frame built".to_string())?;
+        let frame = clone_frame(frame);
+
+        let vol = guard
+            .volume
+            .as_ref()
+            .ok_or_else(|| "no volume loaded".to_string())?;
+
+        (
+            material_map,
+            frame,
+            targets,
+            finalized_contours,
+            vol.spacing,
+            vol.origin,
+        )
+    };
+
+    // Run sampling on a blocking thread.
+    let surfaces = tokio::task::spawn_blocking(move || {
+        let params = RadialAngularParams::default();
+        radial_angular::sample_radial_angular(
+            &material_map,
+            &frame,
+            &targets,
+            &finalized_contours,
+            spacing,
+            origin,
+            &params,
+        )
+    })
+    .await
+    .map_err(|e| format!("sample_surfaces task failed: {e}"))?;
+
+    Ok(surfaces)
+}
+
+// ---------------------------------------------------------------------------
+// MMD overlay for a single cross-section
+// ---------------------------------------------------------------------------
+
+/// Get the current MMD result for a specific material as a flat array for overlay rendering.
+///
+/// Extracts the material values for the cross-section slice at the given target,
+/// for rendering as a colormap overlay in the editor.
+#[tauri::command]
+pub async fn get_mmd_overlay(
+    target_index: usize,
+    material: String,
+    unit: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Vec<f32>, String> {
+    let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+
+    let mmd_result = guard
+        .mmd_result
+        .as_ref()
+        .ok_or_else(|| "no MMD result — run decomposition first".to_string())?;
+
+    let material_map = select_material_array(mmd_result, &material, &unit)?;
+
+    let targets = guard
+        .annotation_targets
+        .as_ref()
+        .ok_or_else(|| "no annotation targets generated".to_string())?;
+
+    let target = targets
+        .get(target_index)
+        .ok_or_else(|| format!("target_index {target_index} out of range (0..{})", targets.len()))?;
+
+    let frame = guard
+        .cpr_frame
+        .as_ref()
+        .ok_or_else(|| "no CPR frame built".to_string())?;
+
+    let vol = guard
+        .volume
+        .as_ref()
+        .ok_or_else(|| "no volume loaded".to_string())?;
+
+    let spacing = vol.spacing;
+    let origin = vol.origin;
+
+    let frame_idx = target.frame_index;
+    if frame_idx >= frame.n_cols() {
+        return Err(format!("frame_index {frame_idx} out of range"));
+    }
+
+    let pos_mm = frame.positions[frame_idx];
+    let normal = frame.normals[frame_idx];
+    let binormal = frame.binormals[frame_idx];
+
+    let pixels = target.pixels;
+    let width_mm = target.width_mm;
+    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
+
+    let mut overlay = vec![f32::NAN; pixels * pixels];
+
+    for row in 0..pixels {
+        for col in 0..pixels {
+            // Convert pixel (row, col) to offset in mm from center.
+            // Row direction: row=0 -> +normal, row=pixels-1 -> -normal
+            let offset_n = width_mm * (1.0 - 2.0 * row as f64 / (pixels as f64 - 1.0));
+            // Col direction: col=0 -> +binormal, col=pixels-1 -> -binormal
+            let offset_b = width_mm * (1.0 - 2.0 * col as f64 / (pixels as f64 - 1.0));
+
+            let wz = pos_mm[0] + offset_n * normal[0] + offset_b * binormal[0];
+            let wy = pos_mm[1] + offset_n * normal[1] + offset_b * binormal[1];
+            let wx = pos_mm[2] + offset_n * normal[2] + offset_b * binormal[2];
+
+            // Convert world coords to voxel indices.
+            let vz = (wz - origin[0]) * inv_spacing[0];
+            let vy = (wy - origin[1]) * inv_spacing[1];
+            let vx = (wx - origin[2]) * inv_spacing[2];
+
+            let val = pcat_pipeline::interp::trilinear(material_map, vz, vy, vx);
+            overlay[row * pixels + col] = val;
+        }
+    }
+
+    Ok(overlay)
 }

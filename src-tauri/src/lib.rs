@@ -38,6 +38,8 @@ pub fn run() {
             commands::annotation::add_snake_point,
             commands::annotation::finalize_contour,
             commands::annotation::run_mmd_on_roi,
+            commands::annotation::sample_surfaces,
+            commands::annotation::get_mmd_overlay,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
