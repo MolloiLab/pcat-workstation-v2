@@ -186,7 +186,6 @@ export async function runMmdOnRoi(
 ): Promise<MmdSummary> {
   return invoke<MmdSummary>('run_mmd_on_roi', { method });
 }
-
 /* ── Surface sampling + MMD overlay ─────────────────────── */
 
 export type CrossSectionSurface = {
