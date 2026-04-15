@@ -4,10 +4,12 @@
    *
    * Layout:
    *   - Header toolbar (title + actions)
-   *   - Main area    (MprPanel fills remaining space)
+   *   - Tab bar (Editor | MMD Analysis)
+   *   - Main area    (MprPanel or MmdAnalysisView fills remaining space)
    *   - Footer status bar (loading progress / ready state)
    */
   import MprPanel from './components/MprPanel.svelte';
+  import MmdAnalysisView from './components/MmdAnalysisView.svelte';
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
@@ -18,6 +20,13 @@
   import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { seedStore, type Vessel } from '$lib/stores/seedStore.svelte';
   import { navigateToWorldPos } from '$lib/navigation';
+
+  /* ── Tab state ─────────────────────────────────────── */
+  type AppTab = 'editor' | 'mmd';
+  let activeTab = $state<AppTab>('editor');
+
+  /** Centerline of the currently active vessel (for MmdAnalysisView). */
+  let activeCenterlineMm = $derived(seedStore.activeVesselData.centerline ?? []);
 
   let errorMessage = $state('');
   let recentPaths = $state<string[]>([]);
@@ -246,16 +255,48 @@
     </div>
   </header>
 
+  <!-- ===== Tab bar ===== -->
+  {#if volumeStore.current}
+    <nav class="flex shrink-0 items-center gap-1 border-b border-border bg-surface-secondary px-4">
+      <button
+        class="relative px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'editor'
+          ? 'text-accent'
+          : 'text-text-secondary hover:text-text-primary'}"
+        onclick={() => { activeTab = 'editor'; }}
+      >
+        Editor
+        {#if activeTab === 'editor'}
+          <span class="absolute inset-x-0 bottom-0 h-[2px] bg-accent"></span>
+        {/if}
+      </button>
+      <button
+        class="relative px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'mmd'
+          ? 'text-accent'
+          : 'text-text-secondary hover:text-text-primary'}"
+        onclick={() => { activeTab = 'mmd'; }}
+      >
+        MMD Analysis
+        {#if activeTab === 'mmd'}
+          <span class="absolute inset-x-0 bottom-0 h-[2px] bg-accent"></span>
+        {/if}
+      </button>
+    </nav>
+  {/if}
+
   <!-- ===== Main viewport area ===== -->
   <main class="relative min-h-0 flex-1">
-    <MprPanel />
+    {#if activeTab === 'editor'}
+      <MprPanel />
 
-    <!-- Contextual hint line -->
-    <HintLine />
+      <!-- Contextual hint line -->
+      <HintLine />
 
-    <!-- Pipeline progress overlay -->
-    {#if pipelineStore.status === 'running'}
-      <ProgressOverlay />
+      <!-- Pipeline progress overlay -->
+      {#if pipelineStore.status === 'running'}
+        <ProgressOverlay />
+      {/if}
+    {:else if activeTab === 'mmd'}
+      <MmdAnalysisView centerlineMm={activeCenterlineMm} />
     {/if}
   </main>
 
