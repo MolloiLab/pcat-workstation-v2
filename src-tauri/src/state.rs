@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pcat_pipeline::cpr::CprFrame;
+use pcat_pipeline::dicom_loader::DualEnergyVolume;
 pub use pcat_pipeline::types::LoadedVolume;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,6 +36,7 @@ pub struct VesselResult {
 /// Application state managed by Tauri.
 pub struct AppState {
     pub volume: Option<LoadedVolume>,
+    pub dual_energy: Option<DualEnergyVolume>,
     pub cpr_frame: Option<Arc<CprFrame>>,
     pub analysis_results: Option<AnalysisResults>,
 }
@@ -43,6 +45,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             volume: None,
+            dual_energy: None,
             cpr_frame: None,
             analysis_results: None,
         }

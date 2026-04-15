@@ -19,6 +19,8 @@ pub fn run() {
             commands::dicom::get_recent_dicoms,
             commands::dicom::save_seeds,
             commands::dicom::load_seeds,
+            commands::dicom::scan_series,
+            commands::dicom::load_dual_energy,
             commands::volume::get_slice,
             commands::cpr::build_cpr_frame,
             commands::cpr::render_cpr_image,

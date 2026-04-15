@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-use pcat_pipeline::dicom_loader;
+use pcat_pipeline::dicom_loader::{self, SeriesInfo};
 use crate::state::AppState;
 
 const MAX_RECENT: usize = 10;
@@ -148,4 +148,77 @@ pub async fn load_seeds(app: tauri::AppHandle, dicom_path: String) -> Result<Opt
     } else {
         Ok(None)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dual-energy DICOM commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct DualEnergyInfo {
+    pub shape: [usize; 3],
+    pub spacing: [f64; 3],
+    pub low_kev: f64,
+    pub high_kev: f64,
+    pub patient_name: String,
+}
+
+/// Scan a DICOM directory and return the list of series found.
+#[tauri::command]
+pub async fn scan_series(
+    path: String,
+) -> Result<Vec<SeriesInfo>, String> {
+    let dir = path;
+    tokio::task::spawn_blocking(move || {
+        dicom_loader::scan_dicom_series(Path::new(&dir))
+    })
+    .await
+    .map_err(|e| format!("scan task failed: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+/// Load a dual-energy volume from two series in a DICOM directory,
+/// store it in AppState, and return summary metadata.
+#[tauri::command]
+pub async fn load_dual_energy(
+    path: String,
+    low_series_uid: String,
+    high_series_uid: String,
+    low_kev: f64,
+    high_kev: f64,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<DualEnergyInfo, String> {
+    let dir = path;
+    let low_uid = low_series_uid;
+    let high_uid = high_series_uid;
+
+    let volume = tokio::task::spawn_blocking(move || {
+        dicom_loader::load_dual_energy(
+            Path::new(&dir),
+            &low_uid,
+            &high_uid,
+            low_kev,
+            high_kev,
+        )
+    })
+    .await
+    .map_err(|e| format!("load task failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    let info = DualEnergyInfo {
+        shape: [
+            volume.low.shape()[0],
+            volume.low.shape()[1],
+            volume.low.shape()[2],
+        ],
+        spacing: volume.spacing,
+        low_kev: volume.low_energy_kev,
+        high_kev: volume.high_energy_kev,
+        patient_name: volume.patient_name.clone(),
+    };
+
+    let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+    guard.dual_energy = Some(volume);
+
+    Ok(info)
 }
