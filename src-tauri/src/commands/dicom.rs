@@ -297,6 +297,63 @@ pub async fn list_patients(
     Ok(patients)
 }
 
+/// One immediate subdirectory of a patient folder — typically a single DICOM
+/// series (e.g. `MonoPlus_70keV`). Used by the patient browser to expand a
+/// patient into its series without reading any DICOM headers.
+#[derive(serde::Serialize)]
+pub struct SeriesDirInfo {
+    /// Folder name (e.g. `MonoPlus_70keV`).
+    pub name: String,
+    /// Absolute path to the series folder.
+    pub path: String,
+    /// Number of regular files in the folder (≈ DICOM slices).
+    pub num_files: usize,
+}
+
+/// List immediate subdirectories of a patient folder with file counts.
+///
+/// Returns folders sorted by name. Skips hidden / underscore-prefixed entries.
+/// Fast — does not parse any DICOM headers.
+#[tauri::command]
+pub async fn list_series_dirs(patient_path: String) -> Result<Vec<SeriesDirInfo>, String> {
+    let root = PathBuf::from(&patient_path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {patient_path}"));
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<SeriesDirInfo>, String> {
+        let mut out = Vec::new();
+        let read = std::fs::read_dir(&root).map_err(|e| format!("read_dir: {e}"))?;
+        for entry in read.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name.starts_with('_') {
+                continue;
+            }
+            // Count regular files (cheap directory scan, no DICOM parse).
+            let num_files = std::fs::read_dir(entry.path())
+                .map(|d| {
+                    d.flatten()
+                        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
+            out.push(SeriesDirInfo {
+                name,
+                path: entry.path().to_string_lossy().to_string(),
+                num_files,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("list task failed: {e}"))?
+}
+
 /// Load a dual-energy volume from two series in a DICOM directory,
 /// store it in AppState, and return summary metadata.
 #[tauri::command]

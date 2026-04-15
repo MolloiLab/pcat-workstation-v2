@@ -271,3 +271,20 @@ export type PatientInfo = {
 export async function listPatients(rootDir: string): Promise<PatientInfo[]> {
   return invoke<PatientInfo[]>('list_patients', { rootDir });
 }
+
+export type SeriesDirInfo = {
+  /** Folder name (e.g. `MonoPlus_70keV`). */
+  name: string;
+  /** Absolute path to the series folder. */
+  path: string;
+  /** File count in that folder (≈ DICOM slices). */
+  num_files: number;
+};
+
+/**
+ * List immediate subdirectories of a patient folder. Each subdirectory is
+ * typically one DICOM series. No DICOM headers are parsed — fast.
+ */
+export async function listSeriesDirs(patientPath: string): Promise<SeriesDirInfo[]> {
+  return invoke<SeriesDirInfo[]>('list_series_dirs', { patientPath });
+}

@@ -22,6 +22,7 @@ pub fn run() {
             commands::dicom::scan_series,
             commands::dicom::load_dual_energy,
             commands::dicom::list_patients,
+            commands::dicom::list_series_dirs,
             commands::volume::get_slice,
             commands::cpr::build_cpr_frame,
             commands::cpr::render_cpr_image,
