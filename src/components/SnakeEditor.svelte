@@ -1,0 +1,433 @@
+<script lang="ts">
+  /**
+   * Canvas overlay for editing active contour (snake) annotations on a
+   * cross-section image.
+   *
+   * Renders the HU image as grayscale background, vessel wall as red dashed
+   * polygon, init boundary as blue dashed polygon, and the snake contour as
+   * a green polygon with draggable control points.
+   */
+  import type { AnnotationTarget, SnakeResult } from '$lib/api';
+  import {
+    evolveSnake,
+    initSnake,
+    updateSnakePoints,
+    addSnakePoint,
+    finalizeContour,
+  } from '$lib/api';
+
+  type Props = {
+    target: AnnotationTarget;
+    targetIndex: number;
+    /** Current snake contour points [x,y] in pixel coords */
+    snakePoints: [number, number][] | null;
+    onSnakeUpdate: (points: [number, number][]) => void;
+    onFinalize: () => void;
+    status: 'pending' | 'in-progress' | 'done';
+  };
+
+  let { target, targetIndex, snakePoints, onSnakeUpdate, onFinalize, status }: Props = $props();
+
+  /* ── Canvas state ──────────────────────────────────────── */
+
+  let canvasEl: HTMLCanvasElement | undefined = $state();
+  let canvasSize = $state(512);
+  let busy = $state(false);
+  let addPointMode = $state(false);
+
+  /* ── Drag state ────────────────────────────────────────── */
+
+  let dragIndex = $state<number | null>(null);
+  let hoverIndex = $state<number | null>(null);
+
+  const WC = 40;
+  const WW = 400;
+  const CONTROL_POINT_RADIUS = 4; // visual radius in canvas px
+  const HIT_RADIUS = 10; // mouse proximity threshold in canvas px
+
+  /* ── Coordinate mapping ────────────────────────────────── */
+
+  function pixelToCanvas(px: number): number {
+    return (px / target.pixels) * canvasSize;
+  }
+
+  function canvasToPixel(cx: number): number {
+    return (cx / canvasSize) * target.pixels;
+  }
+
+  /* ── Rendering ─────────────────────────────────────────── */
+
+  function renderBackground(ctx: CanvasRenderingContext2D) {
+    const srcSize = target.pixels;
+
+    // Render HU data to an offscreen canvas at native resolution
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = srcSize;
+    srcCanvas.height = srcSize;
+    const srcCtx = srcCanvas.getContext('2d')!;
+    const imgData = srcCtx.createImageData(srcSize, srcSize);
+
+    const lo = WC - WW / 2;
+    const range = WW;
+
+    for (let i = 0; i < target.image.length; i++) {
+      const hu = target.image[i];
+      const gray = Math.max(0, Math.min(255, Math.round(((hu - lo) / range) * 255)));
+      imgData.data[i * 4] = gray;
+      imgData.data[i * 4 + 1] = gray;
+      imgData.data[i * 4 + 2] = gray;
+      imgData.data[i * 4 + 3] = 255;
+    }
+
+    srcCtx.putImageData(imgData, 0, 0);
+
+    // Scale to canvas size
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(srcCanvas, 0, 0, srcSize, srcSize, 0, 0, canvasSize, canvasSize);
+  }
+
+  function drawClosedPolygon(
+    ctx: CanvasRenderingContext2D,
+    points: [number, number][],
+    strokeColor: string,
+    lineWidth: number,
+    dashed: boolean,
+  ) {
+    if (points.length < 2) return;
+    ctx.save();
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = lineWidth;
+    if (dashed) ctx.setLineDash([6, 4]);
+    else ctx.setLineDash([]);
+    ctx.beginPath();
+    const [x0, y0] = points[0];
+    ctx.moveTo(pixelToCanvas(x0), pixelToCanvas(y0));
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(pixelToCanvas(points[i][0]), pixelToCanvas(points[i][1]));
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawControlPoints(ctx: CanvasRenderingContext2D, points: [number, number][]) {
+    for (let i = 0; i < points.length; i++) {
+      const cx = pixelToCanvas(points[i][0]);
+      const cy = pixelToCanvas(points[i][1]);
+      const isHover = hoverIndex === i;
+      const isDrag = dragIndex === i;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, CONTROL_POINT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = isDrag ? '#ffffff' : isHover ? '#66ff66' : '#30d158';
+      ctx.fill();
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  function render() {
+    if (!canvasEl) return;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
+
+    canvasEl.width = canvasSize;
+    canvasEl.height = canvasSize;
+
+    // 1. Background image
+    renderBackground(ctx);
+
+    // 2. Vessel wall (red dashed)
+    if (target.vessel_wall.length > 0) {
+      drawClosedPolygon(ctx, target.vessel_wall, '#ff453a', 1.5, true);
+    }
+
+    // 3. Snake or init boundary
+    if (snakePoints && snakePoints.length > 0) {
+      // Active snake contour (green solid)
+      drawClosedPolygon(ctx, snakePoints, '#30d158', 2, false);
+      drawControlPoints(ctx, snakePoints);
+    } else if (target.init_boundary.length > 0) {
+      // Init boundary (blue dashed)
+      drawClosedPolygon(ctx, target.init_boundary, '#0a84ff', 1.5, true);
+    }
+
+    // 4. Add-point mode cursor indicator
+    if (addPointMode) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 214, 10, 0.3)';
+      ctx.fillRect(0, canvasSize - 24, canvasSize, 24);
+      ctx.fillStyle = '#ffd60a';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Click to add point (Esc to cancel)', canvasSize / 2, canvasSize - 8);
+      ctx.restore();
+    }
+  }
+
+  // Re-render when dependencies change.
+  // Access reactive state inline to register as $effect dependencies.
+  $effect(() => {
+    void target.pixels;
+    void target.image;
+    void snakePoints;
+    void hoverIndex;
+    void dragIndex;
+    void addPointMode;
+    void canvasSize;
+    queueMicrotask(() => render());
+  });
+
+  /* ── Mouse interaction ─────────────────────────────────── */
+
+  function getCanvasCoords(e: MouseEvent): [number, number] {
+    if (!canvasEl) return [0, 0];
+    const rect = canvasEl.getBoundingClientRect();
+    const scaleX = canvasSize / rect.width;
+    const scaleY = canvasSize / rect.height;
+    return [
+      (e.clientX - rect.left) * scaleX,
+      (e.clientY - rect.top) * scaleY,
+    ];
+  }
+
+  function findNearestPoint(canvasX: number, canvasY: number): number | null {
+    if (!snakePoints) return null;
+    let minDist = Infinity;
+    let minIdx = -1;
+    for (let i = 0; i < snakePoints.length; i++) {
+      const cx = pixelToCanvas(snakePoints[i][0]);
+      const cy = pixelToCanvas(snakePoints[i][1]);
+      const dist = Math.hypot(canvasX - cx, canvasY - cy);
+      if (dist < minDist) {
+        minDist = dist;
+        minIdx = i;
+      }
+    }
+    return minDist < HIT_RADIUS ? minIdx : null;
+  }
+
+  function handleMouseDown(e: MouseEvent) {
+    const [cx, cy] = getCanvasCoords(e);
+
+    // Add-point mode: click adds a new point
+    if (addPointMode) {
+      const px = canvasToPixel(cx);
+      const py = canvasToPixel(cy);
+      handleAddPoint([px, py]);
+      return;
+    }
+
+    // Check if clicking near a control point
+    const idx = findNearestPoint(cx, cy);
+    if (idx !== null) {
+      dragIndex = idx;
+      e.preventDefault();
+    }
+  }
+
+  function handleMouseMove(e: MouseEvent) {
+    const [cx, cy] = getCanvasCoords(e);
+
+    if (dragIndex !== null && snakePoints) {
+      // Dragging a control point
+      const px = canvasToPixel(cx);
+      const py = canvasToPixel(cy);
+      const updated = snakePoints.map((p, i) =>
+        i === dragIndex ? [px, py] as [number, number] : p,
+      );
+      onSnakeUpdate(updated);
+    } else {
+      // Hover detection
+      hoverIndex = findNearestPoint(cx, cy);
+    }
+  }
+
+  async function handleMouseUp() {
+    if (dragIndex !== null && snakePoints) {
+      // Sync dragged points to backend
+      try {
+        await updateSnakePoints(targetIndex, snakePoints);
+      } catch (err) {
+        console.error('Failed to sync snake points:', err);
+      }
+    }
+    dragIndex = null;
+  }
+
+  function handleKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && addPointMode) {
+      addPointMode = false;
+      e.stopPropagation();
+    }
+  }
+
+  /* ── Toolbar actions ───────────────────────────────────── */
+
+  async function handleInit() {
+    if (busy) return;
+    busy = true;
+    try {
+      const points = await initSnake(targetIndex);
+      onSnakeUpdate(points);
+    } catch (err) {
+      console.error('Init snake failed:', err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function handleEvolve() {
+    if (busy) return;
+    busy = true;
+    try {
+      const result: SnakeResult = await evolveSnake(targetIndex, 200);
+      onSnakeUpdate(result.points);
+    } catch (err) {
+      console.error('Evolve snake failed:', err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function handleAddPoint(position: [number, number]) {
+    if (busy) return;
+    busy = true;
+    addPointMode = false;
+    try {
+      await addSnakePoint(targetIndex, position);
+      // Re-fetch updated points by evolving 0 iterations
+      const result = await evolveSnake(targetIndex, 0);
+      onSnakeUpdate(result.points);
+    } catch (err) {
+      console.error('Add point failed:', err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function handleAddPointMode() {
+    addPointMode = !addPointMode;
+  }
+
+  async function handleReset() {
+    if (busy) return;
+    busy = true;
+    try {
+      const points = await initSnake(targetIndex);
+      onSnakeUpdate(points);
+    } catch (err) {
+      console.error('Reset snake failed:', err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function handleAccept() {
+    if (busy) return;
+    busy = true;
+    try {
+      await finalizeContour(targetIndex);
+      onFinalize();
+    } catch (err) {
+      console.error('Finalize contour failed:', err);
+    } finally {
+      busy = false;
+    }
+  }
+</script>
+
+<svelte:window onkeydown={handleKeyDown} />
+
+<div class="flex flex-col gap-0">
+  <!-- Canvas area -->
+  <div class="relative aspect-square w-full">
+    <canvas
+      bind:this={canvasEl}
+      class="h-full w-full cursor-crosshair rounded"
+      style="image-rendering: pixelated;"
+      onmousedown={handleMouseDown}
+      onmousemove={handleMouseMove}
+      onmouseup={handleMouseUp}
+      onmouseleave={() => { hoverIndex = null; if (dragIndex !== null) { dragIndex = null; } }}
+    ></canvas>
+
+    <!-- Status badge overlay -->
+    <div class="absolute right-2 top-2 flex items-center gap-1.5">
+      {#if status === 'done'}
+        <span class="rounded-full bg-success/20 px-2 py-0.5 text-[10px] font-medium text-success">
+          Done
+        </span>
+      {:else if status === 'in-progress'}
+        <span class="rounded-full bg-warning/20 px-2 py-0.5 text-[10px] font-medium text-warning">
+          Editing
+        </span>
+      {:else}
+        <span class="rounded-full bg-text-secondary/10 px-2 py-0.5 text-[10px] font-medium text-text-secondary">
+          Pending
+        </span>
+      {/if}
+    </div>
+
+    <!-- Frame info overlay -->
+    <div class="absolute left-2 top-2">
+      <span class="text-[10px] tabular-nums text-text-secondary">
+        Frame {target.frame_index} | {target.arc_mm.toFixed(1)} mm
+      </span>
+    </div>
+
+    <!-- Loading overlay -->
+    {#if busy}
+      <div class="absolute inset-0 flex items-center justify-center bg-black/30 rounded">
+        <span class="text-xs text-text-secondary">Processing...</span>
+      </div>
+    {/if}
+  </div>
+
+  <!-- Toolbar -->
+  <div class="flex items-center gap-1.5 border-t border-border bg-surface-secondary px-2 py-1.5">
+    <button
+      class="rounded px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+      onclick={handleInit}
+      disabled={busy}
+      title="Initialize snake contour"
+    >
+      Init
+    </button>
+    <button
+      class="rounded px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+      onclick={handleEvolve}
+      disabled={busy || !snakePoints}
+      title="Evolve active contour (200 iterations)"
+    >
+      Evolve
+    </button>
+    <button
+      class="rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40
+             {addPointMode ? 'bg-warning/20 text-warning' : 'text-accent hover:bg-accent/10 active:bg-accent/20'}"
+      onclick={handleAddPointMode}
+      disabled={busy || !snakePoints}
+      title="Click canvas to add a control point"
+    >
+      Add Point
+    </button>
+    <button
+      class="rounded px-2.5 py-1 text-xs font-medium text-text-secondary hover:bg-surface-tertiary hover:text-error disabled:opacity-40"
+      onclick={handleReset}
+      disabled={busy}
+      title="Reset to initial contour"
+    >
+      Reset
+    </button>
+    <button
+      class="ml-auto rounded bg-success/10 px-3 py-1 text-xs font-medium text-success hover:bg-success/20 active:bg-success/30 disabled:opacity-40"
+      onclick={handleAccept}
+      disabled={busy || !snakePoints}
+      title="Accept contour and mark as done"
+    >
+      Accept
+    </button>
+  </div>
+</div>
