@@ -10,6 +10,7 @@
    */
   import MprPanel from './components/MprPanel.svelte';
   import MmdAnalysisView from './components/MmdAnalysisView.svelte';
+  import PatientBrowser from './components/PatientBrowser.svelte';
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
@@ -31,6 +32,7 @@
   let errorMessage = $state('');
   let recentPaths = $state<string[]>([]);
   let showRecent = $state(false);
+  let showPatientBrowser = $state(false);
 
   // Load recent paths on mount
   $effect(() => {
@@ -212,6 +214,15 @@
         </button>
       {/if}
 
+      <button
+        class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+        onclick={(e: MouseEvent) => { e.stopPropagation(); showPatientBrowser = true; }}
+        disabled={volumeStore.loading}
+        title="Browse patients in cohort directory"
+      >
+        Patients
+      </button>
+
       <div class="relative flex items-center">
         <button
           class="rounded-l px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
@@ -299,6 +310,14 @@
       <MmdAnalysisView centerlineMm={activeCenterlineMm} />
     {/if}
   </main>
+
+  <!-- ===== Patient browser modal ===== -->
+  {#if showPatientBrowser}
+    <PatientBrowser
+      onSelect={(path) => { showPatientBrowser = false; loadFromPath(path); }}
+      onClose={() => { showPatientBrowser = false; }}
+    />
+  {/if}
 
   <!-- ===== Footer status bar ===== -->
   <footer

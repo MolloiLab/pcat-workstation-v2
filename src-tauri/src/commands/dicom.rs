@@ -177,6 +177,126 @@ pub async fn scan_series(
     .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Patient browser: list patient folders + status from saved annotations
+// ---------------------------------------------------------------------------
+
+/// Per-patient progress summary for the patient browser.
+#[derive(serde::Serialize)]
+pub struct PatientInfo {
+    /// Folder name (e.g. "57955439"), used as a stable patient ID.
+    pub id: String,
+    /// Absolute path to the patient's DICOM folder.
+    pub path: String,
+    /// `not_started` | `in_progress` | `complete`.
+    pub status: String,
+    /// Number of cross-sections marked finalized in saved annotations (0 if none).
+    pub finalized_count: usize,
+    /// Whether MMD has been run and stored in saved annotations.
+    pub has_mmd: bool,
+}
+
+/// Decide whether a directory looks like a patient folder.
+///
+/// Heuristic: name is non-hidden, contains at least one regular file (we don't
+/// scan deeply for DICOM headers — that would be slow over SMB).
+fn looks_like_patient_dir(entry: &std::fs::DirEntry) -> bool {
+    if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        return false;
+    }
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    if name.starts_with('.') || name.starts_with('_') {
+        return false;
+    }
+    // Quick check: directory must contain at least one regular file (DICOM slice).
+    if let Ok(mut iter) = std::fs::read_dir(entry.path()) {
+        iter.any(|e| e.ok().and_then(|e| e.file_type().ok()).is_some_and(|t| t.is_file()))
+    } else {
+        false
+    }
+}
+
+/// Reads saved annotation JSON for a given patient folder name and returns
+/// (finalized_count, has_mmd). Returns (0, false) if no save exists.
+fn read_annotation_summary(app: &tauri::AppHandle, folder_name: &str) -> (usize, bool) {
+    let dir = app.path().app_data_dir().expect("app data dir").join("annotations");
+    // Filename is `sanitize(folder_name).json` — match the convention in
+    // `save_annotations` / `load_annotations`.
+    let file = dir.join(format!("{}.json", sanitize_for_filename(folder_name)));
+    let Ok(data) = std::fs::read_to_string(&file) else {
+        return (0, false);
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return (0, false);
+    };
+    let finalized_count = json
+        .get("finalized")
+        .and_then(|v| v.as_object())
+        .map(|m| m.values().filter(|v| v.as_bool().unwrap_or(false)).count())
+        .unwrap_or(0);
+    let has_mmd = json
+        .get("mmd_method")
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    (finalized_count, has_mmd)
+}
+
+/// Walk `root_dir` and return a sorted list of patient folders with status badges.
+///
+/// Status: `complete` if MMD has been run AND ≥1 contour finalized,
+/// `in_progress` if any annotation file exists, `not_started` otherwise.
+#[tauri::command]
+pub async fn list_patients(
+    app: tauri::AppHandle,
+    root_dir: String,
+) -> Result<Vec<PatientInfo>, String> {
+    let root = PathBuf::from(&root_dir);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {root_dir}"));
+    }
+
+    // Collect candidate patient directories on a blocking thread (SMB walks
+    // can be slow).
+    let root_for_walk = root.clone();
+    let entries = tokio::task::spawn_blocking(move || -> Result<Vec<(String, PathBuf)>, String> {
+        let mut out = Vec::new();
+        let read = std::fs::read_dir(&root_for_walk).map_err(|e| format!("read_dir: {e}"))?;
+        for entry in read.flatten() {
+            if looks_like_patient_dir(&entry) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                out.push((name, entry.path()));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("walk task failed: {e}"))??;
+
+    // Cross-reference annotation saves on the main task (cheap local FS reads).
+    let mut patients = Vec::with_capacity(entries.len());
+    for (id, path) in entries {
+        let (finalized_count, has_mmd) = read_annotation_summary(&app, &id);
+        let status = if has_mmd && finalized_count > 0 {
+            "complete"
+        } else if finalized_count > 0 {
+            "in_progress"
+        } else {
+            "not_started"
+        };
+        patients.push(PatientInfo {
+            id,
+            path: path.to_string_lossy().to_string(),
+            status: status.to_string(),
+            finalized_count,
+            has_mmd,
+        });
+    }
+
+    Ok(patients)
+}
+
 /// Load a dual-energy volume from two series in a DICOM directory,
 /// store it in AppState, and return summary metadata.
 #[tauri::command]

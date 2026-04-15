@@ -247,3 +247,27 @@ export async function exportMmdCsv(
 ): Promise<string> {
   return invoke<string>('export_mmd_csv', { patientId });
 }
+
+/* ── Patient browser ──────────────────────────────────── */
+
+export type PatientStatus = 'not_started' | 'in_progress' | 'complete';
+
+export type PatientInfo = {
+  /** Folder name (stable patient ID). */
+  id: string;
+  /** Absolute path to the patient's DICOM folder. */
+  path: string;
+  status: PatientStatus;
+  /** Number of cross-sections marked finalized in saved annotations. */
+  finalized_count: number;
+  /** Whether MMD has been run and stored in saved annotations. */
+  has_mmd: boolean;
+};
+
+/**
+ * Walk `rootDir` for patient subfolders and return a sorted list with status
+ * badges derived from each patient's saved annotation JSON.
+ */
+export async function listPatients(rootDir: string): Promise<PatientInfo[]> {
+  return invoke<PatientInfo[]>('list_patients', { rootDir });
+}
