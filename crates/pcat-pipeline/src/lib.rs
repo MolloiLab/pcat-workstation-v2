@@ -5,6 +5,7 @@ pub mod curved_cpr;
 pub mod dicom_loader;
 pub mod error;
 pub mod interp;
+pub mod mmd;
 pub mod spline;
 pub mod stats;
 pub mod types;
