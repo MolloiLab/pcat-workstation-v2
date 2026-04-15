@@ -1,4 +1,5 @@
 pub mod active_contour;
+pub mod annotation;
 pub mod centerline;
 pub mod contour;
 pub mod cpr;
