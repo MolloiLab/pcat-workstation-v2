@@ -4,10 +4,12 @@
    *
    * Layout:
    *   - Header toolbar (title + actions)
-   *   - Main area    (MprPanel fills remaining space)
+   *   - Tab bar (Editor | MMD Analysis)
+   *   - Main area    (MprPanel or MmdAnalysisView fills remaining space)
    *   - Footer status bar (loading progress / ready state)
    */
   import MprPanel from './components/MprPanel.svelte';
+  import MmdAnalysisView from './components/MmdAnalysisView.svelte';
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
@@ -18,6 +20,13 @@
   import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
   import { seedStore, type Vessel } from '$lib/stores/seedStore.svelte';
   import { navigateToWorldPos } from '$lib/navigation';
+
+  /* ── Tab state ─────────────────────────────────────── */
+  type AppTab = 'editor' | 'mmd';
+  let activeTab = $state<AppTab>('editor');
+
+  /** Centerline of the currently active vessel (for MmdAnalysisView). */
+  let activeCenterlineMm = $derived(seedStore.activeVesselData.centerline ?? []);
 
   let errorMessage = $state('');
   let recentPaths = $state<string[]>([]);
