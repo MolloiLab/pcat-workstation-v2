@@ -132,15 +132,21 @@
       VIEWPORT_IDS,
     ).then(() => {
       // Apply slab thickness to coronal/sagittal AFTER volume is bound.
-      // Without this the reformatted slice snaps to the nearest discrete
-      // voxel along the view normal, causing ~1px seed-vs-vessel offset.
-      // Axial is left thin (native acquisition direction).
+      // Use the volume's native slice spacing (sz) as the slab — this is
+      // the exact resolution of slice positions, so the slab covers
+      // exactly one slice's worth of data. That's enough to mask the
+      // discrete-voxel snap (~0.07mm subpixel offset) without averaging
+      // unrelated anatomy. For NAEOTOM 0.35mm slices the slab is 0.35mm;
+      // for thicker 0.8mm CCTA recons the slab is 0.8mm. Axial is left
+      // thin since it's the native acquisition direction.
       try {
-        const SLAB_MM = 2.0;
+        // volumeStore.spacing is [sz, sy, sx] from the Rust loader.
+        const sz = volumeStore.current?.spacing?.[0] ?? 1.0;
+        const slabMm = Math.max(0.35, Math.min(sz, 1.0));
         for (const id of [VP_CORONAL, VP_SAGITTAL]) {
           const vp = engine.getViewport(id) as any;
           if (vp?.setSlabThickness) {
-            vp.setSlabThickness(SLAB_MM);
+            vp.setSlabThickness(slabMm);
           }
           if (vp?.setBlendMode && (Enums as any).BlendModes?.AVERAGE_INTENSITY_BLEND !== undefined) {
             vp.setBlendMode((Enums as any).BlendModes.AVERAGE_INTENSITY_BLEND);
