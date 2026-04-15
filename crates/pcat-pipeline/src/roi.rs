@@ -24,7 +24,7 @@ fn scanline_fill(polygon: &[[f64; 2]], grid_rows: usize, grid_cols: usize) -> Ve
     }
 
     let row_start = (row_min.floor() as i64).max(0) as usize;
-    let row_end = ((row_max.ceil() as i64) as usize).min(grid_rows.saturating_sub(1));
+    let row_end = ((row_max.ceil() as i64).max(0) as usize).min(grid_rows.saturating_sub(1));
 
     let n = polygon.len();
     let mut result = Vec::new();
@@ -63,7 +63,7 @@ fn scanline_fill(polygon: &[[f64; 2]], grid_rows: usize, grid_cols: usize) -> Ve
                 break;
             }
             let col_start = (pair[0].ceil() as i64).max(0) as usize;
-            let col_end = ((pair[1].floor() as i64) as usize).min(grid_cols.saturating_sub(1));
+            let col_end = ((pair[1].floor() as i64).max(0) as usize).min(grid_cols.saturating_sub(1));
 
             for col in col_start..=col_end {
                 result.push((row, col));
@@ -122,7 +122,8 @@ fn lerp_contour(a: &[[f64; 2]], b: &[[f64; 2]], t: f64) -> Vec<[f64; 2]> {
 /// # Panics
 ///
 /// Panics if `contours` is empty, if `contours.len() != cross_section_indices.len()`,
-/// or if not all contours have the same number of points.
+/// if not all contours have the same number of points, or if `cross_section_indices`
+/// is not strictly increasing.
 pub fn build_3d_roi_mask(
     contours: &[Vec<[f64; 2]>],
     frame: &CprFrame,
@@ -149,6 +150,13 @@ pub fn build_3d_roi_mask(
             i,
             c.len(),
             n_points,
+        );
+    }
+
+    for k in 0..cross_section_indices.len().saturating_sub(1) {
+        assert!(
+            cross_section_indices[k] < cross_section_indices[k + 1],
+            "cross_section_indices must be strictly increasing"
         );
     }
 
