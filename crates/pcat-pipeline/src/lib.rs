@@ -8,6 +8,7 @@ pub mod dicom_loader;
 pub mod error;
 pub mod interp;
 pub mod mmd;
+pub mod radial_angular;
 pub mod roi;
 pub mod spline;
 pub mod stats;
