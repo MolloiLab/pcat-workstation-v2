@@ -214,10 +214,14 @@
               onclick={() => toggleExpand(p)}
             >
               <div class="flex items-center gap-2 min-w-0">
-                <span class="inline-block w-3 text-[10px] text-text-secondary">{isOpen ? '▾' : '▸'}</span>
+                <span class="inline-block w-4 text-center text-sm font-bold text-accent">
+                  {isOpen ? '▾' : '▸'}
+                </span>
                 <div class="flex flex-col gap-0.5 min-w-0">
                   <span class="text-xs font-medium text-text-primary">{p.id}</span>
-                  <span class="text-[10px] text-text-secondary truncate" title={p.path}>{p.path}</span>
+                  <span class="text-[10px] text-text-secondary truncate" title={p.path}>
+                    {isOpen ? 'click a series below to load' : 'click to expand series'}
+                  </span>
                 </div>
               </div>
               <div class="flex shrink-0 items-center gap-3">
