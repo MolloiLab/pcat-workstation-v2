@@ -86,3 +86,103 @@ export async function loadDualEnergy(
     path, lowSeriesUid, highSeriesUid, lowKev, highKev,
   });
 }
+
+/* ── Annotation + Snake commands ─────────────────────────── */
+
+export type AnnotationTarget = {
+  image: number[];         // HU values, row-major, pixels*pixels
+  pixels: number;
+  width_mm: number;
+  arc_mm: number;
+  frame_index: number;
+  vessel_wall: [number, number][];  // [x,y] pixel coords
+  vessel_radius_mm: number;
+  init_boundary: [number, number][]; // [x,y] pixel coords
+};
+
+export type SnakeResult = {
+  points: [number, number][];
+  iterations: number;
+  max_displacement: number;
+  converged: boolean;
+};
+
+export type MmdSummary = {
+  method: string;
+  iterations: number;
+  converged: boolean;
+  n_voxels: number;
+  mean_water_frac: number;
+  mean_lipid_frac: number;
+  mean_iodine_frac: number;
+  mean_calcium_frac: number;
+};
+
+/** Generate annotation targets for all cross-section frames along a centerline. */
+export async function generateAnnotationTargets(
+  centerlineMm: [number, number, number][],
+): Promise<AnnotationTarget[]> {
+  return invoke<AnnotationTarget[]>('generate_annotation_targets', {
+    centerlineMm,
+  });
+}
+
+/** Initialize a circular snake contour for a given annotation target. */
+export async function initSnake(
+  targetIndex: number,
+  initRadiusMm?: number,
+): Promise<[number, number][]> {
+  return invoke<[number, number][]>('init_snake', {
+    targetIndex,
+    initRadiusMm: initRadiusMm ?? null,
+  });
+}
+
+/** Evolve the active contour (snake) for a target. */
+export async function evolveSnake(
+  targetIndex: number,
+  nIterations: number = 200,
+): Promise<SnakeResult> {
+  return invoke<SnakeResult>('evolve_snake', {
+    targetIndex,
+    nIterations,
+  });
+}
+
+/** Replace the snake control points for a target (after manual drag). */
+export async function updateSnakePoints(
+  targetIndex: number,
+  points: [number, number][],
+): Promise<void> {
+  return invoke<void>('update_snake_points', {
+    targetIndex,
+    points,
+  });
+}
+
+/** Insert a new control point on the snake contour at a given position. */
+export async function addSnakePoint(
+  targetIndex: number,
+  position: [number, number],
+): Promise<number> {
+  return invoke<number>('add_snake_point', {
+    targetIndex,
+    position,
+  });
+}
+
+/** Finalize the contour for a target (marks it as done). */
+export async function finalizeContour(
+  targetIndex: number,
+): Promise<void> {
+  return invoke<void>('finalize_contour', {
+    targetIndex,
+  });
+}
+
+/** Run multi-material decomposition on the annotated ROI. */
+export async function runMmdOnRoi(
+  method: string = 'direct',
+): Promise<MmdSummary> {
+  return invoke<MmdSummary>('run_mmd_on_roi', { method });
+}
