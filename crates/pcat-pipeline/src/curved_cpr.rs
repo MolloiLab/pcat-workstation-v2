@@ -9,8 +9,8 @@
 use nalgebra::Vector3;
 use ndarray::Array3;
 
-use super::cpr::CurvedCprResult;
-use super::interp::trilinear;
+use crate::cpr::CurvedCprResult;
+use crate::interp::trilinear;
 
 /// Bounding box padding beyond the projected centerline (mm).
 /// Controls how much anatomical context surrounds the vessel.

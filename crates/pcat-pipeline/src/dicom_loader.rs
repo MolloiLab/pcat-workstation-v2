@@ -7,7 +7,7 @@ use ndarray::Array3;
 use walkdir::WalkDir;
 
 use crate::error::AppError;
-use crate::state::LoadedVolume;
+use crate::types::LoadedVolume;
 
 /// Per-slice metadata extracted from a DICOM file.
 struct SliceInfo {
