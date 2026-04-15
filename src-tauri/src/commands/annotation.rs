@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ndarray::Array2;
-use serde::Serialize;
-use tauri::Emitter;
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Manager};
 
 use pcat_pipeline::active_contour::{
     compute_gradient_field, evolve_snake as pipeline_evolve_snake, init_circular_contour,
@@ -739,4 +740,326 @@ pub async fn get_mmd_overlay(
     }
 
     Ok(overlay)
+}
+
+// ---------------------------------------------------------------------------
+// Save / Load annotation state
+// ---------------------------------------------------------------------------
+
+/// Saved annotation state for one patient.
+#[derive(Serialize, Deserialize)]
+pub struct AnnotationStateJson {
+    pub centerline_mm: Vec<[f64; 3]>,
+    pub snake_contours: HashMap<usize, Vec<[f64; 2]>>,
+    pub finalized: HashMap<usize, bool>,
+    pub mmd_method: Option<String>,
+    pub mmd_iterations: Option<usize>,
+    pub mmd_converged: Option<bool>,
+}
+
+/// Sanitize a path string into a safe filename component.
+fn sanitize_for_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .replace("..", "_")
+}
+
+/// Save the current annotation state for the given patient (DICOM folder path).
+/// Stores under `app_data_dir/annotations/<sanitized-name>.json`.
+#[tauri::command]
+pub async fn save_annotations(
+    app: tauri::AppHandle,
+    dicom_path: String,
+    centerline_mm: Vec<[f64; 3]>,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<String, String> {
+    // Read snake_contours and finalized from state.
+    let (snake_contours, finalized, mmd_meta) = {
+        let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+        let sc = guard.snake_contours.clone();
+        let fin = guard.finalized.clone();
+        let mmd_meta = guard.mmd_result.as_ref().map(|r| {
+            (
+                "pwsqs".to_string(), // method is not stored in MmdResult, default
+                r.iterations,
+                r.converged,
+            )
+        });
+        (sc, fin, mmd_meta)
+    };
+
+    let annotation_state = AnnotationStateJson {
+        centerline_mm,
+        snake_contours,
+        finalized,
+        mmd_method: mmd_meta.as_ref().map(|(m, _, _)| m.clone()),
+        mmd_iterations: mmd_meta.as_ref().map(|(_, i, _)| *i),
+        mmd_converged: mmd_meta.as_ref().map(|(_, _, c)| *c),
+    };
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .expect("app data dir")
+        .join("annotations");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let key = Path::new(&dicom_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| sanitize_for_filename(&dicom_path));
+    let path = dir.join(format!("{}.json", sanitize_for_filename(&key)));
+
+    let json = serde_json::to_string_pretty(&annotation_state)
+        .map_err(|e| format!("serialize failed: {e}"))?;
+    std::fs::write(&path, &json).map_err(|e| format!("write failed: {e}"))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Load saved annotation state for the given patient. Restores into AppState.
+/// Returns the loaded state for the frontend to display, or None if no save exists.
+#[tauri::command]
+pub async fn load_annotations(
+    app: tauri::AppHandle,
+    dicom_path: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Option<AnnotationStateJson>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .expect("app data dir")
+        .join("annotations");
+    let key = Path::new(&dicom_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| sanitize_for_filename(&dicom_path));
+    let path = dir.join(format!("{}.json", sanitize_for_filename(&key)));
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let data = std::fs::read_to_string(&path).map_err(|e| format!("read failed: {e}"))?;
+    let annotation_state: AnnotationStateJson =
+        serde_json::from_str(&data).map_err(|e| format!("parse failed: {e}"))?;
+
+    // Restore snake_contours and finalized into AppState.
+    {
+        let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+        guard.snake_contours = annotation_state.snake_contours.clone();
+        guard.finalized = annotation_state.finalized.clone();
+    }
+
+    Ok(Some(annotation_state))
+}
+
+// ---------------------------------------------------------------------------
+// CSV export of MMD surface data
+// ---------------------------------------------------------------------------
+
+/// Material key → (material name, unit name) for select_material_array.
+const MATERIAL_KEYS: &[(&str, &str, &str)] = &[
+    ("lipid_frac", "lipid", "fraction"),
+    ("lipid_mass", "lipid", "mass"),
+    ("water_frac", "water", "fraction"),
+    ("water_mass", "water", "mass"),
+    ("iodine_frac", "iodine", "fraction"),
+    ("iodine_mass", "iodine", "mass"),
+    ("calcium_frac", "calcium", "fraction"),
+    ("calcium_mass", "calcium", "mass"),
+    ("total_density", "density", "fraction"), // unit doesn't matter for density
+];
+
+/// Export current MMD surface data as CSV string.
+/// Includes one row per (target_index, theta, r) sample point with all materials.
+#[tauri::command]
+pub async fn export_mmd_csv(
+    patient_id: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<String, String> {
+    // Extract everything we need from state under one lock.
+    let (mmd_result_arrays, frame, targets, finalized_contours, spacing, origin) = {
+        let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let mmd_result = guard
+            .mmd_result
+            .as_ref()
+            .ok_or_else(|| "no MMD result — run decomposition first".to_string())?;
+
+        // Clone all 9 material arrays.
+        let arrays: Vec<(&str, ndarray::Array3<f32>)> = MATERIAL_KEYS
+            .iter()
+            .map(|(key, mat, unit)| {
+                let arr = select_material_array(mmd_result, mat, unit)
+                    .expect("known material key")
+                    .clone();
+                (*key, arr)
+            })
+            .collect();
+
+        let targets = guard
+            .annotation_targets
+            .as_ref()
+            .ok_or_else(|| "no annotation targets generated".to_string())?
+            .clone();
+
+        let mut finalized_contours: HashMap<usize, Vec<[f64; 2]>> = HashMap::new();
+        for (&idx, &is_final) in &guard.finalized {
+            if is_final {
+                if let Some(contour) = guard.snake_contours.get(&idx) {
+                    finalized_contours.insert(idx, contour.clone());
+                }
+            }
+        }
+
+        if finalized_contours.is_empty() {
+            return Err("no finalized contours — finalize at least one cross-section".into());
+        }
+
+        let frame = guard
+            .cpr_frame
+            .as_ref()
+            .ok_or_else(|| "no CPR frame built".to_string())?;
+        let frame = clone_frame(frame);
+
+        let vol = guard
+            .volume
+            .as_ref()
+            .ok_or_else(|| "no volume loaded".to_string())?;
+
+        (
+            arrays,
+            frame,
+            targets,
+            finalized_contours,
+            vol.spacing,
+            vol.origin,
+        )
+    };
+
+    // Sample all 9 material surfaces on a blocking thread.
+    let csv_string = tokio::task::spawn_blocking(move || {
+        let params = RadialAngularParams::default();
+
+        // Sample each material → Vec<CrossSectionSurface>.
+        let mut all_surfaces: Vec<(&str, Vec<CrossSectionSurface>)> = Vec::new();
+        for (key, array) in &mmd_result_arrays {
+            let surfaces = radial_angular::sample_radial_angular(
+                array,
+                &frame,
+                &targets,
+                &finalized_contours,
+                spacing,
+                origin,
+                &params,
+            );
+            all_surfaces.push((key, surfaces));
+        }
+
+        // All material surfaces have the same grid layout (same targets × same theta × same r),
+        // so we can iterate them together.
+
+        if all_surfaces.is_empty() || all_surfaces[0].1.is_empty() {
+            return Err("no surface data to export".to_string());
+        }
+
+        let n_surfaces = all_surfaces[0].1.len(); // number of cross-sections
+
+        let mut csv = String::with_capacity(1024 * 1024);
+
+        // Header
+        csv.push_str("patient_id,target_index,arc_mm,theta_deg,r_mm,lipid_frac,lipid_mass,water_frac,water_mass,iodine_frac,iodine_mass,calcium_frac,calcium_mass,total_density\n");
+
+        // Build a lookup from key to index in all_surfaces for ordered access.
+        let key_order = [
+            "lipid_frac",
+            "lipid_mass",
+            "water_frac",
+            "water_mass",
+            "iodine_frac",
+            "iodine_mass",
+            "calcium_frac",
+            "calcium_mass",
+            "total_density",
+        ];
+        let key_to_idx: HashMap<&str, usize> = all_surfaces
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| (*k, i))
+            .collect();
+
+        for cs_idx in 0..n_surfaces {
+            let ref_surface = &all_surfaces[0].1[cs_idx];
+            let arc_mm = ref_surface.arc_mm;
+            let n_theta = ref_surface.n_theta;
+            let n_radial = ref_surface.n_radial;
+
+            // Find the target index from arc_mm matching.
+            // The surfaces are produced for finalized targets in order, so we need to
+            // look up which target this corresponds to.
+            let target_idx = targets
+                .iter()
+                .position(|t| (t.arc_mm - arc_mm).abs() < 1e-6)
+                .unwrap_or(cs_idx);
+
+            for i_theta in 0..n_theta {
+                let theta = ref_surface.theta_deg[i_theta];
+                for i_r in 0..n_radial {
+                    let r = ref_surface.r_mm[i_r];
+                    let flat_idx = i_theta * n_radial + i_r;
+
+                    // Check if any material has a valid (non-NaN) value at this point.
+                    let ref_val = ref_surface.surface[flat_idx];
+                    if ref_val.is_nan() {
+                        continue; // Skip NaN entries (beyond contour boundary).
+                    }
+
+                    // Collect values in key_order.
+                    let mut vals = [f64::NAN; 9];
+                    let mut any_nan = false;
+                    for (order_idx, &key) in key_order.iter().enumerate() {
+                        if let Some(&surf_idx) = key_to_idx.get(key) {
+                            let v = all_surfaces[surf_idx].1[cs_idx].surface[flat_idx];
+                            if v.is_nan() {
+                                any_nan = true;
+                                break;
+                            }
+                            vals[order_idx] = v as f64;
+                        }
+                    }
+
+                    if any_nan {
+                        continue;
+                    }
+
+                    use std::fmt::Write;
+                    let _ = writeln!(
+                        csv,
+                        "{},{},{:.4},{:.2},{:.4},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+                        patient_id,
+                        target_idx,
+                        arc_mm,
+                        theta,
+                        r,
+                        vals[0], vals[1], vals[2], vals[3],
+                        vals[4], vals[5], vals[6], vals[7], vals[8],
+                    );
+                }
+            }
+        }
+
+        Ok(csv)
+    })
+    .await
+    .map_err(|e| format!("export_mmd_csv task failed: {e}"))??;
+
+    Ok(csv_string)
 }

@@ -40,6 +40,9 @@ pub fn run() {
             commands::annotation::run_mmd_on_roi,
             commands::annotation::sample_surfaces,
             commands::annotation::get_mmd_overlay,
+            commands::annotation::save_annotations,
+            commands::annotation::load_annotations,
+            commands::annotation::export_mmd_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

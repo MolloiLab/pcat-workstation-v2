@@ -24,7 +24,11 @@
     generateAnnotationTargets,
     sampleSurfaces,
     runMmdOnRoi,
+    saveAnnotations,
+    loadAnnotations,
+    exportMmdCsv,
   } from '$lib/api';
+  import { volumeStore } from '$lib/stores/volumeStore.svelte';
 
   import SnakeEditor from './SnakeEditor.svelte';
   import CrossSectionStrip from './CrossSectionStrip.svelte';
@@ -37,6 +41,11 @@
   };
 
   let { centerlineMm }: Props = $props();
+
+  /* ── Derived from volume store ──────────────────────── */
+
+  let dicomPath = $derived(volumeStore.current?.dicomPath ?? '');
+  let patientName = $derived(volumeStore.current?.patientName ?? 'unknown');
 
   /* ── State ───────────────────────────────────────────── */
 
@@ -56,6 +65,9 @@
   let mmdError = $state('');
 
   let loadingTargets = $state(false);
+  let saveBusy = $state(false);
+  let saveMsg = $state('');
+  let exportBusy = $state(false);
 
   /* ── Derived ─────────────────────────────────────────── */
 
@@ -85,6 +97,28 @@
       surfaces = [];
       mmdSummary = null;
       mmdError = '';
+
+      // Try to restore saved annotations for this patient.
+      if (dicomPath) {
+        try {
+          const saved = await loadAnnotations(dicomPath);
+          if (saved) {
+            // Restore snake points and status map.
+            const restoredSnake: Record<number, [number, number][]> = {};
+            const restoredStatus: Record<number, 'pending' | 'in-progress' | 'done'> = {};
+            for (const [key, pts] of Object.entries(saved.snake_contours)) {
+              const idx = Number(key);
+              restoredSnake[idx] = pts;
+              restoredStatus[idx] = saved.finalized[idx] ? 'done' : 'in-progress';
+            }
+            snakePoints = restoredSnake;
+            statusMap = restoredStatus;
+            console.log('Restored saved annotations');
+          }
+        } catch (err) {
+          console.warn('Could not load saved annotations:', err);
+        }
+      }
     } catch (err) {
       console.error('Failed to generate annotation targets:', err);
     } finally {
@@ -107,6 +141,52 @@
 
   function handleFinalize() {
     statusMap = { ...statusMap, [selectedIndex]: 'done' };
+    // Auto-save after finalization.
+    autoSave();
+  }
+
+  async function autoSave() {
+    if (!dicomPath) return;
+    try {
+      await saveAnnotations(dicomPath, centerlineMm);
+    } catch (err) {
+      console.warn('Auto-save failed:', err);
+    }
+  }
+
+  async function handleSave() {
+    if (saveBusy || !dicomPath) return;
+    saveBusy = true;
+    saveMsg = '';
+    try {
+      const path = await saveAnnotations(dicomPath, centerlineMm);
+      saveMsg = 'Saved';
+      setTimeout(() => { saveMsg = ''; }, 2000);
+    } catch (err) {
+      saveMsg = 'Save failed';
+      console.error('Save failed:', err);
+    } finally {
+      saveBusy = false;
+    }
+  }
+
+  async function handleExportCsv() {
+    if (exportBusy || !mmdSummary) return;
+    exportBusy = true;
+    try {
+      const csv = await exportMmdCsv(patientName);
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${patientName}_mmd_surfaces.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('CSV export failed:', err);
+    } finally {
+      exportBusy = false;
+    }
   }
 
   function handleMaterialChange(m: string) {
@@ -229,10 +309,32 @@
         {mmdBusy ? 'Running MMD...' : 'Run MMD'}
       </button>
 
+      <button
+        class="rounded bg-surface px-3 py-1 text-xs font-medium text-text-secondary hover:bg-surface/80 active:bg-surface/60 disabled:opacity-40"
+        onclick={handleSave}
+        disabled={saveBusy || targets.length === 0}
+        title="Save annotation state for this patient"
+      >
+        {saveBusy ? 'Saving...' : 'Save'}
+      </button>
+
+      <button
+        class="rounded bg-surface px-3 py-1 text-xs font-medium text-text-secondary hover:bg-surface/80 active:bg-surface/60 disabled:opacity-40"
+        onclick={handleExportCsv}
+        disabled={exportBusy || !mmdSummary}
+        title="Export MMD surface data as CSV"
+      >
+        {exportBusy ? 'Exporting...' : 'Export CSV'}
+      </button>
+
       <!-- Progress indicator -->
       <span class="text-[11px] tabular-nums text-text-secondary">
         {finalizedCount}/{totalCount} done
       </span>
+
+      {#if saveMsg}
+        <span class="ml-1 text-[10px] text-success">{saveMsg}</span>
+      {/if}
 
       {#if mmdSummary}
         <span class="ml-1 text-[10px] text-success">

@@ -214,3 +214,36 @@ export async function getMmdOverlay(
 ): Promise<number[]> {
   return invoke<number[]>('get_mmd_overlay', { targetIndex, material, unit });
 }
+
+/* ── Save/Load annotations + CSV export ───────────────── */
+
+export type AnnotationStateJson = {
+  centerline_mm: [number, number, number][];
+  snake_contours: Record<number, [number, number][]>;
+  finalized: Record<number, boolean>;
+  mmd_method: string | null;
+  mmd_iterations: number | null;
+  mmd_converged: boolean | null;
+};
+
+/** Save the current annotation state for the given patient. Returns the file path. */
+export async function saveAnnotations(
+  dicomPath: string,
+  centerlineMm: [number, number, number][],
+): Promise<string> {
+  return invoke<string>('save_annotations', { dicomPath, centerlineMm });
+}
+
+/** Load saved annotation state for the given patient. Returns null if no save exists. */
+export async function loadAnnotations(
+  dicomPath: string,
+): Promise<AnnotationStateJson | null> {
+  return invoke<AnnotationStateJson | null>('load_annotations', { dicomPath });
+}
+
+/** Export current MMD surface data as a CSV string. */
+export async function exportMmdCsv(
+  patientId: string,
+): Promise<string> {
+  return invoke<string>('export_mmd_csv', { patientId });
+}
