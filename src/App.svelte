@@ -255,16 +255,48 @@
     </div>
   </header>
 
+  <!-- ===== Tab bar ===== -->
+  {#if volumeStore.current}
+    <nav class="flex shrink-0 items-center gap-1 border-b border-border bg-surface-secondary px-4">
+      <button
+        class="relative px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'editor'
+          ? 'text-accent'
+          : 'text-text-secondary hover:text-text-primary'}"
+        onclick={() => { activeTab = 'editor'; }}
+      >
+        Editor
+        {#if activeTab === 'editor'}
+          <span class="absolute inset-x-0 bottom-0 h-[2px] bg-accent"></span>
+        {/if}
+      </button>
+      <button
+        class="relative px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'mmd'
+          ? 'text-accent'
+          : 'text-text-secondary hover:text-text-primary'}"
+        onclick={() => { activeTab = 'mmd'; }}
+      >
+        MMD Analysis
+        {#if activeTab === 'mmd'}
+          <span class="absolute inset-x-0 bottom-0 h-[2px] bg-accent"></span>
+        {/if}
+      </button>
+    </nav>
+  {/if}
+
   <!-- ===== Main viewport area ===== -->
   <main class="relative min-h-0 flex-1">
-    <MprPanel />
+    {#if activeTab === 'editor'}
+      <MprPanel />
 
-    <!-- Contextual hint line -->
-    <HintLine />
+      <!-- Contextual hint line -->
+      <HintLine />
 
-    <!-- Pipeline progress overlay -->
-    {#if pipelineStore.status === 'running'}
-      <ProgressOverlay />
+      <!-- Pipeline progress overlay -->
+      {#if pipelineStore.status === 'running'}
+        <ProgressOverlay />
+      {/if}
+    {:else if activeTab === 'mmd'}
+      <MmdAnalysisView centerlineMm={activeCenterlineMm} />
     {/if}
   </main>
 
