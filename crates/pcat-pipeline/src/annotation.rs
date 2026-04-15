@@ -5,7 +5,7 @@ use crate::active_contour::init_circular_contour;
 use crate::cpr::CprFrame;
 
 /// A single cross-section prepared for annotation.
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AnnotationTarget {
     /// Cross-section image (HU), row-major, pixels x pixels.
     pub image: Vec<f32>,
@@ -26,6 +26,7 @@ pub struct AnnotationTarget {
 }
 
 /// Parameters for generating annotation targets.
+#[derive(Debug, Clone)]
 pub struct AnnotationBatchParams {
     /// Number of cross-sections (default: 20).
     pub n_sections: usize,
@@ -118,7 +119,7 @@ pub fn generate_annotation_batch(
         let vessel_radius_mm = (area_mm2 / std::f64::consts::PI).sqrt();
 
         // Initial snake boundary: circle at 2 * r_eq from center (1 diameter out from wall).
-        let init_radius_mm = 2.0 * vessel_radius_mm;
+        let init_radius_mm = (2.0 * vessel_radius_mm).min(params.width_mm * 0.9);
         let init_radius_px = init_radius_mm / mm_per_pixel;
         let init_boundary =
             init_circular_contour(center_px, center_px, init_radius_px, params.n_snake_points);
