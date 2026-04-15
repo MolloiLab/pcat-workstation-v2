@@ -98,6 +98,25 @@
 
     // Register the imperative navigation function for the shared service
     registerNavigate(navigateToWorldPos);
+
+    // ---------- Notify cornerstone of viewport element size changes ----------
+    // Without this, opening dev tools / dragging the window edge causes the
+    // viewport DOM to shrink while cornerstone keeps using the original canvas
+    // size, so canvasToWorld returns wildly wrong world coords.
+    const resizeObserver = new ResizeObserver(() => {
+      try {
+        const e = getRenderingEngine();
+        e.resize(true, false); // immediate, don't reset camera
+      } catch {
+        // engine may not be ready yet — safe to ignore
+      }
+    });
+    for (const el of [axialEl, coronalEl, sagittalEl]) {
+      if (el) resizeObserver.observe(el);
+    }
+    // Cleanup on unmount
+    (window as any).__pcatMprResizeObserver?.disconnect?.();
+    (window as any).__pcatMprResizeObserver = resizeObserver;
   });
 
   // ---------- React to volume changes ----------
