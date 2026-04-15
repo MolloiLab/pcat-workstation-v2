@@ -31,6 +31,13 @@ pub fn run() {
             commands::cpr::compute_cross_sections_batch,
             commands::cpr::get_cpr_projection_info,
             commands::pipeline::run_pipeline,
+            commands::annotation::generate_annotation_targets,
+            commands::annotation::init_snake,
+            commands::annotation::evolve_snake,
+            commands::annotation::update_snake_points,
+            commands::annotation::add_snake_point,
+            commands::annotation::finalize_contour,
+            commands::annotation::run_mmd_on_roi,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

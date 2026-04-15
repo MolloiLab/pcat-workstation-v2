@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use pcat_pipeline::annotation::AnnotationTarget;
 use pcat_pipeline::cpr::CprFrame;
 use pcat_pipeline::dicom_loader::DualEnergyVolume;
+use pcat_pipeline::mmd::MmdResult;
 pub use pcat_pipeline::types::LoadedVolume;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,6 +41,14 @@ pub struct AppState {
     pub dual_energy: Option<DualEnergyVolume>,
     pub cpr_frame: Option<Arc<CprFrame>>,
     pub analysis_results: Option<AnalysisResults>,
+    /// Annotation targets (cross-section images + vessel walls + init boundaries).
+    pub annotation_targets: Option<Vec<AnnotationTarget>>,
+    /// Current snake contours per target index.
+    pub snake_contours: HashMap<usize, Vec<[f64; 2]>>,
+    /// Whether each target's contour is finalized.
+    pub finalized: HashMap<usize, bool>,
+    /// Most recent MMD decomposition result.
+    pub mmd_result: Option<MmdResult>,
 }
 
 impl AppState {
@@ -48,6 +58,10 @@ impl AppState {
             dual_energy: None,
             cpr_frame: None,
             analysis_results: None,
+            annotation_targets: None,
+            snake_contours: HashMap::new(),
+            finalized: HashMap::new(),
+            mmd_result: None,
         }
     }
 }
