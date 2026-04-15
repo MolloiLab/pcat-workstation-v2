@@ -51,3 +51,38 @@ export async function getSlice(
   const bytes = await invoke<number[]>('get_slice', { axis, idx });
   return new Uint8Array(bytes).buffer;
 }
+
+/* ── Dual-energy series scanning & loading ─────────────────── */
+
+export type SeriesInfo = {
+  series_uid: string;
+  description: string;
+  num_slices: number;
+  kev_label: number | null;
+};
+
+export type DualEnergyInfo = {
+  shape: [number, number, number];
+  spacing: [number, number, number];
+  low_kev: number;
+  high_kev: number;
+  patient_name: string;
+};
+
+/** Scan DICOM directory for available series. */
+export async function scanSeries(path: string): Promise<SeriesInfo[]> {
+  return invoke<SeriesInfo[]>('scan_series', { path });
+}
+
+/** Load dual-energy volumes from two selected series. */
+export async function loadDualEnergy(
+  path: string,
+  lowSeriesUid: string,
+  highSeriesUid: string,
+  lowKev: number,
+  highKev: number,
+): Promise<DualEnergyInfo> {
+  return invoke<DualEnergyInfo>('load_dual_energy', {
+    path, lowSeriesUid, highSeriesUid, lowKev, highKev,
+  });
+}
