@@ -802,6 +802,30 @@
     });
   }
 
+  // Precision touchpads fire wheel events at ~240 Hz. If we mutate
+  // `needleBFraction` on every one, the overlay `$effect` fires 240×/sec
+  // and `compositeToMain` (blit + draw overlays ≈ 5 ms) pegs the main
+  // thread. Coalesce state updates to animation-frame rate: wheel/drag
+  // handlers push into a non-reactive scratch variable, and we commit
+  // once per frame. Downstream effects then fire at most 60 Hz.
+  let pendingNeedleB: number | null = null;
+  let needleBFrame: number | null = null;
+  function commitNeedleB() {
+    needleBFrame = null;
+    if (pendingNeedleB === null) return;
+    const frac = Math.max(0, Math.min(1, pendingNeedleB));
+    pendingNeedleB = null;
+    if (frac !== needleBFraction) {
+      needleBFraction = frac;
+      scheduleNavigate();
+    }
+  }
+  function setNeedleBThrottled(fraction: number) {
+    pendingNeedleB = fraction;
+    if (needleBFrame !== null) return;
+    needleBFrame = requestAnimationFrame(commitNeedleB);
+  }
+
   // ---- Needle dragging ----
 
   let dragging = $state(false);
@@ -927,10 +951,9 @@
     // Needle B dragging
     if (dragging) {
       if (cprMode === 'straightened') {
-        needleBFraction = Math.max(0, Math.min(1, x / rect.width));
+        setNeedleBThrottled(x / rect.width);
       }
       // In stretched mode, needle dragging isn't supported (use scroll instead)
-      scheduleNavigate();
       return;
     }
 
@@ -972,11 +995,13 @@
       }
       cprZoom = newZoom;
     } else {
-      // Scroll: move needle B
+      // Scroll: move needle B. Accumulate into the pending value (not
+      // `needleBFraction` directly) so the reactive graph only fires once
+      // per animation frame, no matter how many wheel events arrive.
       const sensitivity = 0.0003;
       const delta = -event.deltaY * sensitivity;
-      needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
-      scheduleNavigate();
+      const base = pendingNeedleB ?? needleBFraction;
+      setNeedleBThrottled(base + delta);
     }
   }
 

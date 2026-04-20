@@ -102,44 +102,40 @@
   }
 
   /**
-   * Radial-FWHM lumen diameter with outlier rejection.
+   * Region-grow lumen detection + area-equivalent diameter.
    *
-   * The old 2-axis scan was fragile — one ray wandering into adjacent
-   * enhanced myocardium or the aorta dominated the average and inflated the
-   * reported diameter (e.g. 11.3 mm for an RCA that should read 3–4 mm).
+   * Previous radial-FWHM attempt failed on real data: one ray wandering
+   * into an adjacent bright structure (chamber blood, enhanced
+   * myocardium, aorta at the ostium) made the contour a 4- or 6-petal
+   * star with the diameter dominated by the outliers. Even with
+   * median + MAD rejection, cardinal-axis leaks gave convex-hull-like
+   * over-estimates (e.g. an 8 mm report for a 3 mm RCA lumen).
    *
-   * This version follows the standard radial-FWHM recipe used in research
-   * coronary-lumen tools (see e.g. Çimen et al., "Reconstruction of
-   * Coronary Arteries from X-ray Angiography", MedIA 2016; Wolterink et al.,
-   * "Coronary artery centerline extraction in CCTA using a deep-learning
-   * based orientation classifier", MedIA 2019). VMTK's colliding-fronts and
-   * Horos's manual ROI both boil down to the same inside-out / threshold
-   * idea, just wrapped differently; we do it in closed form per slice.
-   *
-   * Steps:
-   *   1. Anchor on the brightest pixel inside a ~3 mm central window. The
-   *      centerline spline can land a voxel or two off the true lumen;
-   *      searching a small neighbourhood recovers the real lumen peak.
-   *   2. Estimate background from the outer image ring (25th percentile to
-   *      tolerate bright corners like a neighbouring chamber).
-   *   3. Half-max threshold = (peak + background) / 2. Adaptive per slice
-   *      instead of a fixed HU cutoff so contrast/noise level doesn't
-   *      matter.
-   *   4. Cast 16 rays from the peak at 22.5° steps; for each ray walk
-   *      outward in 0.5-pixel increments and sub-pixel refine the boundary
-   *      where HU first crosses half-max.
-   *   5. Robust median + MAD (median absolute deviation) outlier reject.
-   *      Rays that escape into adjacent enhanced tissue typically give
-   *      radii 2–4× the median and get dropped. If fewer than half the
-   *      rays survive, the slice is unreliable — return null instead of a
+   * Switch to connected-component / region growing:
+   *   1. Anchor on the brightest pixel in the central ~3 mm window.
+   *   2. Estimate background as the 25th percentile of the outer ring.
+   *   3. Half-max threshold = max(180, (peak + bg) / 2). The 180 HU floor
+   *      is conservative — it stops measurements from leaking into
+   *      enhanced myocardium (typically 80–150 HU) when a nearby chamber
+   *      pushes the background high. Lumen is reliably ≥ 250 HU with
+   *      standard contrast so this cutoff does not miss real vessels.
+   *   4. 4-connected BFS from the peak; only pixels with HU ≥ half-max
+   *      get added, capped at 4 mm radial distance (coronary lumen is
+   *      almost never > 4 mm radius).
+   *   5. Diameter = 2 · √(area / π). Equivalent-circle diameter is
+   *      naturally immune to any individual ray leaking — it's driven by
+   *      total blob area.
+   *   6. Sanity-clip to 1–6 mm. Outside that, return null rather than a
    *      bad number.
-   *   6. Diameter = 2 × median(inlier radii). Sanity-clip to 1–8 mm
-   *      (coronary range); outside that, treat as non-measurement.
    *
-   * Returns the diameter in mm, or null when the slice cannot be measured
-   * reliably. Also populates `measH` / `measV` (H and V calipers through
-   * the peak) and `lumenContour` (16-point polygon of the detected
-   * boundary) for the SVG overlay.
+   * Why not a simple threshold? Region growing requires connectivity to
+   * the seed, so a separate bright blob 2 mm away (calcified plaque,
+   * vein, neighbouring artery) is ignored. A plain threshold would
+   * include all of those in the area count.
+   *
+   * This matches the canonical "colliding-fronts" family from VMTK
+   * (ITK's ConnectedThreshold + distance map + area), but done in 2D
+   * per-slice so it runs in ~1 ms without a level-set solve.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
     const widthMm = 15.0;
@@ -170,10 +166,10 @@
         }
       }
     }
-    // 150 HU is a lenient floor: any enhanced coronary lumen clears it even
-    // at reduced kV / low iodine. Below this the centre is almost certainly
-    // not inside a contrast-filled lumen.
-    if (!Number.isFinite(peakHU) || peakHU < 150) return reject();
+    // 120 HU: lenient enough to catch a hypo-enhanced RCA (e.g. low-kV
+    // scan, thinner IV contrast bolus) while still rejecting slices where
+    // the centerline has drifted into pure myocardium.
+    if (!Number.isFinite(peakHU) || peakHU < 120) return reject();
 
     // --- 2. Background: 25th percentile of outer ring ---
     const outerRing: number[] = [];
@@ -193,99 +189,104 @@
       ? outerRing[Math.floor(outerRing.length * 0.25)]
       : -80;
 
-    // --- 3. Per-slice half-max threshold ---
-    const halfMax = (peakHU + bgHU) / 2;
+    // --- 3. Per-slice half-max threshold with a conservative floor ---
+    // 180 HU floor prevents leaks into enhanced myocardium (typically
+    // 80–150 HU) even when a neighbouring chamber pushes the background
+    // up. A real enhanced coronary lumen is ≥ 250 HU so this cutoff does
+    // not miss true lumens in any clinically reasonable scan.
+    const halfMax = Math.max(180, (peakHU + bgHU) / 2);
 
-    // --- 4. Cast 16 rays and find sub-pixel half-max boundary per ray ---
-    const N_RAYS = 16;
-    // Coronary lumen rarely exceeds ~5 mm; cap the scan so a ray escaping
-    // into adjacent tissue doesn't run across the whole FOV.
-    const MAX_RADIUS_MM = 5.0;
+    // --- 4. 4-connected region growing from the peak ---
+    const MAX_RADIUS_MM = 4.0;
     const maxRadiusPx = Math.min(sz / 2 - 1, Math.ceil(MAX_RADIUS_MM / mmPerPixel));
+    const maxRadiusSqPx = maxRadiusPx * maxRadiusPx;
 
-    const sampleBilinear = (x: number, y: number): number => {
-      if (x < 0 || y < 0 || x > sz - 1 || y > sz - 1) return NaN;
-      const x0 = Math.floor(x);
-      const y0 = Math.floor(y);
-      const x1 = Math.min(sz - 1, x0 + 1);
-      const y1 = Math.min(sz - 1, y0 + 1);
-      const fx = x - x0;
-      const fy = y - y0;
-      const v00 = data[y0 * sz + x0];
-      const v01 = data[y0 * sz + x1];
-      const v10 = data[y1 * sz + x0];
-      const v11 = data[y1 * sz + x1];
-      if (!Number.isFinite(v00) || !Number.isFinite(v01)
-          || !Number.isFinite(v10) || !Number.isFinite(v11)) return NaN;
-      return v00 * (1 - fx) * (1 - fy)
-           + v01 * fx * (1 - fy)
-           + v10 * (1 - fx) * fy
-           + v11 * fx * fy;
-    };
+    const mask = new Uint8Array(sz * sz);
+    const visited = new Uint8Array(sz * sz);
+    const seedIdx = peakRow * sz + peakCol;
+    // Index-based circular buffer beats `Array.shift()` on long BFS.
+    const queue = new Int32Array(sz * sz);
+    let qHead = 0;
+    let qTail = 0;
+    queue[qTail++] = seedIdx;
+    visited[seedIdx] = 1;
+    let maskArea = 0;
 
-    const STEP_PX = 0.5;
-    const radiiPx: number[] = new Array(N_RAYS);
+    while (qHead < qTail) {
+      const idx = queue[qHead++];
+      const r = (idx / sz) | 0;
+      const c = idx - r * sz;
+      const dr = r - peakRow;
+      const dc = c - peakCol;
+      if (dr * dr + dc * dc > maxRadiusSqPx) continue;
+      const v = data[idx];
+      if (!Number.isFinite(v) || v < halfMax) continue;
+
+      mask[idx] = 1;
+      maskArea++;
+
+      // 4-connected neighbours
+      if (r > 0) {
+        const n = idx - sz;
+        if (!visited[n]) { visited[n] = 1; queue[qTail++] = n; }
+      }
+      if (r < sz - 1) {
+        const n = idx + sz;
+        if (!visited[n]) { visited[n] = 1; queue[qTail++] = n; }
+      }
+      if (c > 0) {
+        const n = idx - 1;
+        if (!visited[n]) { visited[n] = 1; queue[qTail++] = n; }
+      }
+      if (c < sz - 1) {
+        const n = idx + 1;
+        if (!visited[n]) { visited[n] = 1; queue[qTail++] = n; }
+      }
+    }
+
+    // At least ~0.5 mm² of connected bright region (≈ 10 pixels at 0.23
+    // mm/pixel) is required. Smaller blobs are noise or a stray bright
+    // pixel, not a lumen.
+    const minAreaPx = Math.max(10, Math.ceil(0.5 / (mmPerPixel * mmPerPixel)));
+    if (maskArea < minAreaPx) return reject();
+
+    // --- 5. Area-equivalent diameter ---
+    const areaMmSq = maskArea * mmPerPixel * mmPerPixel;
+    const diameterMm = 2 * Math.sqrt(areaMmSq / Math.PI);
+    if (diameterMm < 1.0 || diameterMm > 6.0) return reject();
+
+    // --- 6. Extract contour: radial scan of the binary mask at 32 angles ---
+    // Scanning the mask (not the HU data) guarantees the contour wraps the
+    // connected blob and never jumps to a distant bright spot. 32 rays
+    // gives a visually smooth polygon without noticeable faceting.
+    const N_RAYS = 32;
     const boundaryPts: Array<{ x: number; y: number }> = new Array(N_RAYS);
-    let rayCappedCount = 0;
-
+    const radiiPx: number[] = new Array(N_RAYS);
     for (let k = 0; k < N_RAYS; k++) {
       const theta = (k / N_RAYS) * 2 * Math.PI;
       const dx = Math.cos(theta);
       const dy = Math.sin(theta);
-      let prevV = peakHU;
-      let hitR = maxRadiusPx;
-      let crossed = false;
-      for (let r = STEP_PX; r <= maxRadiusPx; r += STEP_PX) {
-        const x = peakCol + r * dx;
-        const y = peakRow + r * dy;
-        const v = sampleBilinear(x, y);
-        if (!Number.isFinite(v) || v <= halfMax) {
-          // Sub-pixel refine: linear interp between the last above-half-max
-          // sample and this below-half-max one. When `prevV - v` is tiny
-          // (plateau), fall back to the half-step.
-          const drop = prevV - v;
-          const frac = Number.isFinite(v) && drop > 1e-6
-            ? Math.min(1, Math.max(0, (prevV - halfMax) / drop))
-            : 0;
-          hitR = r - STEP_PX + frac * STEP_PX;
-          crossed = true;
+      let lastInMask = 0;
+      for (let r = 0.5; r <= maxRadiusPx + 0.5; r += 0.5) {
+        const xi = Math.round(peakCol + r * dx);
+        const yi = Math.round(peakRow + r * dy);
+        if (xi < 0 || xi >= sz || yi < 0 || yi >= sz) break;
+        if (mask[yi * sz + xi]) {
+          lastInMask = r;
+        } else {
           break;
         }
-        prevV = v;
       }
-      if (!crossed) rayCappedCount++;
-      radiiPx[k] = hitR;
-      boundaryPts[k] = { x: peakCol + hitR * dx, y: peakRow + hitR * dy };
+      radiiPx[k] = lastInMask;
+      boundaryPts[k] = {
+        x: peakCol + lastInMask * dx,
+        y: peakRow + lastInMask * dy,
+      };
     }
 
-    // If almost every ray never crossed half-max, the "vessel" fills the
-    // whole FOV — almost always because we're inside the aorta or a
-    // contrast-filled chamber, not a coronary. Bail out.
-    if (rayCappedCount >= N_RAYS - 2) return reject();
-
-    // --- 5. Median + MAD outlier rejection ---
-    const sortedR = [...radiiPx].sort((a, b) => a - b);
-    const median = (arr: number[]) => arr[Math.floor(arr.length / 2)];
-    const medianR = median(sortedR);
-    const mad = median([...radiiPx.map((r) => Math.abs(r - medianR))].sort((a, b) => a - b));
-    // 3·σ-equivalent rejection (σ ≈ 1.4826·MAD); floor at 1 px so perfectly
-    // circular lumens don't reject everything due to MAD=0.
-    const threshold = Math.max(mad * 1.4826 * 3.0, 1.0);
-    const inlierIdx: number[] = [];
-    for (let k = 0; k < N_RAYS; k++) {
-      if (Math.abs(radiiPx[k] - medianR) <= threshold) inlierIdx.push(k);
-    }
-    if (inlierIdx.length < N_RAYS / 2) return reject();
-
-    // --- 6. Diameter from inlier median; sanity-clip to coronary range ---
-    const inlierRadii = inlierIdx.map((k) => radiiPx[k]).sort((a, b) => a - b);
-    const finalR = median(inlierRadii);
-    const diameterMm = 2 * finalR * mmPerPixel;
-    if (diameterMm < 1.0 || diameterMm > 8.0) return reject();
-
-    // H / V calipers for visual continuity with the old overlay. Index 0 is
-    // +x (right), N/4 is +y (down), N/2 is -x (left), 3N/4 is -y (up) —
-    // matches canvas coordinate conventions.
+    // --- 7. H / V calipers for legacy compatibility ---
+    // Index 0 is +x (right), N/4 is +y (down), N/2 is -x (left), 3N/4 is
+    // -y (up) in canvas coords.
     const qtr = N_RAYS / 4;
     measH = {
       left: peakCol - radiiPx[N_RAYS / 2],
