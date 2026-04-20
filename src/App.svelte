@@ -14,8 +14,15 @@
   import SeedToolbar from './components/SeedToolbar.svelte';
   import HintLine from './components/HintLine.svelte';
   import ProgressOverlay from './components/ProgressOverlay.svelte';
-  import { openDicomDialog, loadDicom, getRecentDicoms, loadSeeds } from '$lib/api';
-  import { loadVolume } from '$lib/cornerstone/volumeLoader';
+  import {
+    openDicomDialog,
+    getRecentDicoms,
+    loadSeeds,
+    scanSeries,
+    loadSeries,
+    onDicomLoadProgress,
+  } from '$lib/api';
+  import { buildVolume } from '$lib/cornerstone/volumeLoader';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
   import { pipelineStore } from '$lib/stores/pipelineStore.svelte';
@@ -118,6 +125,8 @@
     errorMessage = '';
     showRecent = false;
 
+    let unlistenProgress: (() => void) | null = null;
+
     try {
       // Clear previous state
       seedStore.clearAll();
@@ -126,28 +135,57 @@
       volumeStore.setLoading(true);
       volumeStore.setLoadProgress(0);
 
-      const info = await loadDicom(path);
+      // Subscribe to progress events. Decoding is the long leg; map its
+      // `done / total` to 0-95% so the bar lands at 100% after buildVolume.
+      unlistenProgress = await onDicomLoadProgress((p) => {
+        if (p.phase === 'decoding' && p.total > 0) {
+          volumeStore.setLoadProgress(Math.round((p.done / p.total) * 95));
+        } else if (p.phase === 'done') {
+          volumeStore.setLoadProgress(95);
+        }
+      });
 
+      // 1. Header-only scan to discover series.
+      const series = await scanSeries(path);
+      if (series.length === 0) {
+        throw new Error('No DICOM series found in folder.');
+      }
+      if (series.length > 1) {
+        console.warn(
+          `Folder has ${series.length} series; auto-selecting first:`,
+          series.map((s) => `${s.description} (${s.num_slices} slices)`),
+        );
+      }
+      const chosen = series[0];
+
+      // 2. Bulk load the chosen series (one binary IPC trip).
+      const { metadata, voxels } = await loadSeries(path, chosen.uid);
+
+      // 3. Build the cornerstone3D volume synchronously.
       volumeCounter++;
-      const meta: VolumeMetadata = {
-        volumeId: `vol-${volumeCounter}`,
-        shape: info.shape,
-        spacing: info.spacing,
-        origin: info.origin,
-        direction: info.direction,
-        windowCenter: info.window_center,
-        windowWidth: info.window_width,
-        patientName: info.patient_name,
-        studyDescription: info.study_description,
+      const volumeKey = `vol-${volumeCounter}`;
+      const csId = buildVolume(volumeKey, metadata, voxels);
+
+      // 4. Populate the legacy volumeStore shape.
+      const direction = computeDirectionMatrix(metadata.orientation);
+      const storeMeta: VolumeMetadata = {
+        volumeId: volumeKey,
+        shape: [metadata.num_slices, metadata.rows, metadata.cols],
+        spacing: [metadata.slice_spacing, metadata.pixel_spacing[0], metadata.pixel_spacing[1]],
+        origin: [metadata.slice_positions_z[0] ?? 0, 0, 0],
+        direction,
+        windowCenter: metadata.window_center,
+        windowWidth: metadata.window_width,
+        patientName: metadata.patient_name,
+        studyDescription: metadata.study_description,
         dicomPath: path,
       };
-      volumeStore.set(meta);
-
-      const csId = await loadVolume(meta, (p) => volumeStore.setLoadProgress(p));
+      volumeStore.set(storeMeta);
       volumeStore.setCornerstoneVolumeId(csId);
+      volumeStore.setLoadProgress(100);
       volumeStore.setLoading(false);
 
-      // Auto-load seeds for this patient
+      // 5. Auto-load seeds for this patient.
       try {
         const seedsJson = await loadSeeds(path);
         if (seedsJson) {
@@ -155,13 +193,35 @@
         }
       } catch { /* no saved seeds for this patient */ }
 
-      // Refresh recent list
+      // 6. Refresh recent list.
       getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
     } catch (e) {
       volumeStore.setLoading(false);
       errorMessage = e instanceof Error ? e.message : String(e);
       console.error('Failed to load DICOM:', e);
+    } finally {
+      if (unlistenProgress) unlistenProgress();
     }
+  }
+
+  /**
+   * Build a 3x3 direction matrix (row-major, 9 elements) from a 6-element
+   * ImageOrientationPatient vector (row direction + column direction); the third
+   * row is the cross product (slice normal).
+   */
+  function computeDirectionMatrix(orient: [number, number, number, number, number, number]): number[] {
+    const row: [number, number, number] = [orient[0], orient[1], orient[2]];
+    const col: [number, number, number] = [orient[3], orient[4], orient[5]];
+    const normal: [number, number, number] = [
+      row[1] * col[2] - row[2] * col[1],
+      row[2] * col[0] - row[0] * col[2],
+      row[0] * col[1] - row[1] * col[0],
+    ];
+    return [
+      row[0], row[1], row[2],
+      col[0], col[1], col[2],
+      normal[0], normal[1], normal[2],
+    ];
   }
 
   /** Open DICOM folder picker, then load. */
