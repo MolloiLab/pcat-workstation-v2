@@ -685,13 +685,26 @@ pub(crate) fn render_curved_direct(
                 &context_slab_offsets  // thicker slab for context
             };
 
-            // Average intensity projection — slab centered on VESSEL DEPTH
-            // (not on the viewing plane), so the vessel and its surrounding
-            // fat are always in the slab regardless of viewing angle.
+            // Smoothly blend vessel_depth → 0 for pixels far from the
+            // centerline. Without this, the aorta (and other structures
+            // outside the vessel corridor) gets sampled at a depth that
+            // jumps discontinuously at Voronoi-region boundaries between
+            // far-apart centerline segments — producing the visible seam
+            // that cuts the aortic root in half. Inside the vessel corridor
+            // the full vessel_depth is preserved so the coronary stays
+            // sharply resolved; a linear ramp over `falloff_width_mm`
+            // transitions to plane sampling (depth = 0) for context pixels.
+            let falloff_width_mm: f64 = 20.0;
+            let blend = ((dist_3d - width_mm) / falloff_width_mm).clamp(0.0, 1.0);
+            let effective_depth = vessel_depth * (1.0 - blend);
+
+            // Average intensity projection — slab centered on effective_depth
+            // so the vessel and its surrounding fat stay in the slab near
+            // the centerline, while context pixels fall back to plane sampling.
             let mut sum = 0.0f64;
             let mut count = 0u32;
             for &slab_off in slab {
-                let s = pixel_3d + (vessel_depth + slab_off) * view_forward;
+                let s = pixel_3d + (effective_depth + slab_off) * view_forward;
                 let vz = (s[0] - origin[0]) * inv_spacing[0];
                 let vy = (s[1] - origin[1]) * inv_spacing[1];
                 let vx = (s[2] - origin[2]) * inv_spacing[2];

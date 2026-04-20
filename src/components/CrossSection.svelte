@@ -233,11 +233,6 @@
         {arcMm.toFixed(1)} mm
       </span>
     {/if}
-    {#if vesselDiameterMm !== null}
-      <span class="text-[10px] tabular-nums" style="color: #facc15;">
-        {vesselDiameterMm.toFixed(1)} mm
-      </span>
-    {/if}
   </div>
 
   <!-- Loading indicator -->
@@ -278,7 +273,7 @@
       <!-- Diameter label -->
       <text x={measH.right + 3} y={measH.y - 2}
         fill="#facc15" font-size="9" font-family="-apple-system, sans-serif" font-weight="bold">
-        {vesselDiameterMm.toFixed(1)}
+        {vesselDiameterMm.toFixed(1)} mm
       </text>
     </svg>
   {/if}
