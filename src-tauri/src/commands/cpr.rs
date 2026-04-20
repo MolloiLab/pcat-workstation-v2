@@ -4,7 +4,7 @@ use base64::Engine;
 use tauri::ipc::Response;
 
 use pcat_pipeline::cpr::{self, CprFrame};
-use pcat_pipeline::curved_cpr;
+use pcat_pipeline::stretched_cpr;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -131,12 +131,12 @@ pub async fn render_cpr_image(
     Ok(Response::new(bytes))
 }
 
-/// Render a curved CPR image. Returns raw binary (same format as straightened):
+/// Render a stretched CPR image. Returns raw binary (same format as straightened):
 ///   [width: u32 LE][height: u32 LE][n_arclengths: u32 LE]
 ///   [arclengths: n * f64 LE]
 ///   [image: width*height * f32 LE]
 #[tauri::command]
-pub async fn render_curved_cpr_image(
+pub async fn render_stretched_cpr_image(
     rotation_deg: f64,
     width_mm: f64,
     pixels_wide: usize,
@@ -158,14 +158,14 @@ pub async fn render_curved_cpr_image(
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        frame.render_curved_cpr(
+        frame.render_stretched(
             &volume_data, spacing, origin,
             rotation_deg, width_mm,
             pixels_wide, pixels_high, slab_mm,
         )
     })
     .await
-    .map_err(|e| format!("render_curved_cpr_image task failed: {e}"))?;
+    .map_err(|e| format!("render_stretched_cpr_image task failed: {e}"))?;
 
     // Same binary format as straightened CPR
     let n_arc = result.arclengths.len();
@@ -246,14 +246,18 @@ pub async fn render_cross_sections(
 #[derive(serde::Serialize)]
 pub struct CprProjectionInfo {
     pub total_arc_mm: f64,
+    pub total_proj_arc_mm: f64,
     pub half_width_mm: f64,
-    pub view_right: [f64; 3],
-    pub view_up: [f64; 3],
-    pub view_center: [f64; 3],
-    pub bbox_mm: [f64; 4],          // [min_x, max_x, min_y, max_y]
-    pub positions: Vec<[f64; 3]>,   // per-column centerline positions in [z,y,x]
+    pub projection_normal: [f64; 3],
+    pub mid_height_point: [f64; 3],
+    pub dy_mm: f64,
+    pub pixels_wide: usize,
+    pub pixels_high: usize,
+    pub proj_col_pts: Vec<[f64; 3]>,
+    pub orig_col_pts: Vec<[f64; 3]>,
     pub arclengths: Vec<f64>,
-    pub normals: Vec<[f64; 3]>,     // rotated normals (for lateral offset computation)
+    pub positions: Vec<[f64; 3]>,
+    pub normals: Vec<[f64; 3]>,
 }
 
 /// Return the projection parameters needed to map 3D seed positions
@@ -273,71 +277,52 @@ pub async fn get_cpr_projection_info(
         clone_frame(frame_ref)
     };
 
-    // Rotate frame
-    let (rot_normals, _rot_binormals) = frame.rotated_frame(rotation_deg);
-
-    // PCA-based viewing plane (matches curved CPR renderer — rotates around principal axis)
-    let (_view_forward, view_right, view_up) =
-        curved_cpr::compute_view_basis_pca_with_rotation(&frame.positions, rotation_deg);
-
-    // Project centerline to 2D
-    let n = frame.n_cols();
-    let mid_idx = n / 2;
-    let center = frame.positions[mid_idx];
-    let projected = curved_cpr::project_centerline_2d(&frame.positions, center, &view_right, &view_up);
-
-    // Compute bounding box with padding
-    let mut min_x = f64::MAX;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::MAX;
-    let mut max_y = f64::NEG_INFINITY;
-    for &(px, py) in &projected {
-        if px < min_x { min_x = px; }
-        if px > max_x { max_x = px; }
-        if py < min_y { min_y = py; }
-        if py > max_y { max_y = py; }
+    if pixels_wide < 2 {
+        return Err("pixels_wide must be at least 2".into());
     }
-    let context_pad = curved_cpr::CONTEXT_PAD_MM;
-    min_x -= context_pad;
-    max_x += context_pad;
-    min_y -= context_pad;
-    max_y += context_pad;
 
-    // Isotropic correction — match renderer's bbox-to-pixel mapping
-    if pixels_wide >= 2 && pixels_high >= 2 {
-        let vw = max_x - min_x;
-        let vh = max_y - min_y;
-        let target_ratio = pixels_wide as f64 / pixels_high as f64;
-        let bbox_ratio = vw / vh;
-        if bbox_ratio < target_ratio {
-            let new_w = vh * target_ratio;
-            let extra = (new_w - vw) / 2.0;
-            min_x -= extra;
-            max_x += extra;
-        } else {
-            let new_h = vw / target_ratio;
-            let extra = (new_h - vh) / 2.0;
-            min_y -= extra;
-            max_y += extra;
-        }
-    }
+    let geom = stretched_cpr::compute_stretched_geometry(
+        &frame.positions,
+        pixels_wide,
+        rotation_deg,
+    );
 
     let total_arc = *frame.arclengths.last().unwrap_or(&0.0);
 
-    // Convert rotated normals to arrays
+    // Rotated Bishop normals -- still needed for straightened CPR overlays.
+    let (rot_normals, _rot_binormals) = frame.rotated_frame(rotation_deg);
     let normals_arr: Vec<[f64; 3]> = rot_normals.iter()
         .map(|n| [n[0], n[1], n[2]])
         .collect();
 
+    let proj_col_pts_arr: Vec<[f64; 3]> = geom.proj_col_pts.iter()
+        .map(|v| [v[0], v[1], v[2]])
+        .collect();
+    let orig_col_pts_arr: Vec<[f64; 3]> = geom.orig_col_pts.iter()
+        .map(|v| [v[0], v[1], v[2]])
+        .collect();
+
     Ok(CprProjectionInfo {
         total_arc_mm: total_arc,
+        total_proj_arc_mm: geom.total_proj_arc,
         half_width_mm: width_mm,
-        view_right: [view_right[0], view_right[1], view_right[2]],
-        view_up: [view_up[0], view_up[1], view_up[2]],
-        view_center: center,
-        bbox_mm: [min_x, max_x, min_y, max_y],
-        positions: frame.positions.clone(),
+        projection_normal: [
+            geom.projection_normal[0],
+            geom.projection_normal[1],
+            geom.projection_normal[2],
+        ],
+        mid_height_point: [
+            geom.mid_height_point[0],
+            geom.mid_height_point[1],
+            geom.mid_height_point[2],
+        ],
+        dy_mm: geom.dy_mm,
+        pixels_wide,
+        pixels_high,
+        proj_col_pts: proj_col_pts_arr,
+        orig_col_pts: orig_col_pts_arr,
         arclengths: frame.arclengths.clone(),
+        positions: frame.positions.clone(),
         normals: normals_arr,
     })
 }

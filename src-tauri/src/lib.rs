@@ -26,7 +26,7 @@ pub fn run() {
             commands::volume::get_slice,
             commands::cpr::build_cpr_frame,
             commands::cpr::render_cpr_image,
-            commands::cpr::render_curved_cpr_image,
+            commands::cpr::render_stretched_cpr_image,
             commands::cpr::render_cross_sections,
             commands::cpr::compute_cpr_image,
             commands::cpr::compute_cross_section_image,
