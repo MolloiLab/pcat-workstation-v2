@@ -6,7 +6,6 @@ use tauri_plugin_dialog::DialogExt;
 use tauri::ipc::Response;
 
 use ndarray::Array3;
-use pcat_pipeline::dicom_loader::{self, SeriesInfo};
 use pcat_pipeline::dicom_scan::{self, SeriesDescriptor};
 use pcat_pipeline::dicom_load::{self, LoadedVolume as PipelineLoadedVolume};
 use pcat_pipeline::types::LoadedVolume as StateLoadedVolume;
@@ -45,18 +44,6 @@ fn push_recent(app: &tauri::AppHandle, new_path: &str) {
     save_recent_list(app, &list);
 }
 
-#[derive(serde::Serialize)]
-pub struct VolumeInfo {
-    pub shape: [usize; 3],
-    pub spacing: [f64; 3],
-    pub origin: [f64; 3],
-    pub direction: [f64; 9],
-    pub window_center: f64,
-    pub window_width: f64,
-    pub patient_name: String,
-    pub study_description: String,
-}
-
 /// Opens a native folder-picker dialog. Returns the selected path as a string,
 /// or `None` if the user cancelled.
 #[tauri::command]
@@ -68,46 +55,6 @@ pub async fn open_dicom_dialog(app: tauri::AppHandle) -> Result<Option<String>, 
     .map_err(|e| format!("dialog task failed: {e}"))?;
 
     Ok(path.map(|p| p.to_string()))
-}
-
-/// Loads all DICOM slices from `path`, stores the volume in AppState,
-/// and returns summary metadata.
-#[tauri::command]
-pub async fn load_dicom(
-    path: String,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Mutex<AppState>>,
-) -> Result<VolumeInfo, String> {
-    let dir = path.clone();
-    push_recent(&app, &path);
-
-    let volume = tokio::task::spawn_blocking(move || {
-        dicom_loader::load_dicom_directory(Path::new(&dir))
-    })
-    .await
-    .map_err(|e| format!("load task failed: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    let info = VolumeInfo {
-        shape: [
-            volume.data.shape()[0],
-            volume.data.shape()[1],
-            volume.data.shape()[2],
-        ],
-        spacing: volume.spacing,
-        origin: volume.origin,
-        direction: volume.direction,
-        window_center: volume.window_center,
-        window_width: volume.window_width,
-        patient_name: volume.patient_name.clone(),
-        study_description: volume.study_description.clone(),
-    };
-
-    // Store in app state
-    let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
-    guard.volume = Some(volume);
-
-    Ok(info)
 }
 
 /// Return the list of recently opened DICOM folder paths.
@@ -154,33 +101,6 @@ pub async fn load_seeds(app: tauri::AppHandle, dicom_path: String) -> Result<Opt
     } else {
         Ok(None)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Dual-energy DICOM commands
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Serialize)]
-pub struct DualEnergyInfo {
-    pub shape: [usize; 3],
-    pub spacing: [f64; 3],
-    pub low_kev: f64,
-    pub high_kev: f64,
-    pub patient_name: String,
-}
-
-/// Scan a DICOM directory and return the list of series found.
-#[tauri::command]
-pub async fn scan_series(
-    path: String,
-) -> Result<Vec<SeriesInfo>, String> {
-    let dir = path;
-    tokio::task::spawn_blocking(move || {
-        dicom_loader::scan_dicom_series(Path::new(&dir))
-    })
-    .await
-    .map_err(|e| format!("scan task failed: {e}"))?
-    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -360,54 +280,8 @@ pub async fn list_series_dirs(patient_path: String) -> Result<Vec<SeriesDirInfo>
     .map_err(|e| format!("list task failed: {e}"))?
 }
 
-/// Load a dual-energy volume from two series in a DICOM directory,
-/// store it in AppState, and return summary metadata.
-#[tauri::command]
-pub async fn load_dual_energy(
-    path: String,
-    low_series_uid: String,
-    high_series_uid: String,
-    low_kev: f64,
-    high_kev: f64,
-    state: tauri::State<'_, Mutex<AppState>>,
-) -> Result<DualEnergyInfo, String> {
-    let dir = path;
-    let low_uid = low_series_uid;
-    let high_uid = high_series_uid;
-
-    let volume = tokio::task::spawn_blocking(move || {
-        dicom_loader::load_dual_energy(
-            Path::new(&dir),
-            &low_uid,
-            &high_uid,
-            low_kev,
-            high_kev,
-        )
-    })
-    .await
-    .map_err(|e| format!("load task failed: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    let info = DualEnergyInfo {
-        shape: [
-            volume.low.shape()[0],
-            volume.low.shape()[1],
-            volume.low.shape()[2],
-        ],
-        spacing: volume.spacing,
-        low_kev: volume.low_energy_kev,
-        high_kev: volume.high_energy_kev,
-        patient_name: volume.patient_name.clone(),
-    };
-
-    let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
-    guard.dual_energy = Some(volume);
-
-    Ok(info)
-}
-
 // ---------------------------------------------------------------------------
-// Fast header-only series scan (v2)
+// Fast header-only series scan
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, serde::Serialize)]
@@ -417,10 +291,9 @@ pub struct ProgressEvent {
     pub total: usize,
 }
 
-/// Scan a DICOM folder for series (new shape — replaces legacy scan).
-/// Returns header-only metadata per series; pixel data is not decoded.
+/// Scan a DICOM folder for series (header-only; no pixel data decoded).
 #[tauri::command]
-pub async fn scan_series_v2(
+pub async fn scan_series(
     path: String,
     app: AppHandle,
 ) -> Result<Vec<SeriesDescriptorDto>, String> {
@@ -480,7 +353,7 @@ impl From<SeriesDescriptor> for SeriesDescriptorDto {
 }
 
 // ---------------------------------------------------------------------------
-// Bulk binary load (v2)
+// Bulk binary load
 // ---------------------------------------------------------------------------
 
 /// Load a single series as one framed binary response:
@@ -491,12 +364,13 @@ impl From<SeriesDescriptor> for SeriesDescriptorDto {
 /// can show a progress bar, and populates `AppState.volume` so legacy commands
 /// (CPR, annotation, MMD) continue to work during gradual migration.
 #[tauri::command]
-pub async fn load_series_v2(
+pub async fn load_series(
     dir: String,
     uid: String,
     app: AppHandle,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<Response, String> {
+    push_recent(&app, &dir);
     let dir_path = PathBuf::from(dir);
 
     // Build a progress callback that forwards to Tauri events.
@@ -525,6 +399,192 @@ pub async fn load_series_v2(
     let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&vol.voxels_i16).to_vec();
     let framed = encode_frame(&vol.metadata, &voxel_bytes)?;
     Ok(Response::new(framed))
+}
+
+// ---------------------------------------------------------------------------
+// Dual-energy fast-path
+// ---------------------------------------------------------------------------
+
+/// Load two DICOM series in parallel (one per energy) and populate the
+/// dual-energy state slot. `low_dir` / `high_dir` are folder paths whose
+/// names must contain a keV label, e.g. `MonoPlus_70keV` — lab-internal
+/// data has `ImageComments` stripped and `SeriesDescription` mislabeled,
+/// so folder name is the only reliable source.
+///
+/// Also mirrors the low-energy volume into `state.volume` so CPR /
+/// annotation / FAI continue to operate on the same frame of reference.
+///
+/// Returns the framed binary response of the LOW-energy volume so the
+/// frontend can build its primary cornerstone3D volume exactly as with
+/// `load_series`; the high-energy voxels stay resident only in
+/// `state.dual_energy` for MMD.
+#[tauri::command]
+pub async fn load_dual_energy(
+    low_dir: String,
+    high_dir: String,
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<Response, String> {
+    let low_kev = parse_kev_from_folder(&low_dir)
+        .ok_or_else(|| format!(
+            "cannot extract keV from low-energy folder '{}'. \
+             Rename to include 'NNkeV' (e.g. MonoPlus_70keV).",
+            folder_name(&low_dir),
+        ))?;
+    let high_kev = parse_kev_from_folder(&high_dir)
+        .ok_or_else(|| format!(
+            "cannot extract keV from high-energy folder '{}'. \
+             Rename to include 'NNkeV' (e.g. MonoPlus_150keV).",
+            folder_name(&high_dir),
+        ))?;
+    if (low_kev - high_kev).abs() < 1.0 {
+        return Err(format!("low and high energies are both {low_kev} keV"));
+    }
+
+    push_recent(&app, &low_dir);
+
+    let low_path = PathBuf::from(&low_dir);
+    let high_path = PathBuf::from(&high_dir);
+
+    // Progress callback: weight low 0..50%, high 50..100%.
+    let app_cb_low = app.clone();
+    let low_progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total| {
+        let scaled = done.saturating_mul(50) / total.max(1);
+        let _ = app_cb_low.emit(
+            "dicom_load_progress",
+            ProgressEvent { phase: "decoding", done: scaled, total: 100 },
+        );
+    });
+    let app_cb_high = app.clone();
+    let high_progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total| {
+        let scaled = 50 + done.saturating_mul(50) / total.max(1);
+        let _ = app_cb_high.emit(
+            "dicom_load_progress",
+            ProgressEvent { phase: "decoding", done: scaled, total: 100 },
+        );
+    });
+
+    // Find the (single) series in each folder, then decode both in parallel.
+    let (low_vol, high_vol) = tokio::try_join!(
+        load_first_series(low_path.clone(), Some(low_progress)),
+        load_first_series(high_path.clone(), Some(high_progress)),
+    )?;
+
+    // Volumes must be on the same voxel grid for MMD.
+    if (low_vol.metadata.rows, low_vol.metadata.cols, low_vol.metadata.num_slices)
+        != (high_vol.metadata.rows, high_vol.metadata.cols, high_vol.metadata.num_slices)
+    {
+        return Err(format!(
+            "low/high volume shape mismatch: \
+             low {}×{}×{}, high {}×{}×{}",
+            low_vol.metadata.num_slices, low_vol.metadata.rows, low_vol.metadata.cols,
+            high_vol.metadata.num_slices, high_vol.metadata.rows, high_vol.metadata.cols,
+        ));
+    }
+
+    // Mirror low into state.volume via the existing bridge, so CPR / FAI work.
+    bridge_into_state(&low_vol, &state)?;
+
+    // Convert both i16 HU → f32 Array3, store as DualEnergyVolume.
+    let de = build_dual_energy_volume(&low_vol, &high_vol, low_kev, high_kev)?;
+    {
+        let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+        guard.dual_energy = Some(de);
+    }
+
+    let _ = app.emit("dicom_load_progress", ProgressEvent {
+        phase: "done",
+        done: 100,
+        total: 100,
+    });
+
+    let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&low_vol.voxels_i16).to_vec();
+    let framed = encode_frame(&low_vol.metadata, &voxel_bytes)?;
+    Ok(Response::new(framed))
+}
+
+/// Scan a folder for DICOM series and load the first one found. Errors if the
+/// folder is empty or contains no DICOM images.
+async fn load_first_series(
+    dir: PathBuf,
+    on_progress: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
+) -> Result<PipelineLoadedVolume, String> {
+    let series = dicom_scan::scan_series(&dir)
+        .await
+        .map_err(|e| format!("scan {}: {e}", dir.display()))?;
+    let first = series.into_iter().next().ok_or_else(|| {
+        format!("no DICOM series found in {}", dir.display())
+    })?;
+    dicom_load::load_series(&dir, &first.uid, on_progress)
+        .await
+        .map_err(|e| format!("load {}: {e}", dir.display()))
+}
+
+/// Extract a keV number from a folder path's trailing component.
+/// Matches patterns like `MonoPlus_70keV`, `70 keV`, `150keV_Soft`, case-insensitive.
+fn parse_kev_from_folder(path: &str) -> Option<f64> {
+    use regex::Regex;
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = REGEX.get_or_init(|| {
+        Regex::new(r"(?i)(\d+(?:\.\d+)?)\s*keV").unwrap()
+    });
+    let name = folder_name(path);
+    re.captures(&name)?.get(1)?.as_str().parse::<f64>().ok()
+}
+
+fn folder_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn build_dual_energy_volume(
+    low: &PipelineLoadedVolume,
+    high: &PipelineLoadedVolume,
+    low_kev: f64,
+    high_kev: f64,
+) -> Result<pcat_pipeline::dicom_loader::DualEnergyVolume, String> {
+    let m = &low.metadata;
+    let nz = m.num_slices;
+    let ny = m.rows as usize;
+    let nx = m.cols as usize;
+    let shape = (nz, ny, nx);
+
+    let low_f32: Vec<f32> = low.voxels_i16.iter().map(|&v| v as f32).collect();
+    let high_f32: Vec<f32> = high.voxels_i16.iter().map(|&v| v as f32).collect();
+    let low_arr = Array3::from_shape_vec(shape, low_f32)
+        .map_err(|e| format!("low shape: {e}"))?;
+    let high_arr = Array3::from_shape_vec(shape, high_f32)
+        .map_err(|e| format!("high shape: {e}"))?;
+
+    let iop = m.orientation;
+    let row = [iop[0], iop[1], iop[2]];
+    let col = [iop[3], iop[4], iop[5]];
+    let normal = [
+        row[1] * col[2] - row[2] * col[1],
+        row[2] * col[0] - row[0] * col[2],
+        row[0] * col[1] - row[1] * col[0],
+    ];
+    let direction = [
+        row[0], row[1], row[2],
+        col[0], col[1], col[2],
+        normal[0], normal[1], normal[2],
+    ];
+    let spacing = [m.slice_spacing, m.pixel_spacing[0], m.pixel_spacing[1]];
+    let origin = [m.slice_positions_z.first().copied().unwrap_or(0.0), 0.0, 0.0];
+
+    Ok(pcat_pipeline::dicom_loader::DualEnergyVolume {
+        low: Arc::new(low_arr),
+        high: Arc::new(high_arr),
+        low_energy_kev: low_kev,
+        high_energy_kev: high_kev,
+        spacing,
+        origin,
+        direction,
+        patient_name: m.patient_name.clone(),
+        study_description: m.study_description.clone(),
+    })
 }
 
 fn bridge_into_state(

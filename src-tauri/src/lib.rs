@@ -15,17 +15,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::dicom::open_dicom_dialog,
-            commands::dicom::load_dicom,
             commands::dicom::get_recent_dicoms,
             commands::dicom::save_seeds,
             commands::dicom::load_seeds,
             commands::dicom::scan_series,
-            commands::dicom::scan_series_v2,
-            commands::dicom::load_series_v2,
+            commands::dicom::load_series,
             commands::dicom::load_dual_energy,
             commands::dicom::list_patients,
             commands::dicom::list_series_dirs,
-            commands::volume::get_slice,
             commands::cpr::build_cpr_frame,
             commands::cpr::render_cpr_image,
             commands::cpr::render_stretched_cpr_image,
