@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Compound CPR view: straightened or curved CPR image (left 70%) with
+   * Compound CPR view: straightened or stretched CPR image (left 70%) with
    * 3 cross-sections (right 30%) at needle positions A, B, C.
    *
    * Two-phase architecture:
@@ -25,9 +25,9 @@
   import {
     type CprProjectionInfo,
     worldToStraightenedCpr,
-    worldToCurvedCpr,
+    worldToStretchedCpr,
     straightenedCprToWorld,
-    curvedCprToWorld,
+    stretchedCprToWorld,
   } from '$lib/cprProjection';
   import CrossSection from './CrossSection.svelte';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
@@ -43,8 +43,8 @@
   let windowCenter = $state(volumeStore.current?.windowCenter ?? 40);
   let windowWidth = $state(volumeStore.current?.windowWidth ?? 400);
 
-  // CPR mode: straightened (classic) vs curved (natural vessel path)
-  let cprMode: 'straightened' | 'curved' = $state('curved');
+  // CPR mode: straightened (classic) vs stretched (Horos-style projected)
+  let cprMode: 'straightened' | 'stretched' = $state('stretched');
 
   // FAI overlay toggle
   let showFaiOverlay = $state(false);
@@ -219,7 +219,7 @@
     const w = cvs.width;
     const h = cvs.height;
 
-    // In curved mode, needle lines are less meaningful (vessel is not straightened)
+    // In stretched mode, needle lines are less meaningful (vessel is not straightened)
     // but we still draw them at the same fractional position for consistency.
 
     // Draw needle lines (vertical)
@@ -274,13 +274,13 @@
       ctx.fillStyle = '#ffee00';
       ctx.fillText('C', xC, 14);
     } else if (projectionInfo) {
-      // Curved mode: draw needle lines perpendicular to vessel tangent
+      // Stretched mode: draw needle lines perpendicular to vessel tangent
       const nPos = projectionInfo.positions.length;
       const drawCurvedNeedle = (frac: number, color: string, label: string, isDashed: boolean) => {
         const idx = Math.round(frac * (nPos - 1));
         const clampedIdx = Math.min(idx, nPos - 1);
         const pos = projectionInfo!.positions[clampedIdx];
-        const projected = worldToCurvedCpr(pos, projectionInfo!, w, h);
+        const projected = worldToStretchedCpr(pos, projectionInfo!, w, h);
         if (!projected) return;
         const [cx, cy] = projected;
 
@@ -289,8 +289,8 @@
         const nextIdx = Math.min(nPos - 1, clampedIdx + 1);
         const prevPos = projectionInfo!.positions[prevIdx];
         const nextPos = projectionInfo!.positions[nextIdx];
-        const prevProj = worldToCurvedCpr(prevPos, projectionInfo!, w, h);
-        const nextProj = worldToCurvedCpr(nextPos, projectionInfo!, w, h);
+        const prevProj = worldToStretchedCpr(prevPos, projectionInfo!, w, h);
+        const nextProj = worldToStretchedCpr(nextPos, projectionInfo!, w, h);
 
         if (prevProj && nextProj) {
           const tx = nextProj[0] - prevProj[0];
@@ -380,13 +380,13 @@
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ff00ff';
       ctx.fillText('OSTIUM', ox, h - 6);
-    } else if (activeOstiumFrac !== null && cprMode === 'curved' && projectionInfo) {
-      // In curved mode, draw ostium marker at the projected position
+    } else if (activeOstiumFrac !== null && cprMode === 'stretched' && projectionInfo) {
+      // In stretched mode, draw ostium marker at the projected position
       const nPos = projectionInfo.positions.length;
       const idx = Math.round(activeOstiumFrac * (nPos - 1));
       const clampedIdx = Math.min(idx, nPos - 1);
       const pos = projectionInfo.positions[clampedIdx];
-      const projected = worldToCurvedCpr(pos, projectionInfo, w, h);
+      const projected = worldToStretchedCpr(pos, projectionInfo, w, h);
       if (projected) {
         const [cx, cy] = projected;
 
@@ -410,7 +410,7 @@
     }
 
     // --- Centerline polyline on CPR ---
-    if (projectionInfo && cprMode === 'curved') {
+    if (projectionInfo && cprMode === 'stretched') {
       const color = VESSEL_COLORS[seedStore.activeVessel];
       const nPos = projectionInfo.positions.length;
       const step = Math.max(1, Math.floor(nPos / 200)); // sample every few points
@@ -421,7 +421,7 @@
       ctx.globalAlpha = 0.5;
       let started = false;
       for (let j = 0; j < nPos; j += step) {
-        const projected = worldToCurvedCpr(projectionInfo.positions[j], projectionInfo, w, h);
+        const projected = worldToStretchedCpr(projectionInfo.positions[j], projectionInfo, w, h);
         if (!projected) { started = false; continue; }
         if (!started) { ctx.moveTo(projected[0], projected[1]); started = true; }
         else { ctx.lineTo(projected[0], projected[1]); }
@@ -442,8 +442,8 @@
         // Seeds are in [x,y,z] world coords; projection expects [z,y,x]
         const seedZyx: [number, number, number] = [seedPos[2], seedPos[1], seedPos[0]];
 
-        const projected = cprMode === 'curved'
-          ? worldToCurvedCpr(seedZyx, projectionInfo, w, h)
+        const projected = cprMode === 'stretched'
+          ? worldToStretchedCpr(seedZyx, projectionInfo, w, h)
           : worldToStraightenedCpr(seedZyx, projectionInfo, w, h);
 
         if (!projected) continue;
@@ -585,8 +585,8 @@
     try {
       let buffer: ArrayBuffer;
 
-      if (cprMode === 'curved') {
-        buffer = await invoke<ArrayBuffer>('render_curved_cpr_image', {
+      if (cprMode === 'stretched') {
+        buffer = await invoke<ArrayBuffer>('render_stretched_cpr_image', {
           rotationDeg,
           widthMm: CPR_WIDTH_MM,
           pixelsWide: 512,
@@ -770,8 +770,8 @@
     for (let i = 0; i < data.seeds.length; i++) {
       const seedPos = data.seeds[i].position;
       const seedZyx: [number, number, number] = [seedPos[2], seedPos[1], seedPos[0]];
-      const projected = cprMode === 'curved'
-        ? worldToCurvedCpr(seedZyx, projectionInfo, w, h)
+      const projected = cprMode === 'stretched'
+        ? worldToStretchedCpr(seedZyx, projectionInfo, w, h)
         : worldToStraightenedCpr(seedZyx, projectionInfo, w, h);
       if (!projected) continue;
 
@@ -824,7 +824,7 @@
         navigateToNeedlePos();
       }
     } else if (projectionInfo && cprCanvas) {
-      // Curved mode: find nearest centerline point to click position
+      // Stretched mode: find nearest centerline point to click position
       const canvasPixelX = (x / rect.width) * cprCanvas.width;
       const canvasPixelY = (y / rect.height) * cprCanvas.height;
       const nPos = projectionInfo.positions.length;
@@ -834,7 +834,7 @@
       let bestIdx = 0;
       let bestDist = Infinity;
       for (let j = 0; j < nPos; j++) {
-        const projected = worldToCurvedCpr(projectionInfo.positions[j], projectionInfo, w, h);
+        const projected = worldToStretchedCpr(projectionInfo.positions[j], projectionInfo, w, h);
         if (!projected) continue;
         const dx = canvasPixelX - projected[0];
         const dy = canvasPixelY - projected[1];
@@ -862,8 +862,8 @@
       const canvasPixelY = (y / rect.height) * cprCanvas.height;
 
       // Unproject to 3D
-      const worldZyx = cprMode === 'curved'
-        ? curvedCprToWorld(canvasPixelX, canvasPixelY, projectionInfo, cprCanvas.width, cprCanvas.height)
+      const worldZyx = cprMode === 'stretched'
+        ? stretchedCprToWorld(canvasPixelX, canvasPixelY, projectionInfo, cprCanvas.width, cprCanvas.height)
         : straightenedCprToWorld(canvasPixelX, canvasPixelY, projectionInfo, cprCanvas.width, cprCanvas.height);
 
       // Convert [z,y,x] back to [x,y,z] for seedStore
@@ -877,7 +877,7 @@
       if (cprMode === 'straightened') {
         needleBFraction = Math.max(0, Math.min(1, x / rect.width));
       }
-      // In curved mode, needle dragging isn't supported (use scroll instead)
+      // In stretched mode, needle dragging isn't supported (use scroll instead)
       navigateToNeedlePos();
       return;
     }
@@ -1114,7 +1114,7 @@
 
     <span class="text-[10px] text-text-secondary/40">|</span>
 
-    <!-- Curved / Straightened toggle -->
+    <!-- Stretched / Straightened toggle -->
     <button
       class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
         {cprMode === 'straightened'
@@ -1126,12 +1126,12 @@
     </button>
     <button
       class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
-        {cprMode === 'curved'
+        {cprMode === 'stretched'
           ? 'bg-accent/20 text-accent'
           : 'text-text-secondary/60 hover:text-text-secondary'}"
-      onclick={() => { cprMode = 'curved'; }}
+      onclick={() => { cprMode = 'stretched'; }}
     >
-      Curved
+      Stretched
     </button>
 
     <button
