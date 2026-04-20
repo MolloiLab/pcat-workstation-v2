@@ -96,3 +96,53 @@ async fn decode_slice_returns_expected_hu() {
     // Corner: (1024 - sqrt(2*32^2)*30 + 0) * 1 + (-1024) = very negative
     assert!(px[0] < -200, "corner should be negative HU, got {}", px[0]);
 }
+
+#[tokio::test]
+async fn load_series_returns_correct_volume() {
+    use pcat_pipeline::dicom_load::{load_series, LoadedVolume};
+    use pcat_pipeline::dicom_scan::scan_series;
+
+    let dir = tempfile::tempdir().unwrap();
+    common::write_mini_ct(dir.path());
+
+    let series = scan_series(dir.path()).await.unwrap();
+    let vol: LoadedVolume = load_series(dir.path(), &series[0].uid).await.unwrap();
+
+    assert_eq!(vol.metadata.num_slices, common::FIXTURE_SLICES);
+    assert_eq!(vol.metadata.rows, common::FIXTURE_ROWS);
+    assert_eq!(vol.metadata.cols, common::FIXTURE_COLS);
+    let slice_len = (common::FIXTURE_ROWS * common::FIXTURE_COLS) as usize;
+    assert_eq!(vol.voxels_i16.len(), slice_len * common::FIXTURE_SLICES);
+
+    // Center of first slice = HU ~0 (see Task 7 test)
+    let center_in_first = (common::FIXTURE_ROWS / 2) as usize
+        * common::FIXTURE_COLS as usize
+        + (common::FIXTURE_COLS / 2) as usize;
+    assert!((vol.voxels_i16[center_in_first] - 0).abs() < 2);
+
+    // Center of last slice gets z-offset: (1024 + 29*5) - 1024 = 145 HU
+    let last_slice_offset = slice_len * (common::FIXTURE_SLICES - 1);
+    assert!(
+        (vol.voxels_i16[last_slice_offset + center_in_first] - 145).abs() < 2,
+        "last slice center HU ~145, got {}",
+        vol.voxels_i16[last_slice_offset + center_in_first]
+    );
+}
+
+#[tokio::test]
+async fn load_series_errors_on_unknown_uid() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_mini_ct(dir.path());
+
+    let err = pcat_pipeline::dicom_load::load_series(dir.path(), "not-a-real-uid")
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("not-a-real-uid"));
+}
+
+#[tokio::test]
+async fn load_series_rejects_oversized_volume() {
+    use pcat_pipeline::dicom_load::check_volume_size_mb;
+    let mb = 1024 * 1024 * 1024usize; // 1 GB hypothetical
+    assert!(check_volume_size_mb(mb).is_err());
+}
