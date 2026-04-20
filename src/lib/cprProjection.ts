@@ -19,8 +19,12 @@ export type CprProjectionInfo = {
   dy_mm: number;
   pixels_wide: number;
   pixels_high: number;
+  /**
+   * Lookup table for `worldToStretchedCpr`, uniformly sampled in projected
+   * arc-length. Its length is independent of the render resolution — the
+   * backend caps it (~128) so per-seed projection stays cheap.
+   */
   proj_col_pts: [number, number, number][];
-  orig_col_pts: [number, number, number][];
   arclengths: number[];
   positions: [number, number, number][];
   normals: [number, number, number][];

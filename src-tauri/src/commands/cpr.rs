@@ -290,9 +290,15 @@ pub async fn get_cpr_projection_info(
         return Err("pixels_wide must be at least 2".into());
     }
 
+    // Cap the lookup-table resolution for the frontend. The renderer still
+    // uses the caller's `pixels_wide` when it renders; this is only the size
+    // of the `proj_col_pts` array returned to the frontend for seed/overlay
+    // projection, which does not need the full render resolution.
+    let lookup_cols = pixels_wide.min(PROJECTION_INFO_MAX_COLS);
+
     let geom = stretched_cpr::compute_stretched_geometry(
         &frame.positions,
-        pixels_wide,
+        lookup_cols,
         rotation_deg,
     );
 
@@ -305,9 +311,6 @@ pub async fn get_cpr_projection_info(
         .collect();
 
     let proj_col_pts_arr: Vec<[f64; 3]> = geom.proj_col_pts.iter()
-        .map(|v| [v[0], v[1], v[2]])
-        .collect();
-    let orig_col_pts_arr: Vec<[f64; 3]> = geom.orig_col_pts.iter()
         .map(|v| [v[0], v[1], v[2]])
         .collect();
 
@@ -329,7 +332,6 @@ pub async fn get_cpr_projection_info(
         pixels_wide,
         pixels_high,
         proj_col_pts: proj_col_pts_arr,
-        orig_col_pts: orig_col_pts_arr,
         arclengths: frame.arclengths.clone(),
         positions: frame.positions.clone(),
         normals: normals_arr,
