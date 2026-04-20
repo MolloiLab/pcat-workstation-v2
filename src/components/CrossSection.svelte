@@ -154,31 +154,37 @@
       return null;
     };
 
-    // --- 1. Peak search in up to 5 mm around the centerline point ---
-    // The centerline is a cubic-spline fit through manually placed seeds;
-    // between seeds it often drifts 3–5 mm off the true lumen, especially
-    // on curved segments. A 3 mm search window misses the lumen entirely
-    // in those cases and we'd reject a vessel that is plainly visible to
-    // the user. 5 mm is a good compromise: wide enough to recover from
-    // typical spline drift, narrow enough that we never latch onto a
-    // completely unrelated bright structure (aorta ostium, adjacent LAD)
-    // inside the 15 mm half-FOV crop.
-    const searchRadiusPx = Math.max(6, Math.round(5.0 / mmPerPixel));
-    const searchRadiusSqPx = searchRadiusPx * searchRadiusPx;
+    // --- 1. Peak search across the whole crop, with a gentle centre bias ---
+    // A cubic-spline centerline drifts off the true lumen between manually
+    // placed seeds; on tightly curved segments the drift can be 6–8 mm.
+    // A small search window around the image centre will miss a visibly
+    // bright lumen entirely and we reject a vessel the user can clearly
+    // see. Conversely, naively picking the single brightest pixel in the
+    // FOV would latch onto a neighbouring artery or partial-volume
+    // chamber when both are present.
+    //
+    // Compromise: score every pixel as (HU − k · distance_from_centre_mm)
+    // with k = 15 HU/mm. A 500 HU pixel at the image centre scores 500;
+    // at 8 mm offset it still scores 380 and beats a 250 HU tissue pixel
+    // at centre. If two bright coronaries both appear in the 30 mm crop,
+    // the one closer to the centerline wins — that's the one the user
+    // seeded. Cheap: ~16 k pixels per call, sub-millisecond.
+    const CENTER_BIAS_HU_PER_MM = 15.0;
     let peakHU = -Infinity;
+    let peakScore = -Infinity;
     let peakRow = center;
     let peakCol = center;
-    const sr0 = Math.max(0, center - searchRadiusPx);
-    const sr1 = Math.min(sz - 1, center + searchRadiusPx);
-    for (let r = sr0; r <= sr1; r++) {
+    for (let r = 0; r < sz; r++) {
       const dr = r - center;
       const dr2 = dr * dr;
-      for (let c = sr0; c <= sr1; c++) {
-        const dc = c - center;
-        // Circular search, not square — avoids preferring corner pixels
-        if (dr2 + dc * dc > searchRadiusSqPx) continue;
+      for (let c = 0; c < sz; c++) {
         const v = data[r * sz + c];
-        if (Number.isFinite(v) && v > peakHU) {
+        if (!Number.isFinite(v)) continue;
+        const dc = c - center;
+        const distMm = Math.sqrt(dr2 + dc * dc) * mmPerPixel;
+        const score = v - CENTER_BIAS_HU_PER_MM * distMm;
+        if (score > peakScore) {
+          peakScore = score;
           peakHU = v;
           peakRow = r;
           peakCol = c;

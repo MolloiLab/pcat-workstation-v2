@@ -740,8 +740,15 @@
 
   // ---- Cross-section computation (uses cached frame, raw binary) ----
 
-  let xsDebounce: ReturnType<typeof setTimeout> | undefined;
-  let computingXs = false;
+  // Cross-section updates were on a 100 ms debounce — that means the three
+  // panels sit frozen during a scroll and only update once the user stops.
+  // Feels sluggish. Switch to leading-edge + in-flight-pipeline: fire
+  // immediately, and if more needle/rotation changes arrive while the IPC
+  // is still in flight, remember the latest one and fire once when the
+  // previous completes. This gives real-time XS updates at whatever rate
+  // the IPC round-trip allows (typically ~15–25 ms in release), without
+  // queuing up stale requests.
+  let xsPending = false;
 
   $effect(() => {
     // Track needle and rotation deps
@@ -757,17 +764,25 @@
       return;
     }
 
-    clearTimeout(xsDebounce);
-    xsDebounce = setTimeout(() => {
-      renderCrossSections();
-    }, 100);
-
-    return () => clearTimeout(xsDebounce);
+    kickCrossSections();
   });
 
+  function kickCrossSections() {
+    if (!frameReady) return;
+    if (computingXs) {
+      // An IPC is already in flight; just note that inputs changed. The
+      // in-flight call's `finally` will re-fire with the newest values.
+      xsPending = true;
+      return;
+    }
+    void renderCrossSections();
+  }
+
+  let computingXs = false;
   async function renderCrossSections() {
     if (!frameReady || computingXs) return;
     computingXs = true;
+    xsPending = false;
     try {
       const buffer = await invoke<ArrayBuffer>('render_cross_sections', {
         positionFractions: [needleAFraction, needleBFraction, needleCFraction],
@@ -786,6 +801,14 @@
       console.error('CprView: render_cross_sections failed', e);
     } finally {
       computingXs = false;
+      // If any needle/rotation change arrived while we were in flight,
+      // re-fire now with the latest values. This is the "trailing" edge
+      // of the leading-edge pipeline and keeps the XS panels fresh at
+      // whatever rate the IPC round-trip allows.
+      if (xsPending) {
+        xsPending = false;
+        void renderCrossSections();
+      }
     }
   }
 
@@ -831,23 +854,47 @@
 
   // Mousemove / wheel fire *much* faster than cornerstone3D can re-render
   // the three MPR viewports. Each `navigateToWorldPos` call does
-  // setCamera + render on all three, which on a CCTA volume is ~15–30 ms of
-  // real WebGL work per call. rAF-throttling (60 Hz) still asks for 60 ×
-  // 20 ms = 1200 ms/sec of MPR work — the main thread can't keep up and
-  // frames get dropped.
+  // setCamera + render on all three, which on a CCTA volume is ~15–30 ms
+  // of real WebGL work per call. Raw 60 Hz would ask for 1200 ms/sec of
+  // MPR work, which is obviously impossible — the main thread stalls and
+  // the UI drops frames.
   //
-  // Debounce instead: during active scroll/drag the MPR panels don't
-  // update at all, and they snap to the final position 50 ms after the
-  // user stops. 50 ms is under one visual frame of perceived "delay" on a
-  // release, but removes *all* MPR work from the hot path. Primary CPR
-  // feedback (overlay lines, cross-sections) stays real-time.
+  // Throttle-with-leading-and-trailing: first scroll event fires
+  // immediately so the MPR viewports start tracking; subsequent events
+  // within the throttle interval are coalesced into a single trailing
+  // call scheduled at the next interval boundary. This way the MPR
+  // updates at ~7 fps during active scroll (continuous feedback, not
+  // frozen), and always snaps to the final position on release.
+  //
+  // 140 ms ≈ 7 fps. Each navigate costs ~20 ms of WebGL, so this keeps
+  // MPR overhead at ~15 % of the main thread while the user is actively
+  // scrolling — enough headroom for the CPR overlay + cross-section
+  // pipeline to stay smooth.
+  const NAV_INTERVAL_MS = 140;
+  let lastNavTime = 0;
   let navigateTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleNavigate() {
-    if (navigateTimer !== null) clearTimeout(navigateTimer);
-    navigateTimer = setTimeout(() => {
+    const now = performance.now();
+    const elapsed = now - lastNavTime;
+    if (navigateTimer !== null) {
+      clearTimeout(navigateTimer);
       navigateTimer = null;
+    }
+    if (elapsed >= NAV_INTERVAL_MS) {
+      // Leading edge: fire immediately so MPR starts tracking as soon as
+      // the user begins to scroll / drag.
+      lastNavTime = now;
       navigateToNeedlePos();
-    }, 50);
+    } else {
+      // Trailing edge: schedule at the next interval boundary. This also
+      // covers the "scroll ended; fire one final call with the true
+      // final position" case.
+      navigateTimer = setTimeout(() => {
+        navigateTimer = null;
+        lastNavTime = performance.now();
+        navigateToNeedlePos();
+      }, NAV_INTERVAL_MS - elapsed);
+    }
   }
 
   // Precision touchpads fire wheel events at ~240 Hz. If we mutate
