@@ -850,5 +850,219 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Stretched CPR patient regression tests (ignored — require local DICOM data)
+    // -----------------------------------------------------------------------
+
+    /// Check that the vessel centerline pixel (found by projecting each orig_col_pt
+    /// onto the stretched image) consistently lands in lumen tissue (HU > 150) across
+    /// all 360 rotation angles.  A 5x5 neighbourhood is sampled to tolerate sub-pixel
+    /// placement error.
+    ///
+    /// If more than 15% of the middle-80% centerline columns have a neighbourhood max
+    /// below 150 HU the rotation angle is flagged as failed.  Rotations where more than
+    /// 30% of columns are clipped off the image edges are flagged as clipped rather than
+    /// failed (the vessel has simply scrolled off screen at that angle).
+    fn run_stretched_centerline_test(
+        dicom_dir: &std::path::Path,
+        seeds_xyz: &[[f64; 3]],
+        px_w: usize,
+        px_h: usize,
+        test_name: &str,
+    ) {
+        if !dicom_dir.exists() {
+            eprintln!("[{test_name}] DICOM directory not found – skipping: {}", dicom_dir.display());
+            return;
+        }
+
+        eprintln!("[{test_name}] Loading DICOM from {} …", dicom_dir.display());
+        let vol = crate::dicom_loader::load_dicom_directory(dicom_dir)
+            .expect("failed to load DICOM directory");
+        eprintln!(
+            "[{test_name}] Loaded: shape={:?}, spacing={:?}",
+            vol.data.shape(),
+            vol.spacing
+        );
+
+        // Convert seeds from Cornerstone [x, y, z] → pipeline [z, y, x]
+        let seeds_zyx: Vec<[f64; 3]> = seeds_xyz
+            .iter()
+            .map(|s| [s[2], s[1], s[0]])
+            .collect();
+
+        let frame = CprFrame::from_centerline(&seeds_zyx, px_w);
+        let n = frame.positions.len(); // == px_w
+
+        let mut failed_angles: Vec<(i32, f64, usize)> = Vec::new(); // (rot, worst_hu, n_low)
+        let mut clipped_angles: Vec<(i32, f64)> = Vec::new();      // (rot, clipped_frac)
+
+        for rot_deg in 0i32..360 {
+            let result = frame.render_stretched(
+                &vol.data,
+                vol.spacing,
+                vol.origin,
+                rot_deg as f64,
+                25.0,
+                px_w,
+                px_h,
+                1.0,
+            );
+            let geom = crate::stretched_cpr::compute_stretched_geometry(
+                &frame.positions,
+                px_w,
+                rot_deg as f64,
+            );
+
+            let col_start = n / 10;
+            let col_end = n - n / 10;
+
+            let mut n_checked: usize = 0;
+            let mut n_low: usize = 0;
+            let mut n_clipped: usize = 0;
+            let mut worst_hu = f32::INFINITY;
+
+            for j in col_start..col_end {
+                let orig_pt = geom.orig_col_pts[j];
+                let mid_pt = geom.mid_height_point;
+                let depth_mm = (orig_pt - mid_pt).dot(&geom.projection_normal);
+                let row_f = px_h as f64 / 2.0 - depth_mm / geom.dy_mm;
+                let row = row_f.round() as isize;
+                let col = j as isize;
+
+                // Skip clipped-off rows (vessel scrolled outside image)
+                if row < 2 || row >= px_h as isize - 2 {
+                    n_clipped += 1;
+                    continue;
+                }
+
+                n_checked += 1;
+
+                // 5x5 neighbourhood max
+                let mut best_hu = f32::NEG_INFINITY;
+                for dr in -2isize..=2 {
+                    for dc in -2isize..=2 {
+                        let r = row + dr;
+                        let c = col + dc;
+                        if r >= 0 && r < px_h as isize && c >= 0 && c < px_w as isize {
+                            let idx = r as usize * px_w + c as usize;
+                            let v = result.image[idx];
+                            if !v.is_nan() && v > best_hu {
+                                best_hu = v;
+                            }
+                        }
+                    }
+                }
+
+                if best_hu < worst_hu {
+                    worst_hu = best_hu;
+                }
+                if best_hu < 150.0 {
+                    n_low += 1;
+                }
+            }
+
+            let n_cols_middle = col_end - col_start;
+            let clipped_frac = n_clipped as f64 / n_cols_middle as f64;
+
+            if clipped_frac > 0.30 {
+                eprintln!(
+                    "[{test_name}] rot={rot_deg:3}°  CLIPPED  clipped_frac={:.2}  worst_hu={worst_hu:.1}",
+                    clipped_frac
+                );
+                clipped_angles.push((rot_deg, clipped_frac));
+            } else if n_checked > 0 && n_low as f64 / n_checked as f64 > 0.15 {
+                eprintln!(
+                    "[{test_name}] rot={rot_deg:3}°  FAIL     worst_hu={worst_hu:.1}  n_low={n_low}/{n_checked}",
+                );
+                failed_angles.push((rot_deg, worst_hu as f64, n_low));
+            } else {
+                eprintln!(
+                    "[{test_name}] rot={rot_deg:3}°  ok       worst_hu={worst_hu:.1}  n_low={n_low}/{n_checked}  clipped={n_clipped}",
+                );
+            }
+        }
+
+        if !failed_angles.is_empty() || !clipped_angles.is_empty() {
+            panic!(
+                "[{test_name}] REGRESSION: {} failed angles, {} clipped angles.\n\
+                 Failed: {:?}\nClipped: {:?}",
+                failed_angles.len(),
+                clipped_angles.len(),
+                &failed_angles[..failed_angles.len().min(10)],
+                &clipped_angles[..clipped_angles.len().min(10)],
+            );
+        }
+
+        eprintln!("[{test_name}] All 360 rotations passed.");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_stretched_cpr_centerline_hu_317() {
+        // Patient 317.6 – RCA, 16 seeds.  Image size: 512 wide × 256 high.
+        let dicom_dir = std::path::Path::new(
+            "/Users/shunie/Developer/PCAT/Rahaf_Patients/317.6",
+        );
+
+        // Seeds in Cornerstone [x, y, z] order.
+        let seeds_xyz: &[[f64; 3]] = &[
+            [18.513, -174.185, 1922.507],
+            [18.071, -181.259, 1922.507],
+            [14.976, -187.007, 1922.507],
+            [12.765, -190.987, 1922.507],
+            [2.596,  -194.966, 1915.733],
+            [-2.268, -198.061, 1910.314],
+            [-5.500, -198.061, 1904.611],
+            [-8.599, -198.061, 1896.691],
+            [-10.321,-198.061, 1890.838],
+            [-10.665,-193.840, 1879.820],
+            [-8.255, -190.791, 1875.0],
+            [-0.576, -182.322, 1868.712],
+            [6.695,  -174.192, 1868.051],
+            [10.881, -169.450, 1868.932],
+            [17.051, -162.336, 1872.017],
+            [22.119, -155.561, 1875.762],
+        ];
+
+        run_stretched_centerline_test(dicom_dir, seeds_xyz, 512, 256, "317.6");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_stretched_cpr_centerline_hu_161() {
+        // Patient 161.6 – RCA, 23 seeds.  Image size: 512 × 512 (square).
+        let dicom_dir = std::path::Path::new(
+            "/Users/shunie/Developer/PCAT/Rahaf_Patients/161.6/CCTA l-70 (KVP)",
+        );
+
+        // Seeds in Cornerstone [x, y, z] order.
+        let seeds_xyz: &[[f64; 3]] = &[
+            [-10.87, -224.30, 1744.50],
+            [-3.39,  -231.24, 1744.50],
+            [0.87,   -238.71, 1744.50],
+            [4.08,   -245.12, 1744.50],
+            [2.22,   -249.07, 1740.90],
+            [-2.33,  -250.50, 1740.90],
+            [-9.03,  -251.46, 1740.90],
+            [-13.58, -251.70, 1740.90],
+            [-16.78, -251.70, 1738.14],
+            [-19.09, -251.70, 1732.53],
+            [-20.08, -252.98, 1727.25],
+            [-22.72, -255.00, 1720.66],
+            [-27.01, -257.84, 1715.05],
+            [-30.64, -257.84, 1711.09],
+            [-32.95, -257.84, 1706.47],
+            [-34.27, -252.57, 1696.24],
+            [-34.27, -250.37, 1690.64],
+            [-34.27, -249.38, 1685.36],
+            [-27.43, -249.71, 1676.78],
+            [-17.70, -237.50, 1680.08],
+            [-10.41, -226.62, 1682.39],
+            [-6.76,  -222.33, 1683.71],
+            [0.13,   -217.71, 1685.03],
+        ];
+
+        run_stretched_centerline_test(dicom_dir, seeds_xyz, 512, 512, "161.6");
+    }
 
 }
