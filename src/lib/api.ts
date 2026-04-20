@@ -4,25 +4,9 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 
-export type VolumeInfo = {
-  shape: [number, number, number]; // [Z, Y, X]
-  spacing: [number, number, number]; // [sz, sy, sx]
-  origin: [number, number, number];
-  direction: number[];
-  window_center: number;
-  window_width: number;
-  patient_name: string;
-  study_description: string;
-};
-
 /** Open native folder picker. Returns path or null if cancelled. */
 export async function openDicomDialog(): Promise<string | null> {
   return invoke<string | null>('open_dicom_dialog');
-}
-
-/** Load DICOM directory into Rust backend. Returns volume metadata. */
-export async function loadDicom(path: string): Promise<VolumeInfo> {
-  return invoke<VolumeInfo>('load_dicom', { path });
 }
 
 /** Get list of recently opened DICOM folder paths. */
@@ -40,51 +24,98 @@ export async function loadSeeds(dicomPath: string): Promise<string | null> {
   return invoke<string | null>('load_seeds', { dicomPath });
 }
 
-/**
- * Get a single slice as raw i16 LE bytes from the Rust backend.
- * Tauri serializes Vec<u8> as a number[], so we convert back.
- */
-export async function getSlice(
-  axis: string,
-  idx: number,
-): Promise<ArrayBuffer> {
-  const bytes = await invoke<number[]>('get_slice', { axis, idx });
-  return new Uint8Array(bytes).buffer;
-}
+/* ── DICOM scan & bulk load (fast path) ────────────────────── */
 
-/* ── Dual-energy series scanning & loading ─────────────────── */
-
-export type SeriesInfo = {
-  series_uid: string;
+export interface SeriesDescriptor {
+  uid: string;
   description: string;
+  image_comments: string | null;
+  rows: number;
+  cols: number;
   num_slices: number;
-  kev_label: number | null;
-};
-
-export type DualEnergyInfo = {
-  shape: [number, number, number];
-  spacing: [number, number, number];
-  low_kev: number;
-  high_kev: number;
+  pixel_spacing: [number, number];
+  slice_spacing: number;
+  orientation: [number, number, number, number, number, number];
+  rescale_slope: number;
+  rescale_intercept: number;
+  window_center: number;
+  window_width: number;
   patient_name: string;
-};
-
-/** Scan DICOM directory for available series. */
-export async function scanSeries(path: string): Promise<SeriesInfo[]> {
-  return invoke<SeriesInfo[]>('scan_series', { path });
+  study_description: string;
+  file_paths: string[];
+  slice_positions_z: number[];
 }
 
-/** Load dual-energy volumes from two selected series. */
-export async function loadDualEnergy(
-  path: string,
-  lowSeriesUid: string,
-  highSeriesUid: string,
-  lowKev: number,
-  highKev: number,
-): Promise<DualEnergyInfo> {
-  return invoke<DualEnergyInfo>('load_dual_energy', {
-    path, lowSeriesUid, highSeriesUid, lowKev, highKev,
+export interface VolumeMetadata {
+  series_uid: string;
+  series_description: string;
+  image_comments: string | null;
+  rows: number;
+  cols: number;
+  num_slices: number;
+  pixel_spacing: [number, number];
+  slice_spacing: number;
+  orientation: [number, number, number, number, number, number];
+  window_center: number;
+  window_width: number;
+  patient_name: string;
+  study_description: string;
+  slice_positions_z: number[];
+}
+
+export type DicomLoadPhase = 'scanning' | 'scanned' | 'decoding' | 'done';
+
+export interface DicomLoadProgress {
+  phase: DicomLoadPhase;
+  done: number;
+  total: number;
+}
+
+/** Scan a DICOM folder (header-only). Header-only; no pixel data decoded. */
+export async function scanSeries(dir: string): Promise<SeriesDescriptor[]> {
+  return invoke<SeriesDescriptor[]>('scan_series_v2', { path: dir });
+}
+
+/**
+ * Load one series as a single bulk transfer: returns the parsed metadata and
+ * a view over the decoded i16 HU voxels (z-major).
+ */
+export async function loadSeries(
+  dir: string,
+  uid: string,
+): Promise<{ metadata: VolumeMetadata; voxels: Int16Array }> {
+  const buf = await invoke<ArrayBuffer>('load_series_v2', { dir, uid });
+  const view = new DataView(buf);
+  const metaLen = view.getUint32(0, true);
+  const metaBytes = new Uint8Array(buf, 4, metaLen);
+  const metadata = JSON.parse(new TextDecoder().decode(metaBytes)) as VolumeMetadata;
+
+  const voxelOffset = 4 + metaLen;
+  let voxels: Int16Array;
+  if (voxelOffset % 2 === 0) {
+    voxels = new Int16Array(buf, voxelOffset);
+  } else {
+    // Int16Array requires 2-byte alignment. If metaLen is odd, copy the bytes.
+    const copy = new Uint8Array(buf.byteLength - voxelOffset);
+    copy.set(new Uint8Array(buf, voxelOffset));
+    voxels = new Int16Array(copy.buffer);
+  }
+  return { metadata, voxels };
+}
+
+/**
+ * Subscribe to DICOM load progress events emitted by scan_series_v2 and
+ * load_series_v2. Returns an unlisten function — call it when the consumer
+ * is finished to avoid leaks.
+ */
+export async function onDicomLoadProgress(
+  handler: (progress: DicomLoadProgress) => void,
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+  const unlisten = await listen<DicomLoadProgress>('dicom_load_progress', (e) => {
+    handler(e.payload);
   });
+  return unlisten;
 }
 
 /* ── Annotation + Snake commands ─────────────────────────── */
