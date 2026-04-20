@@ -154,15 +154,29 @@
       return null;
     };
 
-    // --- 1. Peak search in ~3 mm central window ---
-    const searchRadiusPx = Math.max(3, Math.round(3.0 / mmPerPixel));
+    // --- 1. Peak search in up to 5 mm around the centerline point ---
+    // The centerline is a cubic-spline fit through manually placed seeds;
+    // between seeds it often drifts 3–5 mm off the true lumen, especially
+    // on curved segments. A 3 mm search window misses the lumen entirely
+    // in those cases and we'd reject a vessel that is plainly visible to
+    // the user. 5 mm is a good compromise: wide enough to recover from
+    // typical spline drift, narrow enough that we never latch onto a
+    // completely unrelated bright structure (aorta ostium, adjacent LAD)
+    // inside the 15 mm half-FOV crop.
+    const searchRadiusPx = Math.max(6, Math.round(5.0 / mmPerPixel));
+    const searchRadiusSqPx = searchRadiusPx * searchRadiusPx;
     let peakHU = -Infinity;
     let peakRow = center;
     let peakCol = center;
-    const r0 = Math.max(0, center - searchRadiusPx);
-    const r1 = Math.min(sz - 1, center + searchRadiusPx);
-    for (let r = r0; r <= r1; r++) {
-      for (let c = r0; c <= r1; c++) {
+    const sr0 = Math.max(0, center - searchRadiusPx);
+    const sr1 = Math.min(sz - 1, center + searchRadiusPx);
+    for (let r = sr0; r <= sr1; r++) {
+      const dr = r - center;
+      const dr2 = dr * dr;
+      for (let c = sr0; c <= sr1; c++) {
+        const dc = c - center;
+        // Circular search, not square — avoids preferring corner pixels
+        if (dr2 + dc * dc > searchRadiusSqPx) continue;
         const v = data[r * sz + c];
         if (Number.isFinite(v) && v > peakHU) {
           peakHU = v;
@@ -173,63 +187,73 @@
     }
     if (!Number.isFinite(peakHU)) return reject();
 
-    // --- 2. Background statistics from outer ring (keV-invariant) ---
-    // We can't use any absolute HU cut-off because the input is a
-    // monoenergetic keV reconstruction: at 40 keV an enhanced coronary
-    // lumen can be 800+ HU with myocardium at 250 HU, while at 180 keV
-    // the same lumen sits at ~120 HU and myocardium at ~60 HU. A fixed
-    // "200 HU floor" is implicitly tuned to ~70 keV / 120 kVp and wrong
-    // for everything else.
+    // --- 2. Background from annulus AROUND THE PEAK (keV-invariant) ---
+    // Absolute HU cut-offs are unusable because the input is a
+    // monoenergetic reconstruction: at 40 keV lumen is 800+ HU and
+    // myocardium 250 HU; at 180 keV the same anatomy reads ~120 and ~60.
+    // A "200 HU floor" works only at ~70 keV / 120 kVp and is wrong
+    // elsewhere. Instead characterise the *local* HU distribution.
     //
-    // Instead, characterise the *local* HU distribution: the outer image
-    // ring is mostly perivascular fat / muscle / air, and its median +
-    // MAD (median absolute deviation) give a robust, keV-adaptive handle
-    // on "background" and "noise". Every threshold downstream is a ratio
-    // of peak-to-background, so the algorithm behaves identically at any
-    // monoenergetic reconstruction.
-    const outerRing: number[] = [];
-    for (let i = 0; i < sz; i++) {
-      const candidates = [
-        data[i],
-        data[(sz - 1) * sz + i],
-        data[i * sz],
-        data[i * sz + (sz - 1)],
-      ];
-      for (const v of candidates) {
-        if (Number.isFinite(v)) outerRing.push(v);
+    // The old version sampled the outer image border. That's poisoned by
+    // partial-volume lung, air, or an adjacent vessel at the crop edge —
+    // MAD explodes, the contrast test fails, and we reject a perfectly
+    // good slice. Sampling an annulus *around the peak* (not the image
+    // centre) lands squarely in the perivascular tissue (fat / muscle)
+    // regardless of where the lumen sits in the crop.
+    //
+    // Annulus 5–8 mm from peak: outside any plausible coronary lumen,
+    // inside the typical myocardial/fat neighbourhood.
+    const annulusInnerPx = Math.max(3, Math.round(5.0 / mmPerPixel));
+    const annulusOuterPx = Math.max(annulusInnerPx + 2, Math.round(8.0 / mmPerPixel));
+    const annulusInnerSq = annulusInnerPx * annulusInnerPx;
+    const annulusOuterSq = annulusOuterPx * annulusOuterPx;
+    const annulus: number[] = [];
+    const ar0 = Math.max(0, peakRow - annulusOuterPx);
+    const ar1 = Math.min(sz - 1, peakRow + annulusOuterPx);
+    const ac0 = Math.max(0, peakCol - annulusOuterPx);
+    const ac1 = Math.min(sz - 1, peakCol + annulusOuterPx);
+    for (let r = ar0; r <= ar1; r++) {
+      const dr = r - peakRow;
+      const dr2 = dr * dr;
+      for (let c = ac0; c <= ac1; c++) {
+        const dc = c - peakCol;
+        const dsq = dr2 + dc * dc;
+        if (dsq < annulusInnerSq || dsq > annulusOuterSq) continue;
+        const v = data[r * sz + c];
+        if (Number.isFinite(v)) annulus.push(v);
       }
     }
-    if (outerRing.length < 4) return reject();
-    const sortedRing = [...outerRing].sort((a, b) => a - b);
-    const bgHU = sortedRing[Math.floor(sortedRing.length / 2)];
-    // 1.4826·MAD is the Gaussian-consistent σ estimator; floor at 15 HU
+    if (annulus.length < 20) return reject();
+    annulus.sort((a, b) => a - b);
+    const bgHU = annulus[Math.floor(annulus.length / 2)];
+    // 1.4826·MAD is the Gaussian-consistent σ estimator; floor at 10 HU
     // so super-clean images don't set an absurdly small noise level.
-    const absDev = outerRing.map((v) => Math.abs(v - bgHU)).sort((a, b) => a - b);
+    const absDev = annulus.map((v) => Math.abs(v - bgHU)).sort((a, b) => a - b);
     const bgMad = absDev[Math.floor(absDev.length / 2)];
-    const bgNoise = Math.max(bgMad * 1.4826, 15);
+    const bgNoise = Math.max(bgMad * 1.4826, 10);
 
-    // --- 3. Contrast check (keV-invariant replacement for the 120 HU floor) ---
-    // Require the lumen peak to stand at least 5 σ above background.
-    // This expresses "there has to be real enhancement" without
-    // mentioning any absolute HU level — at 40 keV the contrast is
-    // hundreds of HU, at 180 keV only dozens, and both clear a 5 σ bar
-    // when the vessel is truly present. Below 5 σ the centerline is
-    // likely drifting through tissue and we'd be measuring noise.
+    // --- 3. Contrast check (keV-invariant) ---
+    // Require the lumen peak to stand at least 3 σ above background.
+    // 3 σ means the peak is very unlikely to be tissue noise (≈ 99.7 %
+    // confidence for Gaussian noise). At 40 keV the contrast is hundreds
+    // of HU, at 180 keV only dozens, and both clear a 3 σ bar when real
+    // vessel enhancement is present. Below 3 σ the "peak" is probably
+    // just the local tissue's loudest pixel.
     const contrast = peakHU - bgHU;
-    if (contrast < 5 * bgNoise) return reject();
+    if (contrast < 3 * bgNoise) return reject();
 
-    // --- 4. Relative half-max threshold ---
+    // --- 4. Pure half-max threshold ---
     // Classic FWHM: boundary at the midpoint between lumen peak and
-    // background. No HU constants — the threshold moves with the keV
-    // choice automatically.
+    // background. No HU constants — the threshold tracks keV.
     //
-    // 0.55 (slightly above 0.5) accounts for the fact that enhanced
-    // myocardium typically sits around 30–35 % of the lumen-to-fat
-    // contrast span; a strictly-half-max threshold would include a thin
-    // muscle rim. This small asymmetry is still keV-invariant as long
-    // as iodine dominates lumen brightness — true for any clinically
-    // reasonable monoenergetic reconstruction.
-    const halfMax = bgHU + 0.55 * contrast;
+    // We previously used 0.55 × contrast (slightly above 0.5) to keep
+    // enhanced myocardium out of the mask, but that was too strict for
+    // small lumens (1.5–2 mm): partial-volume smoothing gives them a
+    // Gaussian-ish profile, so a 0.55 threshold only captures a 3-pixel
+    // core and the area falls below the minAreaPx cutoff. The
+    // morphological opening below already defends against muscle
+    // leakage, so we can keep the threshold at the canonical 0.5.
+    const halfMax = bgHU + 0.5 * contrast;
 
     // --- 4. 4-connected region growing from the peak ---
     const MAX_RADIUS_MM = 4.0;
