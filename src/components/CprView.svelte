@@ -488,25 +488,53 @@
     // Mode badge removed — toolbar already shows the mode.
   }
 
-  /** Full re-render: image + overlays. */
-  function repaintCanvas() {
-    if (!cprCanvas || !cprImageData) return;
-    renderCprToCanvas(
-      cprCanvas,
-      cprImageData,
-      cprWidth,
-      cprHeight,
-      windowCenter,
-      windowWidth,
-    );
-    drawOverlays(cprCanvas);
+  // ---- Two-canvas compositor ----
+  //
+  // The old single-canvas repaint ran a 260k–520k pixel RGBA loop on every
+  // mousemove (hover / seed drag / needle position change) because the
+  // `$effect` that painted the image also depended on overlay state. Moving
+  // the slider felt like ~30-60 ms per frame on the main thread.
+  //
+  // Now the HU→gray loop writes to a hidden buffer canvas once per image
+  // change (W/L, FAI, new render). All overlay-only updates just
+  // `drawImage(buffer)` + redraw overlays, which is ~1 ms regardless of
+  // image size.
+
+  /** Hidden buffer canvas that holds the rendered CPR image pixels. */
+  let bufferCanvas: HTMLCanvasElement | null = null;
+  /** True once `bufferCanvas` has image content matching current cprImageData. */
+  let bufferReady = false;
+
+  function ensureBuffer(w: number, h: number): HTMLCanvasElement {
+    if (!bufferCanvas) bufferCanvas = document.createElement('canvas');
+    if (bufferCanvas.width !== w) bufferCanvas.width = w;
+    if (bufferCanvas.height !== h) bufferCanvas.height = h;
+    return bufferCanvas;
   }
 
-  // Re-render when FAI overlay is toggled (uses cached image data)
-  $effect(() => {
-    showFaiOverlay; // track dependency
-    repaintCanvas();
-  });
+  /** Paint raw HU data through the window/level + FAI transform into the buffer. */
+  function paintImageToBuffer() {
+    if (!cprImageData) {
+      bufferReady = false;
+      return;
+    }
+    const buf = ensureBuffer(cprWidth, cprHeight);
+    renderCprToCanvas(buf, cprImageData, cprWidth, cprHeight, windowCenter, windowWidth);
+    bufferReady = true;
+  }
+
+  /** Fast path: blit the buffer to the visible canvas, then draw overlays. */
+  function compositeToMain() {
+    if (!cprCanvas) return;
+    if (!bufferReady || !bufferCanvas) return;
+    // Keep the visible canvas's pixel dims in sync with the buffer so the
+    // blit is 1:1 (no sub-pixel blur, no implicit resampling).
+    if (cprCanvas.width !== bufferCanvas.width) cprCanvas.width = bufferCanvas.width;
+    if (cprCanvas.height !== bufferCanvas.height) cprCanvas.height = bufferCanvas.height;
+    const ctx = cprCanvas.getContext('2d')!;
+    ctx.drawImage(bufferCanvas, 0, 0);
+    drawOverlays(cprCanvas);
+  }
 
   // ---- Phase 1: Build frame when centerline changes ----
 
@@ -636,27 +664,36 @@
     }
   }
 
-  // Re-render canvas when image data, W/L, needle positions change
+  // Image-level changes: raw HU data, W/L window, FAI colour overlay — these
+  // all require re-running the per-pixel transform, so repaint the buffer
+  // and composite.
   $effect(() => {
-    // Touch reactive deps so Svelte tracks them for this effect
     void cprImageData;
     void windowCenter;
     void windowWidth;
+    void showFaiOverlay;
+
+    paintImageToBuffer();
+    compositeToMain();
+  });
+
+  // Overlay-only changes: seed dots, needle lines, arclength ticks, hover
+  // highlight, ostium marker, projection mode. None of these touch pixel
+  // values, so we skip `paintImageToBuffer` entirely and just blit + draw
+  // overlays (~1 ms vs the old ~30–60 ms).
+  $effect(() => {
     void needleAFraction;
     void needleBFraction;
     void needleCFraction;
     void arclengths;
     void cprMode;
-    // Track seed state for centerline overlay dots
     void seedStore.activeVesselData;
     void seedStore.selectedSeedIndex;
-    // Track ostium for overlay update
     void activeOstiumFrac;
-    // Track projection info for seed overlay
     void projectionInfo;
     void hoverSeedIndex;
 
-    repaintCanvas();
+    compositeToMain();
   });
 
   // ---- Cross-section computation (uses cached frame, raw binary) ----
