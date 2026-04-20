@@ -189,12 +189,22 @@
       ? outerRing[Math.floor(outerRing.length * 0.25)]
       : -80;
 
-    // --- 3. Per-slice half-max threshold with a conservative floor ---
-    // 180 HU floor prevents leaks into enhanced myocardium (typically
-    // 80–150 HU) even when a neighbouring chamber pushes the background
-    // up. A real enhanced coronary lumen is ≥ 250 HU so this cutoff does
-    // not miss true lumens in any clinically reasonable scan.
-    const halfMax = Math.max(180, (peakHU + bgHU) / 2);
+    // --- 3. Per-slice threshold with both an absolute and a relative floor ---
+    // The old (peak + bg) / 2 underestimated the threshold when the vessel
+    // sits right next to enhanced myocardium — the "bridge" between lumen
+    // (e.g. 350 HU) and myocardium (e.g. 150 HU) passed at ~250 HU, so the
+    // region grower flowed into the muscle and reported a 5–6 mm
+    // "diameter" for a 3 mm RCA.
+    //
+    // Use the strictest of three floors:
+    //   - 200 HU absolute (keeps enhanced myocardium ≤ 150 HU out
+    //     regardless of scan)
+    //   - peak × 0.6 (scales up with bright lumens so we're not
+    //     capturing dim adjacent tissue)
+    //   - bgHU + 80 (adapts when the outer ring itself is bright —
+    //     e.g. slice cuts into a contrast-filled chamber; threshold
+    //     floats above that level so we only measure the lumen peak)
+    const halfMax = Math.max(200, peakHU * 0.6, bgHU + 80);
 
     // --- 4. 4-connected region growing from the peak ---
     const MAX_RADIUS_MM = 4.0;
@@ -248,6 +258,84 @@
     // mm/pixel) is required. Smaller blobs are noise or a stray bright
     // pixel, not a lumen.
     const minAreaPx = Math.max(10, Math.ceil(0.5 / (mmPerPixel * mmPerPixel)));
+    if (maskArea < minAreaPx) return reject();
+
+    // --- 4a. Morphological opening (erode then dilate, 4-connected) ---
+    // Even with a stricter half-max, a narrow bridge (1–2 pixels wide)
+    // between the lumen and adjacent enhanced myocardium can still slip
+    // through. Opening severs these bridges: erosion removes boundary
+    // pixels (thin bridges disappear first), then we re-extract the
+    // connected component containing the peak, then dilate it back. The
+    // final mask is the lumen without any thin attached protrusions.
+    const eroded = new Uint8Array(sz * sz);
+    for (let r = 1; r < sz - 1; r++) {
+      const base = r * sz;
+      for (let c = 1; c < sz - 1; c++) {
+        const i = base + c;
+        if (mask[i] && mask[i - 1] && mask[i + 1]
+            && mask[i - sz] && mask[i + sz]) {
+          eroded[i] = 1;
+        }
+      }
+    }
+
+    // If the peak itself didn't survive erosion, the blob is so thin that
+    // the whole thing is effectively a ribbon — not a lumen. Reject.
+    if (!eroded[seedIdx]) return reject();
+
+    // BFS on the eroded mask from the peak to isolate *its* connected
+    // component. Opening can fragment the original mask into disjoint
+    // pieces (main lumen + severed myocardial blob); we keep only the
+    // piece containing the peak.
+    const peakComp = new Uint8Array(sz * sz);
+    qHead = 0;
+    qTail = 0;
+    queue[qTail++] = seedIdx;
+    peakComp[seedIdx] = 1;
+    while (qHead < qTail) {
+      const idx = queue[qHead++];
+      const r = (idx / sz) | 0;
+      const c = idx - r * sz;
+      if (r > 0) {
+        const n = idx - sz;
+        if (eroded[n] && !peakComp[n]) { peakComp[n] = 1; queue[qTail++] = n; }
+      }
+      if (r < sz - 1) {
+        const n = idx + sz;
+        if (eroded[n] && !peakComp[n]) { peakComp[n] = 1; queue[qTail++] = n; }
+      }
+      if (c > 0) {
+        const n = idx - 1;
+        if (eroded[n] && !peakComp[n]) { peakComp[n] = 1; queue[qTail++] = n; }
+      }
+      if (c < sz - 1) {
+        const n = idx + 1;
+        if (eroded[n] && !peakComp[n]) { peakComp[n] = 1; queue[qTail++] = n; }
+      }
+    }
+
+    // Dilate the peak-component back by 1 pixel to restore the lumen to
+    // roughly its original size (minus any severed bridges).
+    const finalMask = new Uint8Array(sz * sz);
+    let finalArea = 0;
+    for (let r = 0; r < sz; r++) {
+      const base = r * sz;
+      for (let c = 0; c < sz; c++) {
+        const i = base + c;
+        if (peakComp[i]) {
+          if (!finalMask[i]) { finalMask[i] = 1; finalArea++; }
+          if (r > 0 && !finalMask[i - sz]) { finalMask[i - sz] = 1; finalArea++; }
+          if (r < sz - 1 && !finalMask[i + sz]) { finalMask[i + sz] = 1; finalArea++; }
+          if (c > 0 && !finalMask[i - 1]) { finalMask[i - 1] = 1; finalArea++; }
+          if (c < sz - 1 && !finalMask[i + 1]) { finalMask[i + 1] = 1; finalArea++; }
+        }
+      }
+    }
+
+    // Reassign mask to the opened mask so the contour scan below picks
+    // this up too.
+    for (let i = 0; i < sz * sz; i++) mask[i] = finalMask[i];
+    maskArea = finalArea;
     if (maskArea < minAreaPx) return reject();
 
     // --- 5. Area-equivalent diameter ---

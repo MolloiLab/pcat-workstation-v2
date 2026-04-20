@@ -213,6 +213,45 @@
     ctx.putImageData(imgData, 0, 0);
   }
 
+  // ---- Centerline projection cache ----
+  //
+  // `worldToStretchedCpr` for every centerline point costs ~0.02 ms; with
+  // 100 points that's 2 ms per `drawOverlays` call, and the polyline is
+  // redrawn on every overlay effect (60 Hz during needle scroll). The
+  // projection is a pure function of (projectionInfo, canvas w, canvas h)
+  // — cache by identity so back-to-back repaints reuse the same array.
+
+  let centerlineProjCache: Array<[number, number] | null> | null = null;
+  let centerlineProjCacheKey: {
+    info: CprProjectionInfo | null;
+    w: number;
+    h: number;
+  } = { info: null, w: 0, h: 0 };
+
+  function getCachedCenterlineProj(
+    info: CprProjectionInfo,
+    w: number,
+    h: number,
+  ): Array<[number, number] | null> {
+    if (
+      centerlineProjCache !== null
+      && centerlineProjCacheKey.info === info
+      && centerlineProjCacheKey.w === w
+      && centerlineProjCacheKey.h === h
+    ) {
+      return centerlineProjCache;
+    }
+    const nPos = info.positions.length;
+    const step = Math.max(1, Math.floor(nPos / 200));
+    const out: Array<[number, number] | null> = [];
+    for (let j = 0; j < nPos; j += step) {
+      out.push(worldToStretchedCpr(info.positions[j], info, w, h));
+    }
+    centerlineProjCache = out;
+    centerlineProjCacheKey = { info, w, h };
+    return out;
+  }
+
   /** Draw needle lines and arclength ticks as overlay. */
   function drawOverlays(cvs: HTMLCanvasElement) {
     const ctx = cvs.getContext('2d')!;
@@ -410,21 +449,24 @@
     }
 
     // --- Centerline polyline on CPR ---
+    // The polyline is redrawn on every overlay repaint (which fires 60 Hz
+    // during a needle scroll / drag). Recomputing 100+ `worldToStretchedCpr`
+    // — each of which is an O(n_cols=128) nearest-segment search — burns
+    // ~2 ms per paint. Cache the projected 2-D points and invalidate only
+    // when the inputs that affect projection actually change.
     if (projectionInfo && cprMode === 'stretched') {
       const color = VESSEL_COLORS[seedStore.activeVessel];
-      const nPos = projectionInfo.positions.length;
-      const step = Math.max(1, Math.floor(nPos / 200)); // sample every few points
+      const projPts = getCachedCenterlineProj(projectionInfo, w, h);
 
       ctx.beginPath();
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = 0.5;
       let started = false;
-      for (let j = 0; j < nPos; j += step) {
-        const projected = worldToStretchedCpr(projectionInfo.positions[j], projectionInfo, w, h);
-        if (!projected) { started = false; continue; }
-        if (!started) { ctx.moveTo(projected[0], projected[1]); started = true; }
-        else { ctx.lineTo(projected[0], projected[1]); }
+      for (const p of projPts) {
+        if (!p) { started = false; continue; }
+        if (!started) { ctx.moveTo(p[0], p[1]); started = true; }
+        else { ctx.lineTo(p[0], p[1]); }
       }
       ctx.stroke();
       ctx.globalAlpha = 1.0;
@@ -787,19 +829,25 @@
     navigateToWorldPos(pos);
   }
 
-  // Mousemove / wheel can fire faster than cornerstone3D can re-render the
-  // three MPR viewports. `navigateToWorldPos` pushes a camera update + render
-  // on all three, which is a real WebGL repaint — easily 10-20 ms on a CCTA
-  // volume. Coalesce to one call per animation frame so dragging the needle
-  // or scrolling doesn't queue up a backlog of stale navigation requests.
-  let pendingNavigate = false;
+  // Mousemove / wheel fire *much* faster than cornerstone3D can re-render
+  // the three MPR viewports. Each `navigateToWorldPos` call does
+  // setCamera + render on all three, which on a CCTA volume is ~15–30 ms of
+  // real WebGL work per call. rAF-throttling (60 Hz) still asks for 60 ×
+  // 20 ms = 1200 ms/sec of MPR work — the main thread can't keep up and
+  // frames get dropped.
+  //
+  // Debounce instead: during active scroll/drag the MPR panels don't
+  // update at all, and they snap to the final position 50 ms after the
+  // user stops. 50 ms is under one visual frame of perceived "delay" on a
+  // release, but removes *all* MPR work from the hot path. Primary CPR
+  // feedback (overlay lines, cross-sections) stays real-time.
+  let navigateTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleNavigate() {
-    if (pendingNavigate) return;
-    pendingNavigate = true;
-    requestAnimationFrame(() => {
-      pendingNavigate = false;
+    if (navigateTimer !== null) clearTimeout(navigateTimer);
+    navigateTimer = setTimeout(() => {
+      navigateTimer = null;
       navigateToNeedlePos();
-    });
+    }, 50);
   }
 
   // Precision touchpads fire wheel events at ~240 Hz. If we mutate
