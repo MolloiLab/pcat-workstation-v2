@@ -5,6 +5,7 @@ pub mod contour;
 pub mod cpr;
 pub mod curved_cpr;
 pub mod dicom_loader;
+pub mod dicom_errors;
 pub mod error;
 pub mod interp;
 pub mod mmd;
