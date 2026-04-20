@@ -7,6 +7,7 @@ pub mod curved_cpr;
 pub mod dicom_loader;
 pub mod dicom_errors;
 pub mod dicom_scan;
+pub mod dicom_decode;
 pub mod error;
 pub mod interp;
 pub mod mmd;

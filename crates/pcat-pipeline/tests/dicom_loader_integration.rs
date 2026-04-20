@@ -65,3 +65,34 @@ async fn scan_errors_when_folder_missing() {
     let s = format!("{err}");
     assert!(s.contains("folder not readable") || s.contains("No such file"));
 }
+
+#[tokio::test]
+async fn decode_slice_returns_expected_hu() {
+    use pcat_pipeline::dicom_decode::decode_slice_i16;
+    use pcat_pipeline::dicom_scan::scan_series;
+
+    let dir = tempfile::tempdir().unwrap();
+    common::write_mini_ct(dir.path());
+
+    let series = scan_series(dir.path()).await.unwrap();
+    let desc = &series[0];
+    let px = decode_slice_i16(
+        &desc.file_paths[0],
+        desc.rescale_slope,
+        desc.rescale_intercept,
+        desc.rows,
+        desc.cols,
+    )
+    .unwrap();
+
+    assert_eq!(px.len(), (desc.rows * desc.cols) as usize);
+    // Fixture center: (1024 - 0*30 + 0*5) * 1 + (-1024) = 0 HU exactly
+    let center_idx = ((desc.rows / 2) * desc.cols + desc.cols / 2) as usize;
+    assert!(
+        (px[center_idx] - 0).abs() < 2,
+        "center HU should be ~0, got {}",
+        px[center_idx]
+    );
+    // Corner: (1024 - sqrt(2*32^2)*30 + 0) * 1 + (-1024) = very negative
+    assert!(px[0] < -200, "corner should be negative HU, got {}", px[0]);
+}
