@@ -73,7 +73,7 @@ export interface DicomLoadProgress {
 
 /** Scan a DICOM folder (header-only). Header-only; no pixel data decoded. */
 export async function scanSeries(dir: string): Promise<SeriesDescriptor[]> {
-  return invoke<SeriesDescriptor[]>('scan_series_v2', { path: dir });
+  return invoke<SeriesDescriptor[]>('scan_series', { path: dir });
 }
 
 /**
@@ -84,7 +84,7 @@ export async function loadSeries(
   dir: string,
   uid: string,
 ): Promise<{ metadata: VolumeMetadata; voxels: Int16Array }> {
-  const buf = await invoke<ArrayBuffer>('load_series_v2', { dir, uid });
+  const buf = await invoke<ArrayBuffer>('load_series', { dir, uid });
   const view = new DataView(buf);
   const metaLen = view.getUint32(0, true);
   const metaBytes = new Uint8Array(buf, 4, metaLen);
@@ -104,8 +104,42 @@ export async function loadSeries(
 }
 
 /**
- * Subscribe to DICOM load progress events emitted by scan_series_v2 and
- * load_series_v2. Returns an unlisten function — call it when the consumer
+ * Load low-energy + high-energy DICOM series in parallel for dual-energy MMD.
+ *
+ * Folder names MUST contain a keV label (e.g. `MonoPlus_70keV`,
+ * `MonoPlus_150keV`) — lab-internal data has `ImageComments` stripped and
+ * `SeriesDescription` mislabeled, so the folder name is the only reliable
+ * source of keV.
+ *
+ * Populates both `state.dual_energy` (for MMD) and `state.volume` (low),
+ * and returns the low-energy framed bundle so the caller can build the
+ * cornerstone volume exactly as with `loadSeries`.
+ */
+export async function loadDualEnergy(
+  lowDir: string,
+  highDir: string,
+): Promise<{ metadata: VolumeMetadata; voxels: Int16Array }> {
+  const buf = await invoke<ArrayBuffer>('load_dual_energy', { lowDir, highDir });
+  const view = new DataView(buf);
+  const metaLen = view.getUint32(0, true);
+  const metaBytes = new Uint8Array(buf, 4, metaLen);
+  const metadata = JSON.parse(new TextDecoder().decode(metaBytes)) as VolumeMetadata;
+
+  const voxelOffset = 4 + metaLen;
+  let voxels: Int16Array;
+  if (voxelOffset % 2 === 0) {
+    voxels = new Int16Array(buf, voxelOffset);
+  } else {
+    const copy = new Uint8Array(buf.byteLength - voxelOffset);
+    copy.set(new Uint8Array(buf, voxelOffset));
+    voxels = new Int16Array(copy.buffer);
+  }
+  return { metadata, voxels };
+}
+
+/**
+ * Subscribe to DICOM load progress events emitted by scan_series and
+ * load_series. Returns an unlisten function — call it when the consumer
  * is finished to avoid leaks.
  */
 export async function onDicomLoadProgress(

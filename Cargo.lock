@@ -3065,6 +3065,7 @@ dependencies = [
  "dicom",
  "ndarray",
  "pcat-pipeline",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
