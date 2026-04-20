@@ -146,6 +146,133 @@ pub fn group_by_series(headers: Vec<SliceHeader>) -> HashMap<String, Vec<SliceHe
     groups
 }
 
+use futures::stream::{self, StreamExt};
+use tokio::sync::Semaphore;
+
+/// Concurrent header opens. Empirically 32–64 is the SMB sweet spot; 48 is a
+/// conservative middle value.
+const SCAN_CONCURRENCY: usize = 48;
+
+/// Public descriptor for a single series, used by Tauri commands and frontend.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SeriesDescriptor {
+    pub uid: String,
+    pub description: String,
+    pub image_comments: Option<String>,
+    pub rows: u32,
+    pub cols: u32,
+    pub num_slices: usize,
+    pub pixel_spacing: [f64; 2],
+    pub slice_spacing: f64,
+    pub orientation: [f64; 6],
+    pub rescale_slope: f64,
+    pub rescale_intercept: f64,
+    pub window_center: f64,
+    pub window_width: f64,
+    pub patient_name: String,
+    pub study_description: String,
+    pub file_paths: Vec<PathBuf>,
+    /// Per-slice z position (parallel to `file_paths`).
+    pub slice_positions_z: Vec<f64>,
+}
+
+/// Walk a folder (non-recursively) and return one SeriesDescriptor per
+/// SeriesInstanceUID found. Header-only; does not touch pixel data.
+pub async fn scan_series(dir: &Path) -> Result<Vec<SeriesDescriptor>, DicomLoadError> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_file() {
+            paths.push(entry.path());
+        }
+    }
+
+    let scanned = paths.len();
+    if scanned == 0 {
+        return Err(DicomLoadError::NoDicoms { scanned: 0, skipped: 0 });
+    }
+
+    let sem = std::sync::Arc::new(Semaphore::new(SCAN_CONCURRENCY));
+    let headers: Vec<Option<SliceHeader>> = stream::iter(paths.into_iter().map(|p| {
+        let sem = sem.clone();
+        async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
+            tokio::task::spawn_blocking(move || read_header(&p).ok().flatten())
+                .await
+                .ok()
+                .flatten()
+        }
+    }))
+    .buffer_unordered(SCAN_CONCURRENCY)
+    .collect()
+    .await;
+
+    let skipped = headers.iter().filter(|h| h.is_none()).count();
+    let valid: Vec<SliceHeader> = headers.into_iter().flatten().collect();
+    if valid.is_empty() {
+        return Err(DicomLoadError::NoDicoms { scanned, skipped });
+    }
+
+    let groups = group_by_series(valid);
+    let mut descriptors: Vec<SeriesDescriptor> = groups
+        .into_iter()
+        .map(|(uid, slices)| descriptor_from_slices(uid, slices))
+        .collect();
+    descriptors.sort_by(|a, b| a.uid.cmp(&b.uid));
+    Ok(descriptors)
+}
+
+fn descriptor_from_slices(uid: String, slices: Vec<SliceHeader>) -> SeriesDescriptor {
+    let first = &slices[0];
+    let rows = first.rows;
+    let cols = first.cols;
+    let pixel_spacing = first.pixel_spacing;
+    let orientation = first.orientation;
+    let rescale_slope = first.rescale_slope;
+    let rescale_intercept = first.rescale_intercept;
+    let window_center = first.window_center;
+    let window_width = first.window_width;
+    let patient_name = first.patient_name.clone();
+    let study_description = first.study_description.clone();
+    let description = first.series_description.clone();
+    let image_comments = first.image_comments.clone();
+
+    let file_paths: Vec<PathBuf> = slices.iter().map(|h| h.path.clone()).collect();
+    let slice_positions_z: Vec<f64> = slices
+        .iter()
+        .enumerate()
+        .map(|(i, h)| h.image_position_z.unwrap_or(i as f64))
+        .collect();
+
+    // Infer slice spacing from the first two positions (or default 1.0).
+    let slice_spacing = if slice_positions_z.len() >= 2 {
+        (slice_positions_z[1] - slice_positions_z[0]).abs().max(1e-6)
+    } else {
+        1.0
+    };
+
+    SeriesDescriptor {
+        uid,
+        description,
+        image_comments,
+        rows,
+        cols,
+        num_slices: slices.len(),
+        pixel_spacing,
+        slice_spacing,
+        orientation,
+        rescale_slope,
+        rescale_intercept,
+        window_center,
+        window_width,
+        patient_name,
+        study_description,
+        file_paths,
+        slice_positions_z,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
