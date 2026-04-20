@@ -4,6 +4,7 @@
 //! returns a `SliceHeader` with only the tags we care about for indexing and
 //! grouping. On an SMB share this transfers ~4 KB per file instead of ~512 KB.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dicom::core::Tag;
@@ -121,6 +122,30 @@ fn read_i32(obj: &FileDicomObject<InMemDicomObject>, tag: Tag) -> Option<i32> {
     obj.element(tag).ok().and_then(|e| e.to_int::<i32>().ok())
 }
 
+/// Partition a flat list of slice headers into a map keyed by SeriesInstanceUID,
+/// with each group sorted by `image_position_z` (falling back to
+/// `instance_number`, then preserving input order for fully-unordered series).
+pub fn group_by_series(headers: Vec<SliceHeader>) -> HashMap<String, Vec<SliceHeader>> {
+    let mut groups: HashMap<String, Vec<SliceHeader>> = HashMap::new();
+    for h in headers {
+        groups.entry(h.series_uid.clone()).or_default().push(h);
+    }
+    for slices in groups.values_mut() {
+        // Stable sort preserves original order for tied keys; pairs with the
+        // "no key" fallback branch below so unordered series stay in input order.
+        slices.sort_by(|a, b| {
+            match (a.image_position_z, b.image_position_z) {
+                (Some(za), Some(zb)) => za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal),
+                _ => match (a.instance_number, b.instance_number) {
+                    (Some(ia), Some(ib)) => ia.cmp(&ib),
+                    _ => std::cmp::Ordering::Equal,
+                },
+            }
+        });
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,4 +175,79 @@ mod tests {
     // Note: reading an actual DICOM file is covered by integration tests
     // in tests/dicom_loader_integration.rs, after the fixture generator is
     // landed in Task 4.
+
+    fn h(uid: &str, z: Option<f64>, inst: Option<i32>, path: &str) -> SliceHeader {
+        SliceHeader {
+            path: std::path::PathBuf::from(path),
+            series_uid: uid.to_string(),
+            series_description: String::new(),
+            image_comments: None,
+            instance_number: inst,
+            image_position_z: z,
+            rows: 64,
+            cols: 64,
+            rescale_slope: 1.0,
+            rescale_intercept: -1024.0,
+            pixel_spacing: [1.0, 1.0],
+            orientation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            patient_name: String::new(),
+            study_description: String::new(),
+            window_center: 40.0,
+            window_width: 400.0,
+        }
+    }
+
+    #[test]
+    fn groups_by_series_and_sorts_by_ipp() {
+        let headers = vec![
+            h("A", Some(2.0), None, "a2"),
+            h("B", Some(0.0), None, "b0"),
+            h("A", Some(0.0), None, "a0"),
+            h("A", Some(1.0), None, "a1"),
+            h("B", Some(1.0), None, "b1"),
+        ];
+        let groups = group_by_series(headers);
+        assert_eq!(groups.len(), 2);
+
+        let a = groups.get("A").unwrap();
+        assert_eq!(
+            a.iter().map(|h| h.path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            vec!["a0", "a1", "a2"],
+        );
+
+        let b = groups.get("B").unwrap();
+        assert_eq!(
+            b.iter().map(|h| h.path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            vec!["b0", "b1"],
+        );
+    }
+
+    #[test]
+    fn falls_back_to_instance_number_when_ipp_missing() {
+        let headers = vec![
+            h("A", None, Some(3), "c"),
+            h("A", None, Some(1), "a"),
+            h("A", None, Some(2), "b"),
+        ];
+        let groups = group_by_series(headers);
+        let a = groups.get("A").unwrap();
+        assert_eq!(
+            a.iter().map(|h| h.path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+        );
+    }
+
+    #[test]
+    fn headers_with_no_sort_key_preserve_input_order() {
+        let headers = vec![
+            h("A", None, None, "first"),
+            h("A", None, None, "second"),
+        ];
+        let groups = group_by_series(headers);
+        let a = groups.get("A").unwrap();
+        assert_eq!(
+            a.iter().map(|h| h.path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            vec!["first", "second"],
+        );
+    }
 }
