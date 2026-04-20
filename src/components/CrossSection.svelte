@@ -97,46 +97,104 @@
   }
 
   /**
-   * Estimate vessel diameter from cross-section image.
-   * Uses valley detection: scans from center outward and stops at the
-   * first significant HU drop (vessel wall / gap between vessel and
-   * adjacent chamber). This prevents the measurement from extending
-   * through bright neighbouring structures like heart chambers.
+   * Estimate vessel diameter from a cross-section image.
+   *
+   * Algorithm:
+   *   1. Find the peak HU in a small central window → true lumen brightness.
+   *      (Anchoring on center alone is unreliable when the centerline
+   *      spline lands a pixel or two off the true lumen.)
+   *   2. Compute a per-image half-max threshold = (peak + background) / 2.
+   *      Background is estimated from the image's outer ring (perivascular
+   *      fat / air). This adapts to each slice's contrast level instead of
+   *      the old fixed 100 HU cut-off, which leaked measurements into
+   *      adjacent enhanced myocardium or the aorta when their HU stayed
+   *      above the absolute threshold.
+   *   3. Scan outward along four axes through the peak; stop when HU drops
+   *      below the half-max threshold. The diameter is the axis average,
+   *      expressed in mm via the fixed 2·widthMm / sz pixel pitch.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
     const widthMm = 15.0;
-    const absoluteThreshold = 100;   // stop if HU drops below this
-    const gradientDrop = 100;         // stop if HU drops by this much vs previous pixel
     const center = Math.floor(sz / 2);
+    const mmPerPixel = (2 * widthMm) / sz;
 
-    /** Scan from center outward in one direction. Returns boundary pixel index. */
-    function findBoundary(startIdx: number, step: number, getHU: (idx: number) => number, limit: number): number {
-      let idx = startIdx;
-      let prevHU = getHU(startIdx);
-      // Only start scanning if center is bright enough
-      if (prevHU < absoluteThreshold) return startIdx;
-      idx += step;
-      while (idx > 0 && idx < limit - 1) {
-        const hu = getHU(idx);
-        if (hu < absoluteThreshold) return idx;
-        if (prevHU - hu > gradientDrop) return idx;
-        prevHU = hu;
-        idx += step;
+    // --- 1. Find the lumen peak in a small central window (~3 mm radius) ---
+    const searchRadiusPx = Math.max(3, Math.round(3.0 / mmPerPixel));
+    let peakHU = -Infinity;
+    let peakRow = center;
+    let peakCol = center;
+    for (let r = Math.max(0, center - searchRadiusPx); r <= Math.min(sz - 1, center + searchRadiusPx); r++) {
+      for (let c = Math.max(0, center - searchRadiusPx); c <= Math.min(sz - 1, center + searchRadiusPx); c++) {
+        const v = data[r * sz + c];
+        if (Number.isFinite(v) && v > peakHU) {
+          peakHU = v;
+          peakRow = r;
+          peakCol = c;
+        }
       }
-      return idx;
     }
 
-    // Horizontal scan
-    const getHUh = (col: number) => data[center * sz + col];
-    let left = findBoundary(center, -1, getHUh, sz);
-    let right = findBoundary(center, 1, getHUh, sz);
+    // If the centre window has no bright structure, refuse to measure rather
+    // than report nonsense. Contrast-enhanced coronary lumen is typically
+    // 250-500 HU; a 150 HU floor skips dim/non-lumen slices.
+    if (!Number.isFinite(peakHU) || peakHU < 150) {
+      measH = null;
+      measV = null;
+      return null;
+    }
+
+    // --- 2. Background estimate from the outer ring (fat / air) ---
+    const outerRing: number[] = [];
+    for (let i = 0; i < sz; i++) {
+      const top = data[i];
+      const bot = data[(sz - 1) * sz + i];
+      const lft = data[i * sz];
+      const rgt = data[i * sz + (sz - 1)];
+      for (const v of [top, bot, lft, rgt]) {
+        if (Number.isFinite(v)) outerRing.push(v);
+      }
+    }
+    outerRing.sort((a, b) => a - b);
+    // 25th percentile tolerates bright corners (e.g. cardiac chamber).
+    const bgHU = outerRing.length > 0
+      ? outerRing[Math.floor(outerRing.length * 0.25)]
+      : -80;
+    const halfMax = (peakHU + bgHU) / 2;
+
+    // --- 3. Scan outward from the peak along 4 axes; stop at half-max ---
+    const findBoundary = (
+      startIdx: number,
+      step: number,
+      getHU: (idx: number) => number,
+      limit: number,
+    ): number => {
+      let idx = startIdx + step;
+      while (idx >= 0 && idx < limit) {
+        const hu = getHU(idx);
+        if (!Number.isFinite(hu) || hu < halfMax) return idx;
+        idx += step;
+      }
+      return Math.max(0, Math.min(limit - 1, idx));
+    };
+
+    const getHUh = (col: number) => data[peakRow * sz + col];
+    const left = findBoundary(peakCol, -1, getHUh, sz);
+    const right = findBoundary(peakCol, 1, getHUh, sz);
     const hDiamPx = right - left;
 
-    // Vertical scan
-    const getHUv = (row: number) => data[row * sz + center];
-    let top = findBoundary(center, -1, getHUv, sz);
-    let bottom = findBoundary(center, 1, getHUv, sz);
+    const getHUv = (row: number) => data[row * sz + peakCol];
+    const top = findBoundary(peakRow, -1, getHUv, sz);
+    const bottom = findBoundary(peakRow, 1, getHUv, sz);
     const vDiamPx = bottom - top;
+
+    // Safety: if the scan runs to the edge it is not measuring a vessel.
+    const hitEdge =
+      left <= 0 || right >= sz - 1 || top <= 0 || bottom >= sz - 1;
+    if (hitEdge) {
+      measH = null;
+      measV = null;
+      return null;
+    }
 
     const avgDiamPx = (hDiamPx + vDiamPx) / 2;
     if (avgDiamPx < 2) {
@@ -145,11 +203,9 @@
       return null;
     }
 
-    // Store pixel positions for visual overlay
-    measH = { left, right, y: center };
-    measV = { top, bottom, x: center };
+    measH = { left, right, y: peakRow };
+    measV = { top, bottom, x: peakCol };
 
-    const mmPerPixel = (2 * widthMm) / sz;
     return avgDiamPx * mmPerPixel;
   }
 

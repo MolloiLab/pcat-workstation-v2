@@ -157,11 +157,23 @@ pub async fn render_stretched_cpr_image(
         (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
     };
 
+    // Grow the vertical viewport so the vessel's out-of-plane depth
+    // excursion fits. `pixels_high` is the caller's minimum; see
+    // `effective_stretched_pixels_high` for the sizing rule.
+    let effective_high = {
+        let geom = stretched_cpr::compute_stretched_geometry(
+            &frame.positions,
+            pixels_wide,
+            rotation_deg,
+        );
+        effective_stretched_pixels_high(&geom, pixels_high)
+    };
+
     let result = tokio::task::spawn_blocking(move || {
         frame.render_stretched(
             &volume_data, spacing, origin,
             rotation_deg, width_mm,
-            pixels_wide, pixels_high, slab_mm,
+            pixels_wide, effective_high, slab_mm,
         )
     })
     .await
@@ -269,6 +281,25 @@ pub struct CprProjectionInfo {
 /// is capped.
 const PROJECTION_INFO_MAX_COLS: usize = 128;
 
+/// Vertical margin (mm) around the vessel's depth excursion when auto-sizing
+/// `pixels_high`. Keep this in one place so renderer + projection-info agree.
+const STRETCHED_VERTICAL_MARGIN_MM: f64 = 6.0;
+/// Hard cap on auto-grown `pixels_high` to bound IPC / frontend paint cost.
+const STRETCHED_MAX_PIXELS_HIGH: usize = 1024;
+
+/// Compute the effective `pixels_high` that the stretched renderer will use,
+/// given a caller-supplied minimum. Grows to fit the vessel's out-of-plane
+/// depth excursion so oblique rotations no longer clip off the panel.
+fn effective_stretched_pixels_high(
+    geom: &stretched_cpr::StretchedGeometry,
+    min_pixels_high: usize,
+) -> usize {
+    let depth_span_mm = geom.proj_max - geom.proj_min;
+    let needed = ((depth_span_mm + 2.0 * STRETCHED_VERTICAL_MARGIN_MM) / geom.dy_mm).ceil()
+        as usize;
+    min_pixels_high.max(needed).min(STRETCHED_MAX_PIXELS_HIGH)
+}
+
 /// Return the projection parameters needed to map 3D seed positions
 /// to/from 2D CPR canvas coordinates.
 #[tauri::command]
@@ -302,6 +333,29 @@ pub async fn get_cpr_projection_info(
         rotation_deg,
     );
 
+    // `dy_mm` returned to the frontend must match the *render* resolution,
+    // not `lookup_cols`. The frontend inverts
+    //     row = pixels_high/2 - depth_mm / dy_mm
+    // to place seeds vertically; feeding it `geom.dy_mm` (which is
+    // total_proj_arc / (lookup_cols - 1)) would over-report pixel spacing by
+    // `(pixels_wide - 1) / (lookup_cols - 1)` and visibly pull seed markers
+    // away from the rendered vessel.
+    let dy_mm_render = geom.total_proj_arc / (pixels_wide - 1) as f64;
+
+    // The renderer may grow `pixels_high` beyond the caller's request to fit
+    // the vessel's depth excursion. Report the same effective value here so
+    // the frontend's seed/row math lines up with what was actually drawn.
+    //
+    // `effective_stretched_pixels_high` reads `dy_mm` from the passed geom,
+    // but we want the grow-rule keyed to the *render* dy_mm above, not the
+    // lookup-table dy_mm. Build a view of the geom with the render dy_mm
+    // swapped in so the ceiling division uses the same resolution the
+    // renderer will use.
+    let mut geom_for_height = geom;
+    geom_for_height.dy_mm = dy_mm_render;
+    let effective_high = effective_stretched_pixels_high(&geom_for_height, pixels_high);
+    let geom = geom_for_height;
+
     let total_arc = *frame.arclengths.last().unwrap_or(&0.0);
 
     // Rotated Bishop normals -- still needed for straightened CPR overlays.
@@ -328,9 +382,9 @@ pub async fn get_cpr_projection_info(
             geom.mid_height_point[1],
             geom.mid_height_point[2],
         ],
-        dy_mm: geom.dy_mm,
+        dy_mm: dy_mm_render,
         pixels_wide,
-        pixels_high,
+        pixels_high: effective_high,
         proj_col_pts: proj_col_pts_arr,
         arclengths: frame.arclengths.clone(),
         positions: frame.positions.clone(),

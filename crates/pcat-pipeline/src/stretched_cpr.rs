@@ -43,6 +43,12 @@ pub struct StretchedGeometry {
     pub total_proj_arc: f64,
     /// Isotropic pixel spacing (mm/pixel).
     pub dy_mm: f64,
+    /// Signed projection of all centerline positions onto `projection_normal`;
+    /// `max - min` is the vessel's out-of-plane depth span and drives
+    /// adaptive `pixels_high` sizing so the vessel does not clip vertically
+    /// at oblique rotations.
+    pub proj_min: f64,
+    pub proj_max: f64,
 }
 
 /// Compute the stretched-CPR geometry from a set of pre-sampled centerline positions.
@@ -175,6 +181,8 @@ pub fn compute_stretched_geometry(
         slab_dirs,
         total_proj_arc,
         dy_mm,
+        proj_min: min_proj,
+        proj_max: max_proj,
     }
 }
 
