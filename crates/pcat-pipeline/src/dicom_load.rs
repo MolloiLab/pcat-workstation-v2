@@ -5,6 +5,8 @@
 //! volume in z-major order.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
@@ -76,9 +78,14 @@ pub fn check_volume_size_mb(requested_mb: usize) -> Result<(), DicomLoadError> {
 
 /// Load a single series by UID. Runs `scan_series` to find the descriptor, then
 /// rayon-parallel decodes all slices.
+///
+/// `on_progress`, if provided, is called as `(done, total)` periodically during
+/// pixel decode. It will be called once with `(0, total)` before decode begins,
+/// then at most every `total / 50` slices, and once more at completion.
 pub async fn load_series(
     dir: &Path,
     uid: &str,
+    on_progress: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
 ) -> Result<LoadedVolume, DicomLoadError> {
     let descriptors = scan_series(dir).await?;
     let desc = descriptors
@@ -91,21 +98,42 @@ pub async fn load_series(
     let total_bytes_mb = (total_voxels * 2) / (1024 * 1024);
     check_volume_size_mb(total_bytes_mb)?;
 
+    // Emit initial progress (gives the frontend the total slice count).
+    if let Some(ref cb) = on_progress {
+        cb(0, desc.num_slices);
+    }
+
     let file_paths = desc.file_paths.clone();
     let rescale_slope = desc.rescale_slope;
     let rescale_intercept = desc.rescale_intercept;
     let rows = desc.rows;
     let cols = desc.cols;
+    let total = desc.num_slices;
     let dir_owned = dir.to_path_buf();
 
+    // Wrap callback in Arc so it can be shared across rayon threads inside
+    // spawn_blocking.
+    let progress = on_progress.map(Arc::new);
+
     let voxels = tokio::task::spawn_blocking(move || {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let step = (total / 50).max(1);
+
         let mut out = vec![0i16; total_voxels];
         let results: Vec<Result<(usize, Vec<i16>), DicomLoadError>> = file_paths
             .par_iter()
             .enumerate()
             .map(|(z, p)| {
-                decode_slice_i16(p, rescale_slope, rescale_intercept, rows, cols)
-                    .map(|px| (z, px))
+                let px = decode_slice_i16(p, rescale_slope, rescale_intercept, rows, cols)
+                    .map(|px| (z, px));
+                // Increment counter and emit if on a reporting boundary.
+                let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(ref cb) = progress {
+                    if done % step == 0 || done == total {
+                        cb(done, total);
+                    }
+                }
+                px
             })
             .collect();
         for r in results {

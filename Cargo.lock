@@ -3062,6 +3062,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytemuck",
+ "dicom",
  "ndarray",
  "pcat-pipeline",
  "serde",
@@ -3069,6 +3070,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
  "tokio",
 ]
 

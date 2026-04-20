@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri::ipc::Response;
 
+use ndarray::Array3;
 use pcat_pipeline::dicom_loader::{self, SeriesInfo};
 use pcat_pipeline::dicom_scan::{self, SeriesDescriptor};
-use pcat_pipeline::dicom_load;
+use pcat_pipeline::dicom_load::{self, LoadedVolume as PipelineLoadedVolume};
+use pcat_pipeline::types::LoadedVolume as StateLoadedVolume;
 use crate::state::AppState;
 use crate::commands::framed::encode_frame;
 
@@ -408,14 +410,26 @@ pub async fn load_dual_energy(
 // Fast header-only series scan (v2)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, serde::Serialize)]
+pub struct ProgressEvent {
+    pub phase: &'static str,
+    pub done: usize,
+    pub total: usize,
+}
+
 /// Scan a DICOM folder for series (new shape — replaces legacy scan).
 /// Returns header-only metadata per series; pixel data is not decoded.
 #[tauri::command]
-pub async fn scan_series_v2(path: String) -> Result<Vec<SeriesDescriptorDto>, String> {
+pub async fn scan_series_v2(
+    path: String,
+    app: AppHandle,
+) -> Result<Vec<SeriesDescriptorDto>, String> {
+    let _ = app.emit("dicom_load_progress", ProgressEvent { phase: "scanning", done: 0, total: 0 });
     let dir = PathBuf::from(path);
     let series = dicom_scan::scan_series(&dir)
         .await
         .map_err(|e| e.to_string())?;
+    let _ = app.emit("dicom_load_progress", ProgressEvent { phase: "scanned", done: series.len(), total: series.len() });
     Ok(series.into_iter().map(SeriesDescriptorDto::from).collect())
 }
 
@@ -472,14 +486,95 @@ impl From<SeriesDescriptor> for SeriesDescriptorDto {
 /// Load a single series as one framed binary response:
 ///   [u32 LE: metadata_json_length] [metadata_json] [i16 LE voxel bytes]
 /// Frontend receives this as an ArrayBuffer.
+///
+/// Also emits `dicom_load_progress` Tauri events during decode so the frontend
+/// can show a progress bar, and populates `AppState.volume` so legacy commands
+/// (CPR, annotation, MMD) continue to work during gradual migration.
 #[tauri::command]
-pub async fn load_series_v2(dir: String, uid: String) -> Result<Response, String> {
+pub async fn load_series_v2(
+    dir: String,
+    uid: String,
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<Response, String> {
     let dir_path = PathBuf::from(dir);
-    let vol = dicom_load::load_series(&dir_path, &uid)
+
+    // Build a progress callback that forwards to Tauri events.
+    let app_cb = app.clone();
+    let progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total| {
+        let _ = app_cb.emit(
+            "dicom_load_progress",
+            ProgressEvent { phase: "decoding", done, total },
+        );
+    });
+
+    let vol = dicom_load::load_series(&dir_path, &uid, Some(progress))
         .await
         .map_err(|e| e.to_string())?;
+
+    // Mirror into legacy AppState so CPR / annotation / MMD keep working.
+    bridge_into_state(&vol, &state)?;
+
+    // Emit terminal event so frontend can switch to "finalizing" state.
+    let _ = app.emit("dicom_load_progress", ProgressEvent {
+        phase: "done",
+        done: vol.metadata.num_slices,
+        total: vol.metadata.num_slices,
+    });
 
     let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&vol.voxels_i16).to_vec();
     let framed = encode_frame(&vol.metadata, &voxel_bytes)?;
     Ok(Response::new(framed))
+}
+
+fn bridge_into_state(
+    vol: &PipelineLoadedVolume,
+    state: &State<'_, Mutex<AppState>>,
+) -> Result<(), String> {
+    let meta = &vol.metadata;
+    let nz = meta.num_slices;
+    let ny = meta.rows as usize;
+    let nx = meta.cols as usize;
+
+    // Convert i16 HU → f32 for the legacy Array3<f32> consumers.
+    let data_f32: Vec<f32> = vol.voxels_i16.iter().map(|&v| v as f32).collect();
+    let arr = Array3::from_shape_vec((nz, ny, nx), data_f32)
+        .map_err(|e| format!("volume shape mismatch: {e}"))?;
+
+    // Direction: row-major 3x3. Use IOP row × IOP col × normal.
+    let iop = meta.orientation;
+    let iop_row = [iop[0], iop[1], iop[2]];
+    let iop_col = [iop[3], iop[4], iop[5]];
+    let normal = [
+        iop_row[1] * iop_col[2] - iop_row[2] * iop_col[1],
+        iop_row[2] * iop_col[0] - iop_row[0] * iop_col[2],
+        iop_row[0] * iop_col[1] - iop_row[1] * iop_col[0],
+    ];
+    let direction = [
+        iop_row[0], iop_row[1], iop_row[2],
+        iop_col[0], iop_col[1], iop_col[2],
+        normal[0], normal[1], normal[2],
+    ];
+
+    let spacing = [meta.slice_spacing, meta.pixel_spacing[0], meta.pixel_spacing[1]];
+    let origin = [
+        meta.slice_positions_z.first().copied().unwrap_or(0.0),
+        0.0,
+        0.0,
+    ];
+
+    let legacy = StateLoadedVolume {
+        data: Arc::new(arr),
+        spacing,
+        origin,
+        direction,
+        window_center: meta.window_center,
+        window_width: meta.window_width,
+        patient_name: meta.patient_name.clone(),
+        study_description: meta.study_description.clone(),
+    };
+
+    let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+    guard.volume = Some(legacy);
+    Ok(())
 }

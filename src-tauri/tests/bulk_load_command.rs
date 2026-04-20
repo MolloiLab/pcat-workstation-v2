@@ -13,7 +13,7 @@ async fn bulk_load_frame_round_trip() {
     fixture::write_mini_ct(dir.path());
 
     let series = scan_series(dir.path()).await.unwrap();
-    let vol = load_series(dir.path(), &series[0].uid).await.unwrap();
+    let vol = load_series(dir.path(), &series[0].uid, None).await.unwrap();
 
     let payload: Vec<u8> = bytemuck::cast_slice(&vol.voxels_i16).to_vec();
     let frame = pcat_workstation_v2_lib::commands::framed::encode_frame(&vol.metadata, &payload)

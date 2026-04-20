@@ -31,7 +31,7 @@ fn main() {
 
         let first = series.first().expect("at least one series");
         let t1 = Instant::now();
-        let vol = load_series(&dir, &first.uid).await.expect("load failed");
+        let vol = load_series(&dir, &first.uid, None).await.expect("load failed");
         let t_load = t1.elapsed();
         let total = t_scan + t_load;
         let mb = (vol.voxels_i16.len() * 2) / (1024 * 1024);

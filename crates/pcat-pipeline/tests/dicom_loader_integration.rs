@@ -106,7 +106,7 @@ async fn load_series_returns_correct_volume() {
     common::write_mini_ct(dir.path());
 
     let series = scan_series(dir.path()).await.unwrap();
-    let vol: LoadedVolume = load_series(dir.path(), &series[0].uid).await.unwrap();
+    let vol: LoadedVolume = load_series(dir.path(), &series[0].uid, None).await.unwrap();
 
     assert_eq!(vol.metadata.num_slices, common::FIXTURE_SLICES);
     assert_eq!(vol.metadata.rows, common::FIXTURE_ROWS);
@@ -134,7 +134,7 @@ async fn load_series_errors_on_unknown_uid() {
     let dir = tempfile::tempdir().unwrap();
     common::write_mini_ct(dir.path());
 
-    let err = pcat_pipeline::dicom_load::load_series(dir.path(), "not-a-real-uid")
+    let err = pcat_pipeline::dicom_load::load_series(dir.path(), "not-a-real-uid", None)
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("not-a-real-uid"));
