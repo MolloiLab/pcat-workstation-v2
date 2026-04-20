@@ -605,9 +605,20 @@ pub(crate) fn render_curved_direct(
 
     let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
-    // 4. Precompute position vectors
+    // 4. Precompute 3D positions and their 2D (in-plane) projections.
+    // The 2D projections drive the nearest-segment lookup so the rendered
+    // vessel stays anchored to the projected centerline on screen — seeds
+    // and overlays drawn at worldToCurvedCpr positions then land on the
+    // bright lumen even when the centerline dives deeply along view_forward
+    // (e.g. at non-PCA rotations where |depth| can exceed width_mm).
     let pos_vecs: Vec<Vector3<f64>> = positions.iter()
         .map(|p| Vector3::new(p[0], p[1], p[2]))
+        .collect();
+    let projected_2d: Vec<(f64, f64)> = pos_vecs.iter()
+        .map(|p| {
+            let d = p - center_vec;
+            (d.dot(&view_right), d.dot(&view_up))
+        })
         .collect();
 
     // 5. Per-pixel: average intensity projection (AIP), NOT MIP.
@@ -626,81 +637,87 @@ pub(crate) fn render_curved_direct(
             let y_mm = max_y - (row as f64) * view_height / ((pixels_high - 1) as f64);
             let pixel_3d = center_vec + x_mm * view_right + y_mm * view_up;
 
-            // Find nearest 3D centerline segment + track second-nearest
-            // for smooth depth blending at segment boundaries.
+            // Find nearest 2D-projected centerline segment + track second-
+            // nearest for smooth depth blending at Voronoi boundaries.
+            // Using the 2D projection (not 3D distance) guarantees the
+            // rendered vessel pixel at the centerline's projected location
+            // samples at the centerline's own depth, so the bright lumen
+            // coincides with the overlay centerline and its seed markers.
             let mut best_j = 0usize;
             let mut best_frac = 0.0f64;
-            let mut best_dist_sq = f64::MAX;
+            let mut best_d2 = f64::MAX;
             let mut second_j = 0usize;
             let mut second_frac = 0.0f64;
-            let mut second_dist_sq = f64::MAX;
+            let mut second_d2 = f64::MAX;
             for j in 0..n - 1 {
-                let ab = pos_vecs[j + 1] - pos_vecs[j];
-                let ap = pixel_3d - pos_vecs[j];
-                let ab_len_sq = ab.norm_squared();
-                let t = if ab_len_sq > 1e-20 {
-                    ap.dot(&ab) / ab_len_sq
+                let (ax, ay) = projected_2d[j];
+                let (bx, by) = projected_2d[j + 1];
+                let dx = bx - ax;
+                let dy = by - ay;
+                let seg_len_sq = dx * dx + dy * dy;
+                let t = if seg_len_sq > 1e-20 {
+                    ((x_mm - ax) * dx + (y_mm - ay) * dy) / seg_len_sq
                 } else {
                     0.0
                 }.clamp(0.0, 1.0);
-                let closest = pos_vecs[j] + t * ab;
-                let d = (pixel_3d - closest).norm_squared();
-                if d < best_dist_sq {
-                    second_dist_sq = best_dist_sq;
+                let cx = ax + t * dx;
+                let cy = ay + t * dy;
+                let dxp = x_mm - cx;
+                let dyp = y_mm - cy;
+                let d2 = dxp * dxp + dyp * dyp;
+                if d2 < best_d2 {
+                    second_d2 = best_d2;
                     second_j = best_j;
                     second_frac = best_frac;
-                    best_dist_sq = d;
+                    best_d2 = d2;
                     best_j = j;
                     best_frac = t;
-                } else if d < second_dist_sq {
-                    second_dist_sq = d;
+                } else if d2 < second_d2 {
+                    second_d2 = d2;
                     second_j = j;
                     second_frac = t;
                 }
             }
-            let dist_3d = best_dist_sq.sqrt();
+            let in_plane_dist = best_d2.sqrt();
 
-            // Vessel depth: blend between nearest and second-nearest segments
-            // for smooth transitions at segment boundaries (prevents chunking).
+            // 3D centerline position for the nearest 2D segment → depth.
             let j1 = (best_j + 1).min(n - 1);
             let interp_pos = pos_vecs[best_j] + best_frac * (pos_vecs[j1] - pos_vecs[best_j]);
             let depth1 = (interp_pos - pixel_3d).dot(&view_forward);
 
-            let vessel_depth = if second_dist_sq < f64::MAX && best_dist_sq > 1e-10 {
+            // Inverse-distance blend of depth1 and depth2 softens the Voronoi
+            // discontinuity where the nearest segment switches (most visible
+            // as the "bump" on the aortic wall near the ostium, where two
+            // non-adjacent centerline pieces project close together).
+            let vessel_depth = if second_d2 < f64::MAX && best_d2 > 1e-10 {
                 let sj1 = (second_j + 1).min(n - 1);
                 let interp2 = pos_vecs[second_j] + second_frac * (pos_vecs[sj1] - pos_vecs[second_j]);
                 let depth2 = (interp2 - pixel_3d).dot(&view_forward);
-                // Inverse-distance weighting: smooth blend near boundaries
-                let w1 = 1.0 / (best_dist_sq.sqrt() + 1e-6);
-                let w2 = 1.0 / (second_dist_sq.sqrt() + 1e-6);
+                let w1 = 1.0 / (best_d2.sqrt() + 1e-6);
+                let w2 = 1.0 / (second_d2.sqrt() + 1e-6);
                 (depth1 * w1 + depth2 * w2) / (w1 + w2)
             } else {
                 depth1
             };
 
-            // Choose slab based on proximity to vessel
-            let slab = if dist_3d < width_mm {
-                &cpr_slab_offsets  // thin slab near vessel → sharper
+            // Slab and depth falloff keyed off IN-PLANE distance so a pixel
+            // on the projected centerline always uses the full vessel depth
+            // (sharp lumen), regardless of how deep the centerline dives.
+            let slab = if in_plane_dist < width_mm {
+                &cpr_slab_offsets
             } else {
-                &context_slab_offsets  // thicker slab for context
+                &context_slab_offsets
             };
 
-            // Smoothly blend vessel_depth → 0 for pixels far from the
-            // centerline. Without this, the aorta (and other structures
-            // outside the vessel corridor) gets sampled at a depth that
-            // jumps discontinuously at Voronoi-region boundaries between
-            // far-apart centerline segments — producing the visible seam
-            // that cuts the aortic root in half. Inside the vessel corridor
-            // the full vessel_depth is preserved so the coronary stays
-            // sharply resolved; a linear ramp over `falloff_width_mm`
-            // transitions to plane sampling (depth = 0) for context pixels.
-            let falloff_width_mm: f64 = 20.0;
-            let blend = ((dist_3d - width_mm) / falloff_width_mm).clamp(0.0, 1.0);
+            // Narrow linear falloff: full depth-follow inside the vessel
+            // corridor, plane sampling beyond a short transition. The
+            // transition is kept short so the context (aorta, myocardium)
+            // is almost entirely rendered on the viewing plane — no
+            // Voronoi-driven depth jumps that produce the aortic-wall seam.
+            let falloff_width_mm: f64 = 5.0;
+            let blend = ((in_plane_dist - width_mm) / falloff_width_mm).clamp(0.0, 1.0);
             let effective_depth = vessel_depth * (1.0 - blend);
 
-            // Average intensity projection — slab centered on effective_depth
-            // so the vessel and its surrounding fat stay in the slab near
-            // the centerline, while context pixels fall back to plane sampling.
             let mut sum = 0.0f64;
             let mut count = 0u32;
             for &slab_off in slab {
