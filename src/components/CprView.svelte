@@ -787,6 +787,21 @@
     navigateToWorldPos(pos);
   }
 
+  // Mousemove / wheel can fire faster than cornerstone3D can re-render the
+  // three MPR viewports. `navigateToWorldPos` pushes a camera update + render
+  // on all three, which is a real WebGL repaint — easily 10-20 ms on a CCTA
+  // volume. Coalesce to one call per animation frame so dragging the needle
+  // or scrolling doesn't queue up a backlog of stale navigation requests.
+  let pendingNavigate = false;
+  function scheduleNavigate() {
+    if (pendingNavigate) return;
+    pendingNavigate = true;
+    requestAnimationFrame(() => {
+      pendingNavigate = false;
+      navigateToNeedlePos();
+    });
+  }
+
   // ---- Needle dragging ----
 
   let dragging = $state(false);
@@ -915,7 +930,7 @@
         needleBFraction = Math.max(0, Math.min(1, x / rect.width));
       }
       // In stretched mode, needle dragging isn't supported (use scroll instead)
-      navigateToNeedlePos();
+      scheduleNavigate();
       return;
     }
 
@@ -961,7 +976,7 @@
       const sensitivity = 0.0003;
       const delta = -event.deltaY * sensitivity;
       needleBFraction = Math.max(0, Math.min(1, needleBFraction + delta));
-      navigateToNeedlePos();
+      scheduleNavigate();
     }
   }
 

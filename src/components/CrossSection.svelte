@@ -48,6 +48,11 @@
   // Measurement endpoints in pixel coords for visual overlay
   let measH = $state<{ left: number; right: number; y: number } | null>(null);
   let measV = $state<{ top: number; bottom: number; x: number } | null>(null);
+  /**
+   * 16-point polygon of the detected lumen boundary. Stored in canvas pixel
+   * coords. Null when measurement is rejected.
+   */
+  let lumenContour = $state<Array<{ x: number; y: number }> | null>(null);
 
   type CrossSectionResult = {
     image_base64: string;
@@ -97,34 +102,66 @@
   }
 
   /**
-   * Estimate vessel diameter from a cross-section image.
+   * Radial-FWHM lumen diameter with outlier rejection.
    *
-   * Algorithm:
-   *   1. Find the peak HU in a small central window → true lumen brightness.
-   *      (Anchoring on center alone is unreliable when the centerline
-   *      spline lands a pixel or two off the true lumen.)
-   *   2. Compute a per-image half-max threshold = (peak + background) / 2.
-   *      Background is estimated from the image's outer ring (perivascular
-   *      fat / air). This adapts to each slice's contrast level instead of
-   *      the old fixed 100 HU cut-off, which leaked measurements into
-   *      adjacent enhanced myocardium or the aorta when their HU stayed
-   *      above the absolute threshold.
-   *   3. Scan outward along four axes through the peak; stop when HU drops
-   *      below the half-max threshold. The diameter is the axis average,
-   *      expressed in mm via the fixed 2·widthMm / sz pixel pitch.
+   * The old 2-axis scan was fragile — one ray wandering into adjacent
+   * enhanced myocardium or the aorta dominated the average and inflated the
+   * reported diameter (e.g. 11.3 mm for an RCA that should read 3–4 mm).
+   *
+   * This version follows the standard radial-FWHM recipe used in research
+   * coronary-lumen tools (see e.g. Çimen et al., "Reconstruction of
+   * Coronary Arteries from X-ray Angiography", MedIA 2016; Wolterink et al.,
+   * "Coronary artery centerline extraction in CCTA using a deep-learning
+   * based orientation classifier", MedIA 2019). VMTK's colliding-fronts and
+   * Horos's manual ROI both boil down to the same inside-out / threshold
+   * idea, just wrapped differently; we do it in closed form per slice.
+   *
+   * Steps:
+   *   1. Anchor on the brightest pixel inside a ~3 mm central window. The
+   *      centerline spline can land a voxel or two off the true lumen;
+   *      searching a small neighbourhood recovers the real lumen peak.
+   *   2. Estimate background from the outer image ring (25th percentile to
+   *      tolerate bright corners like a neighbouring chamber).
+   *   3. Half-max threshold = (peak + background) / 2. Adaptive per slice
+   *      instead of a fixed HU cutoff so contrast/noise level doesn't
+   *      matter.
+   *   4. Cast 16 rays from the peak at 22.5° steps; for each ray walk
+   *      outward in 0.5-pixel increments and sub-pixel refine the boundary
+   *      where HU first crosses half-max.
+   *   5. Robust median + MAD (median absolute deviation) outlier reject.
+   *      Rays that escape into adjacent enhanced tissue typically give
+   *      radii 2–4× the median and get dropped. If fewer than half the
+   *      rays survive, the slice is unreliable — return null instead of a
+   *      bad number.
+   *   6. Diameter = 2 × median(inlier radii). Sanity-clip to 1–8 mm
+   *      (coronary range); outside that, treat as non-measurement.
+   *
+   * Returns the diameter in mm, or null when the slice cannot be measured
+   * reliably. Also populates `measH` / `measV` (H and V calipers through
+   * the peak) and `lumenContour` (16-point polygon of the detected
+   * boundary) for the SVG overlay.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
     const widthMm = 15.0;
-    const center = Math.floor(sz / 2);
     const mmPerPixel = (2 * widthMm) / sz;
+    const center = Math.floor(sz / 2);
 
-    // --- 1. Find the lumen peak in a small central window (~3 mm radius) ---
+    const reject = (): null => {
+      measH = null;
+      measV = null;
+      lumenContour = null;
+      return null;
+    };
+
+    // --- 1. Peak search in ~3 mm central window ---
     const searchRadiusPx = Math.max(3, Math.round(3.0 / mmPerPixel));
     let peakHU = -Infinity;
     let peakRow = center;
     let peakCol = center;
-    for (let r = Math.max(0, center - searchRadiusPx); r <= Math.min(sz - 1, center + searchRadiusPx); r++) {
-      for (let c = Math.max(0, center - searchRadiusPx); c <= Math.min(sz - 1, center + searchRadiusPx); c++) {
+    const r0 = Math.max(0, center - searchRadiusPx);
+    const r1 = Math.min(sz - 1, center + searchRadiusPx);
+    for (let r = r0; r <= r1; r++) {
+      for (let c = r0; c <= r1; c++) {
         const v = data[r * sz + c];
         if (Number.isFinite(v) && v > peakHU) {
           peakHU = v;
@@ -133,80 +170,136 @@
         }
       }
     }
+    // 150 HU is a lenient floor: any enhanced coronary lumen clears it even
+    // at reduced kV / low iodine. Below this the centre is almost certainly
+    // not inside a contrast-filled lumen.
+    if (!Number.isFinite(peakHU) || peakHU < 150) return reject();
 
-    // If the centre window has no bright structure, refuse to measure rather
-    // than report nonsense. Contrast-enhanced coronary lumen is typically
-    // 250-500 HU; a 150 HU floor skips dim/non-lumen slices.
-    if (!Number.isFinite(peakHU) || peakHU < 150) {
-      measH = null;
-      measV = null;
-      return null;
-    }
-
-    // --- 2. Background estimate from the outer ring (fat / air) ---
+    // --- 2. Background: 25th percentile of outer ring ---
     const outerRing: number[] = [];
     for (let i = 0; i < sz; i++) {
-      const top = data[i];
-      const bot = data[(sz - 1) * sz + i];
-      const lft = data[i * sz];
-      const rgt = data[i * sz + (sz - 1)];
-      for (const v of [top, bot, lft, rgt]) {
+      const candidates = [
+        data[i],
+        data[(sz - 1) * sz + i],
+        data[i * sz],
+        data[i * sz + (sz - 1)],
+      ];
+      for (const v of candidates) {
         if (Number.isFinite(v)) outerRing.push(v);
       }
     }
     outerRing.sort((a, b) => a - b);
-    // 25th percentile tolerates bright corners (e.g. cardiac chamber).
     const bgHU = outerRing.length > 0
       ? outerRing[Math.floor(outerRing.length * 0.25)]
       : -80;
+
+    // --- 3. Per-slice half-max threshold ---
     const halfMax = (peakHU + bgHU) / 2;
 
-    // --- 3. Scan outward from the peak along 4 axes; stop at half-max ---
-    const findBoundary = (
-      startIdx: number,
-      step: number,
-      getHU: (idx: number) => number,
-      limit: number,
-    ): number => {
-      let idx = startIdx + step;
-      while (idx >= 0 && idx < limit) {
-        const hu = getHU(idx);
-        if (!Number.isFinite(hu) || hu < halfMax) return idx;
-        idx += step;
-      }
-      return Math.max(0, Math.min(limit - 1, idx));
+    // --- 4. Cast 16 rays and find sub-pixel half-max boundary per ray ---
+    const N_RAYS = 16;
+    // Coronary lumen rarely exceeds ~5 mm; cap the scan so a ray escaping
+    // into adjacent tissue doesn't run across the whole FOV.
+    const MAX_RADIUS_MM = 5.0;
+    const maxRadiusPx = Math.min(sz / 2 - 1, Math.ceil(MAX_RADIUS_MM / mmPerPixel));
+
+    const sampleBilinear = (x: number, y: number): number => {
+      if (x < 0 || y < 0 || x > sz - 1 || y > sz - 1) return NaN;
+      const x0 = Math.floor(x);
+      const y0 = Math.floor(y);
+      const x1 = Math.min(sz - 1, x0 + 1);
+      const y1 = Math.min(sz - 1, y0 + 1);
+      const fx = x - x0;
+      const fy = y - y0;
+      const v00 = data[y0 * sz + x0];
+      const v01 = data[y0 * sz + x1];
+      const v10 = data[y1 * sz + x0];
+      const v11 = data[y1 * sz + x1];
+      if (!Number.isFinite(v00) || !Number.isFinite(v01)
+          || !Number.isFinite(v10) || !Number.isFinite(v11)) return NaN;
+      return v00 * (1 - fx) * (1 - fy)
+           + v01 * fx * (1 - fy)
+           + v10 * (1 - fx) * fy
+           + v11 * fx * fy;
     };
 
-    const getHUh = (col: number) => data[peakRow * sz + col];
-    const left = findBoundary(peakCol, -1, getHUh, sz);
-    const right = findBoundary(peakCol, 1, getHUh, sz);
-    const hDiamPx = right - left;
+    const STEP_PX = 0.5;
+    const radiiPx: number[] = new Array(N_RAYS);
+    const boundaryPts: Array<{ x: number; y: number }> = new Array(N_RAYS);
+    let rayCappedCount = 0;
 
-    const getHUv = (row: number) => data[row * sz + peakCol];
-    const top = findBoundary(peakRow, -1, getHUv, sz);
-    const bottom = findBoundary(peakRow, 1, getHUv, sz);
-    const vDiamPx = bottom - top;
-
-    // Safety: if the scan runs to the edge it is not measuring a vessel.
-    const hitEdge =
-      left <= 0 || right >= sz - 1 || top <= 0 || bottom >= sz - 1;
-    if (hitEdge) {
-      measH = null;
-      measV = null;
-      return null;
+    for (let k = 0; k < N_RAYS; k++) {
+      const theta = (k / N_RAYS) * 2 * Math.PI;
+      const dx = Math.cos(theta);
+      const dy = Math.sin(theta);
+      let prevV = peakHU;
+      let hitR = maxRadiusPx;
+      let crossed = false;
+      for (let r = STEP_PX; r <= maxRadiusPx; r += STEP_PX) {
+        const x = peakCol + r * dx;
+        const y = peakRow + r * dy;
+        const v = sampleBilinear(x, y);
+        if (!Number.isFinite(v) || v <= halfMax) {
+          // Sub-pixel refine: linear interp between the last above-half-max
+          // sample and this below-half-max one. When `prevV - v` is tiny
+          // (plateau), fall back to the half-step.
+          const drop = prevV - v;
+          const frac = Number.isFinite(v) && drop > 1e-6
+            ? Math.min(1, Math.max(0, (prevV - halfMax) / drop))
+            : 0;
+          hitR = r - STEP_PX + frac * STEP_PX;
+          crossed = true;
+          break;
+        }
+        prevV = v;
+      }
+      if (!crossed) rayCappedCount++;
+      radiiPx[k] = hitR;
+      boundaryPts[k] = { x: peakCol + hitR * dx, y: peakRow + hitR * dy };
     }
 
-    const avgDiamPx = (hDiamPx + vDiamPx) / 2;
-    if (avgDiamPx < 2) {
-      measH = null;
-      measV = null;
-      return null;
+    // If almost every ray never crossed half-max, the "vessel" fills the
+    // whole FOV — almost always because we're inside the aorta or a
+    // contrast-filled chamber, not a coronary. Bail out.
+    if (rayCappedCount >= N_RAYS - 2) return reject();
+
+    // --- 5. Median + MAD outlier rejection ---
+    const sortedR = [...radiiPx].sort((a, b) => a - b);
+    const median = (arr: number[]) => arr[Math.floor(arr.length / 2)];
+    const medianR = median(sortedR);
+    const mad = median([...radiiPx.map((r) => Math.abs(r - medianR))].sort((a, b) => a - b));
+    // 3·σ-equivalent rejection (σ ≈ 1.4826·MAD); floor at 1 px so perfectly
+    // circular lumens don't reject everything due to MAD=0.
+    const threshold = Math.max(mad * 1.4826 * 3.0, 1.0);
+    const inlierIdx: number[] = [];
+    for (let k = 0; k < N_RAYS; k++) {
+      if (Math.abs(radiiPx[k] - medianR) <= threshold) inlierIdx.push(k);
     }
+    if (inlierIdx.length < N_RAYS / 2) return reject();
 
-    measH = { left, right, y: peakRow };
-    measV = { top, bottom, x: peakCol };
+    // --- 6. Diameter from inlier median; sanity-clip to coronary range ---
+    const inlierRadii = inlierIdx.map((k) => radiiPx[k]).sort((a, b) => a - b);
+    const finalR = median(inlierRadii);
+    const diameterMm = 2 * finalR * mmPerPixel;
+    if (diameterMm < 1.0 || diameterMm > 8.0) return reject();
 
-    return avgDiamPx * mmPerPixel;
+    // H / V calipers for visual continuity with the old overlay. Index 0 is
+    // +x (right), N/4 is +y (down), N/2 is -x (left), 3N/4 is -y (up) —
+    // matches canvas coordinate conventions.
+    const qtr = N_RAYS / 4;
+    measH = {
+      left: peakCol - radiiPx[N_RAYS / 2],
+      right: peakCol + radiiPx[0],
+      y: peakRow,
+    };
+    measV = {
+      top: peakRow - radiiPx[3 * qtr],
+      bottom: peakRow + radiiPx[qtr],
+      x: peakCol,
+    };
+    lumenContour = boundaryPts;
+
+    return diameterMm;
   }
 
   // --- Render pre-computed batch data when provided ---
@@ -310,6 +403,18 @@
   <!-- Diameter measurement overlay -->
   {#if measH && measV && vesselDiameterMm !== null}
     <svg class="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 {pixels} {pixels}" preserveAspectRatio="xMidYMid meet">
+      <!-- 16-ray lumen boundary (transparent fill + thin outline) -->
+      {#if lumenContour && lumenContour.length >= 3}
+        <polygon
+          points={lumenContour.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')}
+          fill="#22d3ee"
+          fill-opacity="0.1"
+          stroke="#22d3ee"
+          stroke-width="0.8"
+          stroke-opacity="0.8"
+        />
+      {/if}
+
       <!-- Horizontal caliper -->
       <line x1={measH.left} y1={measH.y} x2={measH.right} y2={measH.y}
         stroke="#facc15" stroke-width="1" stroke-opacity="0.9" />
