@@ -5,6 +5,7 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use pcat_pipeline::dicom_loader::{self, SeriesInfo};
+use pcat_pipeline::dicom_scan::{self, SeriesDescriptor};
 use crate::state::AppState;
 
 const MAX_RECENT: usize = 10;
@@ -398,4 +399,65 @@ pub async fn load_dual_energy(
     guard.dual_energy = Some(volume);
 
     Ok(info)
+}
+
+// ---------------------------------------------------------------------------
+// Fast header-only series scan (v2)
+// ---------------------------------------------------------------------------
+
+/// Scan a DICOM folder for series (new shape — replaces legacy scan).
+/// Returns header-only metadata per series; pixel data is not decoded.
+#[tauri::command]
+pub async fn scan_series_v2(path: String) -> Result<Vec<SeriesDescriptorDto>, String> {
+    let dir = PathBuf::from(path);
+    let series = dicom_scan::scan_series(&dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(series.into_iter().map(SeriesDescriptorDto::from).collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct SeriesDescriptorDto {
+    pub uid: String,
+    pub description: String,
+    pub image_comments: Option<String>,
+    pub rows: u32,
+    pub cols: u32,
+    pub num_slices: usize,
+    pub pixel_spacing: [f64; 2],
+    pub slice_spacing: f64,
+    pub orientation: [f64; 6],
+    pub rescale_slope: f64,
+    pub rescale_intercept: f64,
+    pub window_center: f64,
+    pub window_width: f64,
+    pub patient_name: String,
+    pub study_description: String,
+    /// Absolute file paths in z-sorted order.
+    pub file_paths: Vec<String>,
+    pub slice_positions_z: Vec<f64>,
+}
+
+impl From<SeriesDescriptor> for SeriesDescriptorDto {
+    fn from(d: SeriesDescriptor) -> Self {
+        Self {
+            uid: d.uid,
+            description: d.description,
+            image_comments: d.image_comments,
+            rows: d.rows,
+            cols: d.cols,
+            num_slices: d.num_slices,
+            pixel_spacing: d.pixel_spacing,
+            slice_spacing: d.slice_spacing,
+            orientation: d.orientation,
+            rescale_slope: d.rescale_slope,
+            rescale_intercept: d.rescale_intercept,
+            window_center: d.window_center,
+            window_width: d.window_width,
+            patient_name: d.patient_name,
+            study_description: d.study_description,
+            file_paths: d.file_paths.into_iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            slice_positions_z: d.slice_positions_z,
+        }
+    }
 }

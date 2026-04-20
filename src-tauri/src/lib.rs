@@ -20,6 +20,7 @@ pub fn run() {
             commands::dicom::save_seeds,
             commands::dicom::load_seeds,
             commands::dicom::scan_series,
+            commands::dicom::scan_series_v2,
             commands::dicom::load_dual_energy,
             commands::dicom::list_patients,
             commands::dicom::list_series_dirs,
