@@ -104,38 +104,43 @@
   /**
    * Region-grow lumen detection + area-equivalent diameter.
    *
-   * Previous radial-FWHM attempt failed on real data: one ray wandering
-   * into an adjacent bright structure (chamber blood, enhanced
-   * myocardium, aorta at the ostium) made the contour a 4- or 6-petal
-   * star with the diameter dominated by the outliers. Even with
-   * median + MAD rejection, cardinal-axis leaks gave convex-hull-like
-   * over-estimates (e.g. an 8 mm report for a 3 mm RCA lumen).
+   * The input is a monoenergetic keV reconstruction, so absolute HU
+   * cut-offs are unusable — the same anatomy reads hundreds of HU
+   * differently at 40 keV vs 180 keV. Everything here is expressed in
+   * units of "distance from outer-ring background, measured in outer-
+   * ring noise σ", so the algorithm behaves identically at any keV the
+   * user reconstructs at.
    *
-   * Switch to connected-component / region growing:
    *   1. Anchor on the brightest pixel in the central ~3 mm window.
-   *   2. Estimate background as the 25th percentile of the outer ring.
-   *   3. Half-max threshold = max(180, (peak + bg) / 2). The 180 HU floor
-   *      is conservative — it stops measurements from leaking into
-   *      enhanced myocardium (typically 80–150 HU) when a nearby chamber
-   *      pushes the background high. Lumen is reliably ≥ 250 HU with
-   *      standard contrast so this cutoff does not miss real vessels.
-   *   4. 4-connected BFS from the peak; only pixels with HU ≥ half-max
-   *      get added, capped at 4 mm radial distance (coronary lumen is
-   *      almost never > 4 mm radius).
-   *   5. Diameter = 2 · √(area / π). Equivalent-circle diameter is
-   *      naturally immune to any individual ray leaking — it's driven by
+   *   2. Characterise background from the outer image ring: median gives
+   *      bgHU, 1.4826·MAD gives a Gaussian-consistent noise σ.
+   *   3. Contrast check: require peak − bg ≥ 5 σ. This is the keV-
+   *      invariant replacement for "peak must be ≥ 120 HU". If the
+   *      slice doesn't have real vessel enhancement we refuse to
+   *      measure.
+   *   4. Half-max threshold = bg + 0.55·(peak − bg). Pure ratio — no
+   *      HU constants. The slight asymmetry above 0.5 keeps thin
+   *      myocardial rims out of the mask at all keV levels.
+   *   5. 4-connected BFS from the peak, capped at 4 mm radial distance
+   *      (coronary lumen almost never > 4 mm radius in cross-section).
+   *   6. Morphological opening (erode-dilate) of the blob. Erosion
+   *      severs 1–2-pixel-wide bridges that leak the region-grow into
+   *      adjacent enhanced myocardium; a re-BFS keeps only the peak's
+   *      component; dilation restores the true lumen size.
+   *   7. Diameter = 2 · √(area / π). Area-equivalent diameter is
+   *      naturally immune to any single ray leaking — it's driven by
    *      total blob area.
-   *   6. Sanity-clip to 1–6 mm. Outside that, return null rather than a
-   *      bad number.
+   *   8. Sanity-clip to 1–6 mm (a physical constraint on coronary
+   *      arteries, not an HU one — so it's keV-invariant). Outside
+   *      that, return null.
    *
-   * Why not a simple threshold? Region growing requires connectivity to
-   * the seed, so a separate bright blob 2 mm away (calcified plaque,
-   * vein, neighbouring artery) is ignored. A plain threshold would
-   * include all of those in the area count.
+   * Why region growing? Connectivity excludes distant bright blobs
+   * (calcified plaque, an adjacent artery, chamber blood two mm away)
+   * that a plain threshold would include.
    *
-   * This matches the canonical "colliding-fronts" family from VMTK
-   * (ITK's ConnectedThreshold + distance map + area), but done in 2D
-   * per-slice so it runs in ~1 ms without a level-set solve.
+   * Conceptually this is the 2-D-per-slice simplification of VMTK's
+   * colliding-fronts level set; we skip the PDE solve because the
+   * cross-section geometry is planar and area is all we need.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
     const widthMm = 15.0;
@@ -166,12 +171,22 @@
         }
       }
     }
-    // 120 HU: lenient enough to catch a hypo-enhanced RCA (e.g. low-kV
-    // scan, thinner IV contrast bolus) while still rejecting slices where
-    // the centerline has drifted into pure myocardium.
-    if (!Number.isFinite(peakHU) || peakHU < 120) return reject();
+    if (!Number.isFinite(peakHU)) return reject();
 
-    // --- 2. Background: 25th percentile of outer ring ---
+    // --- 2. Background statistics from outer ring (keV-invariant) ---
+    // We can't use any absolute HU cut-off because the input is a
+    // monoenergetic keV reconstruction: at 40 keV an enhanced coronary
+    // lumen can be 800+ HU with myocardium at 250 HU, while at 180 keV
+    // the same lumen sits at ~120 HU and myocardium at ~60 HU. A fixed
+    // "200 HU floor" is implicitly tuned to ~70 keV / 120 kVp and wrong
+    // for everything else.
+    //
+    // Instead, characterise the *local* HU distribution: the outer image
+    // ring is mostly perivascular fat / muscle / air, and its median +
+    // MAD (median absolute deviation) give a robust, keV-adaptive handle
+    // on "background" and "noise". Every threshold downstream is a ratio
+    // of peak-to-background, so the algorithm behaves identically at any
+    // monoenergetic reconstruction.
     const outerRing: number[] = [];
     for (let i = 0; i < sz; i++) {
       const candidates = [
@@ -184,27 +199,37 @@
         if (Number.isFinite(v)) outerRing.push(v);
       }
     }
-    outerRing.sort((a, b) => a - b);
-    const bgHU = outerRing.length > 0
-      ? outerRing[Math.floor(outerRing.length * 0.25)]
-      : -80;
+    if (outerRing.length < 4) return reject();
+    const sortedRing = [...outerRing].sort((a, b) => a - b);
+    const bgHU = sortedRing[Math.floor(sortedRing.length / 2)];
+    // 1.4826·MAD is the Gaussian-consistent σ estimator; floor at 15 HU
+    // so super-clean images don't set an absurdly small noise level.
+    const absDev = outerRing.map((v) => Math.abs(v - bgHU)).sort((a, b) => a - b);
+    const bgMad = absDev[Math.floor(absDev.length / 2)];
+    const bgNoise = Math.max(bgMad * 1.4826, 15);
 
-    // --- 3. Per-slice threshold with both an absolute and a relative floor ---
-    // The old (peak + bg) / 2 underestimated the threshold when the vessel
-    // sits right next to enhanced myocardium — the "bridge" between lumen
-    // (e.g. 350 HU) and myocardium (e.g. 150 HU) passed at ~250 HU, so the
-    // region grower flowed into the muscle and reported a 5–6 mm
-    // "diameter" for a 3 mm RCA.
+    // --- 3. Contrast check (keV-invariant replacement for the 120 HU floor) ---
+    // Require the lumen peak to stand at least 5 σ above background.
+    // This expresses "there has to be real enhancement" without
+    // mentioning any absolute HU level — at 40 keV the contrast is
+    // hundreds of HU, at 180 keV only dozens, and both clear a 5 σ bar
+    // when the vessel is truly present. Below 5 σ the centerline is
+    // likely drifting through tissue and we'd be measuring noise.
+    const contrast = peakHU - bgHU;
+    if (contrast < 5 * bgNoise) return reject();
+
+    // --- 4. Relative half-max threshold ---
+    // Classic FWHM: boundary at the midpoint between lumen peak and
+    // background. No HU constants — the threshold moves with the keV
+    // choice automatically.
     //
-    // Use the strictest of three floors:
-    //   - 200 HU absolute (keeps enhanced myocardium ≤ 150 HU out
-    //     regardless of scan)
-    //   - peak × 0.6 (scales up with bright lumens so we're not
-    //     capturing dim adjacent tissue)
-    //   - bgHU + 80 (adapts when the outer ring itself is bright —
-    //     e.g. slice cuts into a contrast-filled chamber; threshold
-    //     floats above that level so we only measure the lumen peak)
-    const halfMax = Math.max(200, peakHU * 0.6, bgHU + 80);
+    // 0.55 (slightly above 0.5) accounts for the fact that enhanced
+    // myocardium typically sits around 30–35 % of the lumen-to-fat
+    // contrast span; a strictly-half-max threshold would include a thin
+    // muscle rim. This small asymmetry is still keV-invariant as long
+    // as iodine dominates lumen brightness — true for any clinically
+    // reasonable monoenergetic reconstruction.
+    const halfMax = bgHU + 0.55 * contrast;
 
     // --- 4. 4-connected region growing from the peak ---
     const MAX_RADIUS_MM = 4.0;
