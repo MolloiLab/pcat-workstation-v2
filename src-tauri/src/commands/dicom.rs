@@ -3,10 +3,13 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
+use tauri::ipc::Response;
 
 use pcat_pipeline::dicom_loader::{self, SeriesInfo};
 use pcat_pipeline::dicom_scan::{self, SeriesDescriptor};
+use pcat_pipeline::dicom_load;
 use crate::state::AppState;
+use crate::commands::framed::encode_frame;
 
 const MAX_RECENT: usize = 10;
 
@@ -460,4 +463,23 @@ impl From<SeriesDescriptor> for SeriesDescriptorDto {
             slice_positions_z: d.slice_positions_z,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk binary load (v2)
+// ---------------------------------------------------------------------------
+
+/// Load a single series as one framed binary response:
+///   [u32 LE: metadata_json_length] [metadata_json] [i16 LE voxel bytes]
+/// Frontend receives this as an ArrayBuffer.
+#[tauri::command]
+pub async fn load_series_v2(dir: String, uid: String) -> Result<Response, String> {
+    let dir_path = PathBuf::from(dir);
+    let vol = dicom_load::load_series(&dir_path, &uid)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&vol.voxels_i16).to_vec();
+    let framed = encode_frame(&vol.metadata, &voxel_bytes)?;
+    Ok(Response::new(framed))
 }

@@ -1,4 +1,4 @@
-mod commands;
+pub mod commands;
 mod state;
 
 use state::AppState;
@@ -21,6 +21,7 @@ pub fn run() {
             commands::dicom::load_seeds,
             commands::dicom::scan_series,
             commands::dicom::scan_series_v2,
+            commands::dicom::load_series_v2,
             commands::dicom::load_dual_energy,
             commands::dicom::list_patients,
             commands::dicom::list_series_dirs,

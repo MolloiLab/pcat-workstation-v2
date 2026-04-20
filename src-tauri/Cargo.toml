@@ -26,3 +26,7 @@ tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 ndarray = { version = "0.16", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+dicom = "0.9"
