@@ -7,6 +7,7 @@
 
 use nalgebra::Vector3;
 use ndarray::Array3;
+use rayon::prelude::*;
 
 use crate::interp::trilinear;
 
@@ -215,41 +216,44 @@ pub(crate) fn render_stretched(
 
     let mut image = vec![f32::NAN; pixels_high * pixels_wide];
 
-    for row in 0..pixels_high {
-        // row 0 = top = +Y; row (pixels_high-1) = bottom = -Y
-        let y_offset_mm = (pixels_high as f64 / 2.0 - row as f64) * geom.dy_mm;
+    image
+        .par_chunks_mut(pixels_wide)
+        .enumerate()
+        .for_each(|(row, row_slice)| {
+            // row 0 = top = +Y; row (pixels_high-1) = bottom = -Y
+            let y_offset_mm = (pixels_high as f64 / 2.0 - row as f64) * geom.dy_mm;
 
-        // Skip rows outside the lateral field of view
-        if y_offset_mm.abs() > width_mm + geom.dy_mm {
-            continue;
-        }
-
-        for col in 0..pixels_wide {
-            let base_pt = geom.proj_col_pts[col] + y_offset_mm * geom.projection_normal;
-            let slab_dir = &geom.slab_dirs[col];
-
-            let mut sum = 0.0f64;
-            let mut count = 0u32;
-
-            for &s_off in &slab_offsets {
-                let sample_pt = base_pt + s_off * slab_dir;
-                let vz = (sample_pt[0] - origin[0]) * inv_spacing[0];
-                let vy = (sample_pt[1] - origin[1]) * inv_spacing[1];
-                let vx = (sample_pt[2] - origin[2]) * inv_spacing[2];
-                let val = trilinear(volume, vz, vy, vx);
-                if !val.is_nan() {
-                    sum += val as f64;
-                    count += 1;
-                }
+            // Skip rows outside the lateral field of view
+            if y_offset_mm.abs() > width_mm + geom.dy_mm {
+                return;
             }
 
-            image[row * pixels_wide + col] = if count > 0 {
-                (sum / count as f64) as f32
-            } else {
-                f32::NAN
-            };
-        }
-    }
+            for col in 0..pixels_wide {
+                let base_pt = geom.proj_col_pts[col] + y_offset_mm * geom.projection_normal;
+                let slab_dir = &geom.slab_dirs[col];
+
+                let mut sum = 0.0f64;
+                let mut count = 0u32;
+
+                for &s_off in &slab_offsets {
+                    let sample_pt = base_pt + s_off * slab_dir;
+                    let vz = (sample_pt[0] - origin[0]) * inv_spacing[0];
+                    let vy = (sample_pt[1] - origin[1]) * inv_spacing[1];
+                    let vx = (sample_pt[2] - origin[2]) * inv_spacing[2];
+                    let val = trilinear(volume, vz, vy, vx);
+                    if !val.is_nan() {
+                        sum += val as f64;
+                        count += 1;
+                    }
+                }
+
+                row_slice[col] = if count > 0 {
+                    (sum / count as f64) as f32
+                } else {
+                    f32::NAN
+                };
+            }
+        });
 
     StretchedCprResult {
         image,

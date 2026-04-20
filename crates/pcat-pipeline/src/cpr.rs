@@ -1,5 +1,6 @@
 use nalgebra::Vector3;
 use ndarray::Array3;
+use rayon::prelude::*;
 
 use crate::interp::trilinear;
 use crate::spline::CubicSpline3D;
@@ -122,45 +123,49 @@ impl CprFrame {
 
         let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
-        // Image reconstruction
+        // Image reconstruction — parallelize over rows so each thread owns a
+        // contiguous row slice and never races with another.
         let mut image = vec![f32::NAN; pixels_high * n_cols];
 
-        for j in 0..n_cols {
-            let pos = Vector3::new(
-                self.positions[j][0],
-                self.positions[j][1],
-                self.positions[j][2],
-            );
-            let n_vec = rot_normals[j];
-            let b_vec = rot_binormals[j];
-
-            for i in 0..pixels_high {
+        image
+            .par_chunks_mut(n_cols)
+            .enumerate()
+            .for_each(|(i, row_slice)| {
                 // Lateral offset: top row = +width_mm, bottom row = -width_mm
                 let lateral =
                     width_mm * (1.0 - 2.0 * (i as f64) / ((pixels_high - 1) as f64));
 
-                let mut max_val = f32::NEG_INFINITY;
+                for j in 0..n_cols {
+                    let pos = Vector3::new(
+                        self.positions[j][0],
+                        self.positions[j][1],
+                        self.positions[j][2],
+                    );
+                    let n_vec = rot_normals[j];
+                    let b_vec = rot_binormals[j];
 
-                for &slab_off in &slab_offsets {
-                    let sample_mm = pos + lateral * n_vec + slab_off * b_vec;
+                    let mut max_val = f32::NEG_INFINITY;
 
-                    let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                    let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                    let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+                    for &slab_off in &slab_offsets {
+                        let sample_mm = pos + lateral * n_vec + slab_off * b_vec;
 
-                    let val = trilinear(volume, vz, vy, vx);
-                    if !val.is_nan() && val > max_val {
-                        max_val = val;
+                        let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                        let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                        let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+
+                        let val = trilinear(volume, vz, vy, vx);
+                        if !val.is_nan() && val > max_val {
+                            max_val = val;
+                        }
                     }
-                }
 
-                image[i * n_cols + j] = if max_val == f32::NEG_INFINITY {
-                    f32::NAN
-                } else {
-                    max_val
-                };
-            }
-        }
+                    row_slice[j] = if max_val == f32::NEG_INFINITY {
+                        f32::NAN
+                    } else {
+                        max_val
+                    };
+                }
+            });
 
         CprResult {
             image,
@@ -270,7 +275,7 @@ impl CprFrame {
         let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
         position_fracs
-            .iter()
+            .par_iter()
             .map(|&frac| {
                 let idx = ((frac * (n - 1) as f64).round() as usize).min(n - 1);
 
@@ -285,22 +290,25 @@ impl CprFrame {
 
                 let mut image = vec![f32::NAN; pixels * pixels];
 
-                for row in 0..pixels {
-                    for col in 0..pixels {
+                image
+                    .par_chunks_mut(pixels)
+                    .enumerate()
+                    .for_each(|(row, row_slice)| {
                         let offset_n = width_mm
                             * (1.0 - 2.0 * (row as f64) / ((pixels - 1) as f64));
-                        let offset_b = width_mm
-                            * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
+                        for col in 0..pixels {
+                            let offset_b = width_mm
+                                * (1.0 - 2.0 * (col as f64) / ((pixels - 1) as f64));
 
-                        let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
+                            let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
 
-                        let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                        let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                        let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+                            let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
+                            let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
+                            let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
 
-                        image[row * pixels + col] = trilinear(volume, vz, vy, vx);
-                    }
-                }
+                            row_slice[col] = trilinear(volume, vz, vy, vx);
+                        }
+                    });
 
                 CrossSectionResult {
                     image,

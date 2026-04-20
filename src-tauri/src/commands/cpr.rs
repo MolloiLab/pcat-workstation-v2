@@ -253,12 +253,21 @@ pub struct CprProjectionInfo {
     pub dy_mm: f64,
     pub pixels_wide: usize,
     pub pixels_high: usize,
+    /// Lookup table for `worldToStretchedCpr`. Uniformly sampled in projected
+    /// arc-length; sized independently of the render resolution so that the
+    /// frontend's per-seed segment search stays cheap.
     pub proj_col_pts: Vec<[f64; 3]>,
-    pub orig_col_pts: Vec<[f64; 3]>,
     pub arclengths: Vec<f64>,
     pub positions: Vec<[f64; 3]>,
     pub normals: Vec<[f64; 3]>,
 }
+
+/// Upper bound on `proj_col_pts` length used by `get_cpr_projection_info`.
+/// Keep this small — the frontend projection math is insensitive to the exact
+/// length, and the old PCA projection info was effectively O(1). Rendering
+/// still uses the full requested `pixels_wide`; only the frontend lookup table
+/// is capped.
+const PROJECTION_INFO_MAX_COLS: usize = 128;
 
 /// Return the projection parameters needed to map 3D seed positions
 /// to/from 2D CPR canvas coordinates.
