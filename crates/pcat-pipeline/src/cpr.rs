@@ -238,8 +238,6 @@ impl CprFrame {
     ) -> StretchedCprResult {
         let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
 
-        // Direct volume sampling with PCA viewing plane + 3D nearest-point lookup.
-        // No texture warping — each pixel samples the volume directly.
         crate::stretched_cpr::render_stretched(
             &self.positions,
             &rot_normals,

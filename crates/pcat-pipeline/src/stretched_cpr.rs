@@ -300,36 +300,87 @@ mod tests {
         }
     }
 
-    /// Straight Z-axis centerline in a uniform volume: mid-row should be ~100 at every column.
+    /// Straight Z-axis centerline in a z-gradient volume: mid-row values must be monotonic
+    /// along the column axis, spanning most of the centerline's Z range.
+    ///
+    /// Volume: `vol[z, y, x] = z as f32` so that a straight centerline from z=10 to z=53
+    /// (at y=32, x=32) samples increasing Z values as the column advances.  The mid-row
+    /// must therefore be monotonic and its range must cover ≥80 % of z_end − z_start.
     #[test]
-    fn test_straight_line_uniform_mid_row() {
-        let vol = Array3::<f32>::from_elem((64, 64, 64), 100.0_f32);
-        let spacing = [1.0, 1.0, 1.0];
-        let origin = [0.0, 0.0, 0.0];
+    fn test_stretched_z_gradient_monotonic() {
+        let nz = 64usize;
+        let ny = 64usize;
+        let nx = 64usize;
 
-        let n_pts = 50;
-        let positions: Vec<[f64; 3]> = (5..5 + n_pts).map(|z| [z as f64, 32.0, 32.0]).collect();
+        // vol[z, y, x] = z
+        let vol = {
+            let mut v = Array3::<f32>::zeros((nz, ny, nx));
+            for iz in 0..nz {
+                for iy in 0..ny {
+                    for ix in 0..nx {
+                        v[[iz, iy, ix]] = iz as f32;
+                    }
+                }
+            }
+            v
+        };
+        let spacing = [1.0f64, 1.0, 1.0];
+        let origin = [0.0f64, 0.0, 0.0];
+
+        let z_start = 10usize;
+        let z_end = 53usize;
+        let n_pts = z_end - z_start + 1;
+        // Centerline along Z at (y=32, x=32)
+        let positions: Vec<[f64; 3]> =
+            (z_start..=z_end).map(|z| [z as f64, 32.0, 32.0]).collect();
         let arclengths: Vec<f64> = (0..n_pts).map(|i| i as f64).collect();
 
-        let normals: Vec<Vector3<f64>> = (0..n_pts).map(|_| Vector3::new(0.0, 1.0, 0.0)).collect();
-        let binormals: Vec<Vector3<f64>> = (0..n_pts).map(|_| Vector3::new(0.0, 0.0, 1.0)).collect();
+        let normals: Vec<Vector3<f64>> =
+            (0..n_pts).map(|_| Vector3::new(0.0, 1.0, 0.0)).collect();
+        let binormals: Vec<Vector3<f64>> =
+            (0..n_pts).map(|_| Vector3::new(0.0, 0.0, 1.0)).collect();
+
+        let pixels_wide = 64usize;
+        let pixels_high = 64usize;
 
         let result = render_stretched(
             &positions, &normals, &binormals, &arclengths,
             &vol, spacing, origin,
-            20.0, 60, 60, 0.0, 0.0,
+            20.0, pixels_wide, pixels_high, 0.5, 0.0,
         );
 
+        // Extract mid-row (non-NaN values only)
         let mid_row = result.pixels_high / 2;
-        let valid: Vec<f32> = (0..result.pixels_wide)
+        let mid_row_vals: Vec<f32> = (0..result.pixels_wide)
             .map(|c| result.image[mid_row * result.pixels_wide + c])
-            .filter(|v| !v.is_nan())
             .collect();
 
-        assert!(valid.len() > 10, "expected non-NaN pixels at mid row, got {}", valid.len());
-        for &v in &valid {
-            assert!((v - 100.0).abs() < 1.0, "mid-row should be ~100, got {v}");
-        }
+        let valid: Vec<f32> = mid_row_vals.iter().copied().filter(|v| !v.is_nan()).collect();
+        assert!(
+            valid.len() > 10,
+            "expected many non-NaN pixels in mid-row, got {}",
+            valid.len()
+        );
+
+        // Assert monotonicity: either all diffs ≥ 0 or all diffs ≤ 0
+        let diffs: Vec<f32> = valid.windows(2).map(|w| w[1] - w[0]).collect();
+        let increasing = diffs.iter().all(|&d| d >= -0.5);
+        let decreasing = diffs.iter().all(|&d| d <= 0.5);
+        assert!(
+            increasing || decreasing,
+            "mid-row values are not monotonic; first 10 values: {:?}",
+            &valid[..valid.len().min(10)]
+        );
+
+        // Assert that the value range spans ≥80 % of the centerline's Z range
+        let z_range = (z_end - z_start) as f32;
+        let val_min = valid.iter().cloned().fold(f32::INFINITY, f32::min);
+        let val_max = valid.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let val_span = val_max - val_min;
+        assert!(
+            val_span >= 0.8 * z_range,
+            "mid-row value span {val_span:.1} should be ≥80% of z_range {z_range:.1}"
+        );
     }
 
     /// L-shape centerline: vessel (HU=300) tube should appear near mid-Y in most columns.
