@@ -326,6 +326,7 @@ pub struct SeriesDescriptorDto {
     /// Absolute file paths in z-sorted order.
     pub file_paths: Vec<String>,
     pub slice_positions_z: Vec<f64>,
+    pub image_position_patient: [f64; 3],
 }
 
 impl From<SeriesDescriptor> for SeriesDescriptorDto {
@@ -348,6 +349,7 @@ impl From<SeriesDescriptor> for SeriesDescriptorDto {
             study_description: d.study_description,
             file_paths: d.file_paths.into_iter().map(|p| p.to_string_lossy().into_owned()).collect(),
             slice_positions_z: d.slice_positions_z,
+            image_position_patient: d.image_position_patient,
         }
     }
 }
@@ -572,7 +574,14 @@ fn build_dual_energy_volume(
         normal[0], normal[1], normal[2],
     ];
     let spacing = [m.slice_spacing, m.pixel_spacing[0], m.pixel_spacing[1]];
-    let origin = [m.slice_positions_z.first().copied().unwrap_or(0.0), 0.0, 0.0];
+    // ZYX order; the LPS x/y components were silently dropped before, which
+    // miscomputed voxel indices for any acquisition not centered at isocenter.
+    let ipp = m.image_position_patient;
+    let origin = [
+        m.slice_positions_z.first().copied().unwrap_or(ipp[2]),
+        ipp[1],
+        ipp[0],
+    ];
 
     Ok(pcat_pipeline::dicom_loader::DualEnergyVolume {
         low: Arc::new(low_arr),
@@ -617,10 +626,14 @@ fn bridge_into_state(
     ];
 
     let spacing = [meta.slice_spacing, meta.pixel_spacing[0], meta.pixel_spacing[1]];
+    // ZYX order; the LPS x/y components were silently dropped before. Sampling
+    // code (CPR, ROI, radial-angular) reads `origin[1]` and `origin[2]` and
+    // would shift voxel indices by the unrecorded patient x/y offset.
+    let ipp = meta.image_position_patient;
     let origin = [
-        meta.slice_positions_z.first().copied().unwrap_or(0.0),
-        0.0,
-        0.0,
+        meta.slice_positions_z.first().copied().unwrap_or(ipp[2]),
+        ipp[1],
+        ipp[0],
     ];
 
     let legacy = StateLoadedVolume {

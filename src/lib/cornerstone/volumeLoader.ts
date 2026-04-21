@@ -40,7 +40,16 @@ export function buildVolume(
     metadata.pixel_spacing[0],   // sy (row spacing)
     metadata.slice_spacing,
   ];
-  const origin: Point3 = [0, 0, metadata.slice_positions_z[0] ?? 0];
+  // Cornerstone takes origin in patient XYZ. Use the full ImagePositionPatient
+  // so the world frame matches the DICOM patient frame; the rust side mirrors
+  // this in ZYX order. Falls back to slice_positions_z[0] for the Z component
+  // when both sides agree (slice_positions_z drives slice sorting).
+  const ipp = metadata.image_position_patient;
+  const origin: Point3 = [
+    ipp[0],
+    ipp[1],
+    metadata.slice_positions_z[0] ?? ipp[2],
+  ];
 
   // Direction: 3x3 with rows = IOP_row, IOP_col, normal.
   const iopRow: [number, number, number] = [

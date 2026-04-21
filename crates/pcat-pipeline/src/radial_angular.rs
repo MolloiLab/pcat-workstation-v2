@@ -70,6 +70,7 @@ pub fn sample_radial_angular(
     finalized_contours: &HashMap<usize, Vec<[f64; 2]>>,
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     params: &RadialAngularParams,
 ) -> Vec<CrossSectionSurface> {
     let n_radial = (params.max_radius_mm / params.radial_step_mm).ceil() as usize;
@@ -175,10 +176,13 @@ pub fn sample_radial_angular(
                 let world_y = pos_mm[1] + dist_from_center_mm * dir_3d[1];
                 let world_x = pos_mm[2] + dist_from_center_mm * dir_3d[2];
 
-                // Convert to voxel coords.
-                let vz = (world_z - origin[0]) * inv_spacing[0];
-                let vy = (world_y - origin[1]) * inv_spacing[1];
-                let vx = (world_x - origin[2]) * inv_spacing[2];
+                // Convert to voxel coords (honors DICOM IOP).
+                let [vz, vy, vx] = crate::types::patient_to_voxel(
+                    [world_z, world_y, world_x],
+                    origin,
+                    inv_spacing,
+                    direction,
+                );
 
                 let val = trilinear(material_map, vz, vy, vx);
                 surface_data[i_theta * n_radial + i_r] = val;

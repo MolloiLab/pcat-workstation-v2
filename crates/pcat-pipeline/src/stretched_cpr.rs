@@ -199,6 +199,7 @@ pub(crate) fn render_stretched(
     volume: &Array3<f32>,
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     width_mm: f64,
     pixels_wide: usize,
     pixels_high: usize,
@@ -245,9 +246,12 @@ pub(crate) fn render_stretched(
 
                 for &s_off in &slab_offsets {
                     let sample_pt = base_pt + s_off * slab_dir;
-                    let vz = (sample_pt[0] - origin[0]) * inv_spacing[0];
-                    let vy = (sample_pt[1] - origin[1]) * inv_spacing[1];
-                    let vx = (sample_pt[2] - origin[2]) * inv_spacing[2];
+                    let [vz, vy, vx] = crate::types::patient_to_voxel(
+                        [sample_pt[0], sample_pt[1], sample_pt[2]],
+                        origin,
+                        inv_spacing,
+                        direction,
+                    );
                     let val = trilinear(volume, vz, vy, vx);
                     if !val.is_nan() {
                         sum += val as f64;

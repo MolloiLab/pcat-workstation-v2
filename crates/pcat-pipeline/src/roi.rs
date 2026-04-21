@@ -131,6 +131,7 @@ pub fn build_3d_roi_mask(
     volume_dims: [usize; 3],
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     cross_section_width_mm: f64,
     cross_section_pixels: usize,
 ) -> Array3<bool> {
@@ -252,10 +253,16 @@ pub fn build_3d_roi_mask(
             let world_y = pos[1] + offset_n * normal[1] + offset_b * binormal[1];
             let world_x = pos[2] + offset_n * normal[2] + offset_b * binormal[2];
 
-            // Convert world mm to voxel indices
-            let vz = ((world_z - origin[0]) * inv_spacing[0]).round() as i64;
-            let vy = ((world_y - origin[1]) * inv_spacing[1]).round() as i64;
-            let vx = ((world_x - origin[2]) * inv_spacing[2]).round() as i64;
+            // Convert world mm to voxel indices (honors DICOM IOP).
+            let [vzc, vyc, vxc] = crate::types::patient_to_voxel(
+                [world_z, world_y, world_x],
+                origin,
+                inv_spacing,
+                direction,
+            );
+            let vz = vzc.round() as i64;
+            let vy = vyc.round() as i64;
+            let vx = vxc.round() as i64;
 
             // Bounds check
             if vz >= 0

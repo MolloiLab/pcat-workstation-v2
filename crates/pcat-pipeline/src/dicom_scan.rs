@@ -26,6 +26,11 @@ pub struct SliceHeader {
     pub image_comments: Option<String>,
     pub instance_number: Option<i32>,
     pub image_position_z: Option<f64>,
+    /// Full ImagePositionPatient (0020,0032) in patient LPS mm — `[x, y, z]`.
+    /// `None` if the tag is absent or malformed. The legacy `image_position_z`
+    /// field above mirrors `image_position_patient[2]` and is kept because slice
+    /// sorting is in terms of z only.
+    pub image_position_patient: Option<[f64; 3]>,
     pub rows: u32,
     pub cols: u32,
     pub rescale_slope: f64,
@@ -68,13 +73,20 @@ pub fn read_header(path: &Path) -> Result<Option<SliceHeader>, DicomLoadError> {
     let orient = read_multi_f64(&obj, tags::IMAGE_ORIENTATION_PATIENT);
     let ipp = read_multi_f64(&obj, tags::IMAGE_POSITION_PATIENT);
 
+    let image_position_patient = if ipp.len() >= 3 {
+        Some([ipp[0], ipp[1], ipp[2]])
+    } else {
+        None
+    };
+
     Ok(Some(SliceHeader {
         path: path.to_path_buf(),
         series_uid,
         series_description: read_string(&obj, tags::SERIES_DESCRIPTION).unwrap_or_default(),
         image_comments: read_string(&obj, IMAGE_COMMENTS),
         instance_number: read_i32(&obj, tags::INSTANCE_NUMBER),
-        image_position_z: ipp.get(2).copied(),
+        image_position_z: image_position_patient.map(|p| p[2]),
+        image_position_patient,
         rows,
         cols,
         rescale_slope: read_f64(&obj, tags::RESCALE_SLOPE).unwrap_or(1.0),
@@ -174,6 +186,12 @@ pub struct SeriesDescriptor {
     pub file_paths: Vec<PathBuf>,
     /// Per-slice z position (parallel to `file_paths`).
     pub slice_positions_z: Vec<f64>,
+    /// Full `ImagePositionPatient` of the first slice in patient LPS mm,
+    /// `[x, y, z]`. Defaults to `[0, 0, 0]` when the tag is absent on every
+    /// slice. Used by callers to anchor the volume in patient space — the
+    /// previous practice of dropping x and y would silently miscompute voxel
+    /// indices for any acquisition that wasn't centered at isocenter.
+    pub image_position_patient: [f64; 3],
 }
 
 /// Walk a folder (non-recursively) and return one SeriesDescriptor per
@@ -252,6 +270,10 @@ fn descriptor_from_slices(uid: String, slices: Vec<SliceHeader>) -> SeriesDescri
         1.0
     };
 
+    let image_position_patient = first
+        .image_position_patient
+        .unwrap_or([0.0, 0.0, slice_positions_z.first().copied().unwrap_or(0.0)]);
+
     SeriesDescriptor {
         uid,
         description,
@@ -270,6 +292,7 @@ fn descriptor_from_slices(uid: String, slices: Vec<SliceHeader>) -> SeriesDescri
         study_description,
         file_paths,
         slice_positions_z,
+        image_position_patient,
     }
 }
 
@@ -311,6 +334,7 @@ mod tests {
             image_comments: None,
             instance_number: inst,
             image_position_z: z,
+            image_position_patient: z.map(|zz| [0.0, 0.0, zz]),
             rows: 64,
             cols: 64,
             rescale_slope: 1.0,

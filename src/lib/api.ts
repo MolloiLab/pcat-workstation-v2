@@ -44,6 +44,8 @@ export interface SeriesDescriptor {
   study_description: string;
   file_paths: string[];
   slice_positions_z: number[];
+  /** ImagePositionPatient of first slice in patient LPS mm: [x, y, z]. */
+  image_position_patient: [number, number, number];
 }
 
 export interface VolumeMetadata {
@@ -61,6 +63,8 @@ export interface VolumeMetadata {
   patient_name: string;
   study_description: string;
   slice_positions_z: number[];
+  /** ImagePositionPatient of first slice in patient LPS mm: [x, y, z]. */
+  image_position_patient: [number, number, number];
 }
 
 export type DicomLoadPhase = 'scanning' | 'scanned' | 'decoding' | 'done';

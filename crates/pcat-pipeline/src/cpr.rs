@@ -98,6 +98,7 @@ impl CprFrame {
         volume: &Array3<f32>,
         spacing: [f64; 3],
         origin: [f64; 3],
+        direction: &[f64; 9],
         rotation_deg: f64,
         width_mm: f64,
         pixels_high: usize,
@@ -149,9 +150,12 @@ impl CprFrame {
                     for &slab_off in &slab_offsets {
                         let sample_mm = pos + lateral * n_vec + slab_off * b_vec;
 
-                        let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                        let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                        let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+                        let [vz, vy, vx] = crate::types::patient_to_voxel(
+                            [sample_mm[0], sample_mm[1], sample_mm[2]],
+                            origin,
+                            inv_spacing,
+                            direction,
+                        );
 
                         let val = trilinear(volume, vz, vy, vx);
                         if !val.is_nan() && val > max_val {
@@ -181,6 +185,7 @@ impl CprFrame {
         volume: &Array3<f32>,
         spacing: [f64; 3],
         origin: [f64; 3],
+        direction: &[f64; 9],
         position_frac: f64,
         rotation_deg: f64,
         width_mm: f64,
@@ -213,9 +218,12 @@ impl CprFrame {
 
                 let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
 
-                let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+                let [vz, vy, vx] = crate::types::patient_to_voxel(
+                    [sample_mm[0], sample_mm[1], sample_mm[2]],
+                    origin,
+                    inv_spacing,
+                    direction,
+                );
 
                 image[row * pixels + col] = trilinear(volume, vz, vy, vx);
             }
@@ -235,6 +243,7 @@ impl CprFrame {
         volume: &Array3<f32>,
         spacing: [f64; 3],
         origin: [f64; 3],
+        direction: &[f64; 9],
         rotation_deg: f64,
         width_mm: f64,
         pixels_wide: usize,
@@ -251,6 +260,7 @@ impl CprFrame {
             volume,
             spacing,
             origin,
+            direction,
             width_mm,
             pixels_wide,
             pixels_high,
@@ -265,6 +275,7 @@ impl CprFrame {
         volume: &Array3<f32>,
         spacing: [f64; 3],
         origin: [f64; 3],
+        direction: &[f64; 9],
         position_fracs: &[f64],
         rotation_deg: f64,
         width_mm: f64,
@@ -302,9 +313,12 @@ impl CprFrame {
 
                             let sample_mm = pos + offset_n * n_vec + offset_b * b_vec;
 
-                            let vz = (sample_mm[0] - origin[0]) * inv_spacing[0];
-                            let vy = (sample_mm[1] - origin[1]) * inv_spacing[1];
-                            let vx = (sample_mm[2] - origin[2]) * inv_spacing[2];
+                            let [vz, vy, vx] = crate::types::patient_to_voxel(
+                                [sample_mm[0], sample_mm[1], sample_mm[2]],
+                                origin,
+                                inv_spacing,
+                                direction,
+                            );
 
                             row_slice[col] = trilinear(volume, vz, vy, vx);
                         }
@@ -414,6 +428,7 @@ pub fn compute_cpr(
     centerline_mm: &[[f64; 3]],
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     width_mm: f64,
     slab_mm: f64,
     pixels_wide: usize,
@@ -421,7 +436,7 @@ pub fn compute_cpr(
     rotation_deg: f64,
 ) -> CprResult {
     let frame = CprFrame::from_centerline(centerline_mm, pixels_wide);
-    frame.render_cpr(volume, spacing, origin, rotation_deg, width_mm, pixels_high, slab_mm)
+    frame.render_cpr(volume, spacing, origin, direction, rotation_deg, width_mm, pixels_high, slab_mm)
 }
 
 /// Compute a cross-sectional image perpendicular to the centerline at a
@@ -431,6 +446,7 @@ pub fn compute_cross_section(
     centerline_mm: &[[f64; 3]],
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     position_frac: f64,
     rotation_deg: f64,
     width_mm: f64,
@@ -438,7 +454,7 @@ pub fn compute_cross_section(
 ) -> CrossSectionResult {
     let n_samples = centerline_mm.len().max(2);
     let frame = CprFrame::from_centerline(centerline_mm, n_samples);
-    frame.render_cross_section(volume, spacing, origin, position_frac, rotation_deg, width_mm, pixels)
+    frame.render_cross_section(volume, spacing, origin, direction, position_frac, rotation_deg, width_mm, pixels)
 }
 
 /// Compute multiple cross-sections in a single call. Legacy single-call API.
@@ -447,6 +463,7 @@ pub fn compute_cross_sections_batch(
     centerline_mm: &[[f64; 3]],
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     position_fracs: &[f64],
     rotation_deg: f64,
     width_mm: f64,
@@ -454,7 +471,7 @@ pub fn compute_cross_sections_batch(
 ) -> Vec<CrossSectionResult> {
     let n_samples = centerline_mm.len().max(2);
     let frame = CprFrame::from_centerline(centerline_mm, n_samples);
-    frame.render_cross_sections(volume, spacing, origin, position_fracs, rotation_deg, width_mm, pixels)
+    frame.render_cross_sections(volume, spacing, origin, direction, position_fracs, rotation_deg, width_mm, pixels)
 }
 
 #[cfg(test)]

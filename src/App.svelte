@@ -168,11 +168,13 @@
 
       // 4. Populate the legacy volumeStore shape.
       const direction = computeDirectionMatrix(metadata.orientation);
+      const ipp = metadata.image_position_patient;
       const storeMeta: VolumeMetadata = {
         volumeId: volumeKey,
         shape: [metadata.num_slices, metadata.rows, metadata.cols],
         spacing: [metadata.slice_spacing, metadata.pixel_spacing[0], metadata.pixel_spacing[1]],
-        origin: [metadata.slice_positions_z[0] ?? 0, 0, 0],
+        // ZYX patient LPS mm; mirrors src-tauri bridge_into_state.
+        origin: [metadata.slice_positions_z[0] ?? ipp[2], ipp[1], ipp[0]],
         direction,
         windowCenter: metadata.window_center,
         windowWidth: metadata.window_width,

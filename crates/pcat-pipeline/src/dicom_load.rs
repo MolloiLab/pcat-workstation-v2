@@ -34,6 +34,10 @@ pub struct VolumeMetadata {
     pub patient_name: String,
     pub study_description: String,
     pub slice_positions_z: Vec<f64>,
+    /// `ImagePositionPatient` of the first slice in patient LPS mm, `[x, y, z]`.
+    /// Required for correct voxel-index conversion in any sampler that consumes
+    /// patient-space coordinates (CPR, ROI, radial-angular).
+    pub image_position_patient: [f64; 3],
 }
 
 impl From<&SeriesDescriptor> for VolumeMetadata {
@@ -53,6 +57,7 @@ impl From<&SeriesDescriptor> for VolumeMetadata {
             patient_name: d.patient_name.clone(),
             study_description: d.study_description.clone(),
             slice_positions_z: d.slice_positions_z.clone(),
+            image_position_patient: d.image_position_patient,
         }
     }
 }
