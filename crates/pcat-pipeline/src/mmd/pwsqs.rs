@@ -650,6 +650,183 @@ mod tests {
         assert!(result.water_frac[[0, 0, 1]] > 0.0 || result.lipid_frac[[0, 0, 1]] > 0.0);
     }
 
+    #[test]
+    fn test_run_mmd_on_roi_recovers_known_mixture() {
+        // End-to-end synthetic integration test paralleling `run_mmd_on_roi`:
+        // a 20 x 20 x 20 dual-energy volume partitioned into three sub-regions
+        // with known water/lipid/iodine volume fractions. HU values at 70 and
+        // 150 keV are synthesized from the basis library's LAC constants
+        // (MaterialLibrary::lac_low / lac_high) so the test measures exactly
+        // what the MMD pipeline -- the core of run_mmd_on_roi -- sees.
+        //
+        // This mirrors the Tauri command `run_mmd_on_roi` which, after building
+        // the 3D ROI mask, calls `decompose_volume_direct` / `pwsqs_solve` on
+        // the dual-energy volumes. Both methods are exercised here: direct is
+        // asserted strictly (+/- 5%); PWSQS is asserted loosely (+/- 8%) to
+        // accommodate Huber-penalty drift in the W/L channel at band
+        // boundaries -- a known characteristic of spatial regularization when
+        // sub-regions of different mixtures are adjacent.
+        let lib = MaterialLibrary::naeotom_70_150();
+        let (nz, ny, nx) = (20, 20, 20);
+
+        // Three known sub-region mixtures (water, lipid, iodine) summing to 1.
+        // Split the volume along the z axis into three equal bands. Mixtures
+        // are chosen so the W/L/I contributions are well-separated by LAC
+        // contrast.
+        let region_fracs: [[f64; 3]; 3] = [
+            [0.60, 0.30, 0.10], // band 0: water-dominant (normal tissue-like)
+            [0.45, 0.50, 0.05], // band 1: lipid-rich (PVAT-like)
+            [0.50, 0.20, 0.30], // band 2: iodine-rich (contrast-enhanced)
+        ];
+
+        // Helper: synthesize HU at a given energy from (f_w, f_l, f_i).
+        // mu = sum_m f_m * mu_m ; HU = (mu / mu_water - 1) * 1000.
+        let synth_hu = |f: [f64; 3], energy_idx: usize| -> f32 {
+            let (mu_w, mu_l, mu_i) = if energy_idx == 0 {
+                (
+                    lib.lac_low(Material::Water),
+                    lib.lac_low(Material::Lipid),
+                    lib.lac_low(Material::Iodine),
+                )
+            } else {
+                (
+                    lib.lac_high(Material::Water),
+                    lib.lac_high(Material::Lipid),
+                    lib.lac_high(Material::Iodine),
+                )
+            };
+            let mu = f[0] * mu_w + f[1] * mu_l + f[2] * mu_i;
+            ((mu / mu_w - 1.0) * 1000.0) as f32
+        };
+
+        // Build per-region HU values.
+        let hu_per_region: [(f32, f32); 3] = [
+            (synth_hu(region_fracs[0], 0), synth_hu(region_fracs[0], 1)),
+            (synth_hu(region_fracs[1], 0), synth_hu(region_fracs[1], 1)),
+            (synth_hu(region_fracs[2], 0), synth_hu(region_fracs[2], 1)),
+        ];
+
+        // Populate 20x20x20 volumes: z in [0..7] -> band 0, [7..14] -> band 1,
+        // [14..20] -> band 2. The ROI mask covers the full volume (emulating
+        // three sub-regions inside the decomposition ROI).
+        let band_of = |z: usize| -> usize {
+            if z < 7 {
+                0
+            } else if z < 14 {
+                1
+            } else {
+                2
+            }
+        };
+
+        let n = nz * ny * nx;
+        let mut low_data = vec![0.0f32; n];
+        let mut high_data = vec![0.0f32; n];
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    let idx = z * ny * nx + y * nx + x;
+                    let b = band_of(z);
+                    low_data[idx] = hu_per_region[b].0;
+                    high_data[idx] = hu_per_region[b].1;
+                }
+            }
+        }
+
+        let low = Array3::from_shape_vec((nz, ny, nx), low_data).unwrap();
+        let high = Array3::from_shape_vec((nz, ny, nx), high_data).unwrap();
+        let mask = Array3::from_elem((nz, ny, nx), true);
+
+        // Band ranges over the z axis. Assertion excludes the one-voxel-thick
+        // boundary row between adjacent bands where spatial regularization
+        // pulls PWSQS fractions toward neighboring-band mixtures.
+        let band_ranges = [(1usize, 6usize), (8, 13), (15, 19)];
+
+        // --- Method 1: direct (Cramer's rule, 3-material). Asserts +/- 5%. ---
+        let direct = decompose_volume_direct(&low, &high, &mask, &lib);
+        check_bands(
+            &direct.water_frac,
+            &direct.lipid_frac,
+            &direct.iodine_frac,
+            &region_fracs,
+            &band_ranges,
+            0.05,
+            "direct",
+        );
+
+        // --- Method 2: PWSQS (iterative, 4-material). Asserts +/- 8%. ---
+        // The loosened tolerance reflects the W/L direction drift induced by
+        // the Huber-weighted spatial penalty when adjacent sub-regions carry
+        // different mixtures; it is a characteristic of the regularizer, not
+        // a solver bug.
+        let params = PwsqsParams::default();
+        let pwsqs = pwsqs_solve(&low, &high, &mask, &lib, &params, None);
+        check_bands(
+            &pwsqs.water_frac,
+            &pwsqs.lipid_frac,
+            &pwsqs.iodine_frac,
+            &region_fracs,
+            &band_ranges,
+            0.08,
+            "pwsqs",
+        );
+
+        // Sanity: PWSQS should report iteration progress.
+        assert!(pwsqs.iterations >= 1);
+    }
+
+    /// Assert mean recovered (W, L, I) fractions per band lie within +/- `tol`
+    /// of the ground-truth mixture. Used by
+    /// `test_run_mmd_on_roi_recovers_known_mixture`.
+    fn check_bands(
+        water_frac: &Array3<f32>,
+        lipid_frac: &Array3<f32>,
+        iodine_frac: &Array3<f32>,
+        region_fracs: &[[f64; 3]; 3],
+        band_ranges: &[(usize, usize); 3],
+        tol: f64,
+        label: &str,
+    ) {
+        let (_, ny, nx) = (
+            water_frac.shape()[0],
+            water_frac.shape()[1],
+            water_frac.shape()[2],
+        );
+        for (b, &(z0, z1)) in band_ranges.iter().enumerate() {
+            let mut sum_w = 0.0f64;
+            let mut sum_l = 0.0f64;
+            let mut sum_i = 0.0f64;
+            let mut count = 0.0f64;
+            for z in z0..z1 {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        sum_w += water_frac[[z, y, x]] as f64;
+                        sum_l += lipid_frac[[z, y, x]] as f64;
+                        sum_i += iodine_frac[[z, y, x]] as f64;
+                        count += 1.0;
+                    }
+                }
+            }
+            let mean_w = sum_w / count;
+            let mean_l = sum_l / count;
+            let mean_i = sum_i / count;
+
+            let [gt_w, gt_l, gt_i] = region_fracs[b];
+            assert!(
+                (mean_w - gt_w).abs() < tol,
+                "[{label}] band {b} water: expected {gt_w}, got {mean_w} (|diff| >= {tol})"
+            );
+            assert!(
+                (mean_l - gt_l).abs() < tol,
+                "[{label}] band {b} lipid: expected {gt_l}, got {mean_l} (|diff| >= {tol})"
+            );
+            assert!(
+                (mean_i - gt_i).abs() < tol,
+                "[{label}] band {b} iodine: expected {gt_i}, got {mean_i} (|diff| >= {tol})"
+            );
+        }
+    }
+
     /// Helper: compute 3D total variation (sum of |f[p]-f[q]| over all
     /// 6-connected neighbor pairs, counting each pair once).
     fn total_variation_3d(vol: &Array3<f32>) -> f64 {
