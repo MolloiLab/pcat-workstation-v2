@@ -242,7 +242,7 @@
   }
 </script>
 
-<div class="flex h-full w-full flex-col bg-surface">
+<div class="flex h-full w-full flex-col overflow-hidden bg-surface">
   {#if loadingTargets}
     <div class="flex flex-1 items-center justify-center">
       <span class="text-xs text-text-secondary">Generating cross-sections...</span>
@@ -253,9 +253,9 @@
     </div>
   {:else}
     <!-- Main content: editor + surface plot side-by-side -->
-    <div class="flex min-h-0 flex-1">
+    <div class="flex min-h-0 flex-1 overflow-hidden">
       <!-- Left: SnakeEditor for the selected cross-section -->
-      <div class="flex w-1/2 shrink-0 flex-col border-r border-border">
+      <div class="flex w-1/2 shrink-0 flex-col overflow-hidden border-r border-border">
         {#if currentTarget}
           <SnakeEditor
             target={currentTarget}
@@ -269,35 +269,23 @@
       </div>
 
       <!-- Right: surface plot + radial profile placeholder -->
-      <div class="flex min-w-0 flex-1 flex-col">
-        <div class="flex-1 overflow-y-auto p-2">
-          <SurfacePlotPanel
-            {surfaces}
-            selectedIndex={surfaceIndex}
-            {material}
-            {unit}
-            onSliderChange={handleSurfaceSlider}
-          />
-        </div>
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <SurfacePlotPanel
+          {surfaces}
+          selectedIndex={surfaceIndex}
+          {material}
+          {unit}
+          onSliderChange={handleSurfaceSlider}
+        />
 
         <!-- Radial profile placeholder -->
-        <div class="border-t border-border px-3 py-2">
+        <div class="shrink-0 border-t border-border px-3 py-2">
           <span class="text-[10px] text-text-secondary/60">Radial profile (coming soon)</span>
         </div>
       </div>
     </div>
 
-    <!-- Overlay selector bar -->
-    <div class="shrink-0 border-t border-border bg-surface-secondary">
-      <OverlaySelector
-        {material}
-        {unit}
-        onMaterialChange={handleMaterialChange}
-        onUnitChange={handleUnitChange}
-      />
-    </div>
-
-    <!-- Cross-section strip -->
+    <!-- Cross-section strip (full width) -->
     <div class="shrink-0 border-t border-border bg-surface-secondary">
       <CrossSectionStrip
         {targets}
@@ -307,53 +295,61 @@
       />
     </div>
 
-    <!-- Bottom toolbar: MMD controls + progress -->
-    <div class="flex shrink-0 items-center gap-2 border-t border-border bg-surface-secondary px-3 py-1.5">
-      <button
-        class="rounded bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:opacity-40"
-        onclick={handleRunMmd}
-        disabled={mmdBusy || finalizedCount === 0}
-        title="Run PWSQS multi-material decomposition on finalized contours"
-      >
-        {mmdBusy ? 'Running MMD...' : 'Run MMD'}
-      </button>
+    <!-- Bottom toolbar: overlay chips (left) + MMD actions (right) -->
+    <div class="flex shrink-0 flex-wrap items-center gap-3 border-t border-border bg-surface-secondary px-3 py-1.5">
+      <OverlaySelector
+        {material}
+        {unit}
+        onMaterialChange={handleMaterialChange}
+        onUnitChange={handleUnitChange}
+      />
 
-      <button
-        class="rounded bg-surface px-3 py-1 text-xs font-medium text-text-secondary hover:bg-surface/80 active:bg-surface/60 disabled:opacity-40"
-        onclick={handleSave}
-        disabled={saveBusy || targets.length === 0}
-        title="Save annotation state for this patient"
-      >
-        {saveBusy ? 'Saving...' : 'Save'}
-      </button>
+      <div class="ml-auto flex items-center gap-2">
+        <button
+          class="rounded bg-accent/15 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/25 active:bg-accent/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
+          onclick={handleRunMmd}
+          disabled={mmdBusy || finalizedCount === 0}
+          title="Run PWSQS multi-material decomposition on finalized contours"
+        >
+          {mmdBusy ? 'Running MMD...' : 'Run MMD'}
+        </button>
 
-      <button
-        class="rounded bg-surface px-3 py-1 text-xs font-medium text-text-secondary hover:bg-surface/80 active:bg-surface/60 disabled:opacity-40"
-        onclick={handleExportCsv}
-        disabled={exportBusy || !mmdSummary}
-        title="Export MMD surface data as CSV"
-      >
-        {exportBusy ? 'Exporting...' : 'Export CSV'}
-      </button>
+        <button
+          class="rounded bg-surface-tertiary px-3 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 active:bg-surface-tertiary/60 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
+          onclick={handleSave}
+          disabled={saveBusy || targets.length === 0}
+          title="Save annotation state for this patient"
+        >
+          {saveBusy ? 'Saving...' : 'Save'}
+        </button>
 
-      <!-- Progress indicator -->
-      <span class="text-[11px] tabular-nums text-text-secondary">
-        {finalizedCount}/{totalCount} done
-      </span>
+        <button
+          class="rounded bg-surface-tertiary px-3 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 active:bg-surface-tertiary/60 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
+          onclick={handleExportCsv}
+          disabled={exportBusy || !mmdSummary}
+          title="Export MMD surface data as CSV"
+        >
+          {exportBusy ? 'Exporting...' : 'Export CSV'}
+        </button>
 
-      {#if saveMsg}
-        <span class="ml-1 text-[10px] text-success">{saveMsg}</span>
-      {/if}
-
-      {#if mmdSummary}
-        <span class="ml-1 text-[10px] text-success">
-          MMD {mmdSummary.converged ? 'converged' : 'done'} ({mmdSummary.n_voxels.toLocaleString()} voxels)
+        <span class="text-[11px] tabular-nums text-text-secondary">
+          {finalizedCount}/{totalCount} done
         </span>
-      {/if}
 
-      {#if mmdError}
-        <span class="ml-1 truncate text-[10px] text-error">{mmdError}</span>
-      {/if}
+        {#if saveMsg}
+          <span class="text-[10px] text-success">{saveMsg}</span>
+        {/if}
+
+        {#if mmdSummary}
+          <span class="text-[10px] text-success">
+            MMD {mmdSummary.converged ? 'converged' : 'done'} ({mmdSummary.n_voxels.toLocaleString()} voxels)
+          </span>
+        {/if}
+
+        {#if mmdError}
+          <span class="max-w-[24ch] truncate text-[10px] text-error">{mmdError}</span>
+        {/if}
+      </div>
     </div>
   {/if}
 </div>
