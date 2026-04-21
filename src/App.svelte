@@ -125,6 +125,24 @@
     errorMessage = '';
     showRecent = false;
 
+    // Idempotency guard: re-clicking the same patient (from recents, the
+    // patient browser, or the same folder via the dialog) should be a no-op
+    // rather than re-running ~5 s of SMB scan + decode. We also preserve
+    // unsaved in-memory seed edits, which a full reload would wipe.
+    //
+    // Force-reload workflow: pick any other patient, then pick this one
+    // again. The guard only short-circuits when a successful prior load is
+    // still resident (volume + cornerstone id present) and no load is in
+    // flight.
+    if (
+      volumeStore.current?.dicomPath === path
+      && volumeStore.cornerstoneVolumeId !== null
+      && !volumeStore.loading
+    ) {
+      showPatientBrowser = false;
+      return;
+    }
+
     let unlistenProgress: (() => void) | null = null;
 
     try {
