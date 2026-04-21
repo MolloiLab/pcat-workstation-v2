@@ -29,6 +29,10 @@ pub struct CrossSectionCommandResult {
     pub pixels: usize,
     /// Arc-length position in mm
     pub arc_mm: f64,
+    /// Equivalent-circle lumen diameter in mm (FWHM per-ray scan)
+    pub vessel_diameter_mm: f64,
+    /// Lumen boundary polygon [x, y] in pixel coords
+    pub vessel_wall: Vec<[f64; 2]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -199,8 +203,9 @@ pub async fn render_stretched_cpr_image(
 /// Render batch cross-sections. Returns raw binary:
 ///   [n_sections: u32 LE]
 ///   For each section:
-///     [pixels: u32 LE][arc_mm: f64 LE]
+///     [pixels: u32 LE][arc_mm: f64 LE][diameter_mm: f64 LE][n_wall: u32 LE]
 ///     [image: pixels*pixels * f32 LE]
+///     [wall: n_wall * 2 * f32 LE]  (x, y pairs in pixel coords)
 #[tauri::command]
 pub async fn render_cross_sections(
     position_fractions: Vec<f64>,
@@ -236,16 +241,31 @@ pub async fn render_cross_sections(
     .await
     .map_err(|e| format!("render_cross_sections task failed: {e}"))?;
 
-    // Pack: header + per-section data
+    // Pack: header + per-section data (see doc comment above for layout).
     let n_sections = results.len();
-    let per_section_size = 4 + 8 + pixels * pixels * 4; // u32 + f64 + image
-    let mut bytes = Vec::with_capacity(4 + n_sections * per_section_size);
+    let mut bytes = Vec::with_capacity(
+        4 + results
+            .iter()
+            .map(|r| 4 + 8 + 8 + 4 + r.image.len() * 4 + r.vessel_wall.len() * 2 * 4)
+            .sum::<usize>(),
+    );
 
     bytes.extend_from_slice(&(n_sections as u32).to_le_bytes());
     for r in &results {
+        let n_wall = r.vessel_wall.len() as u32;
         bytes.extend_from_slice(&(r.pixels as u32).to_le_bytes());
         bytes.extend_from_slice(&r.arc_mm.to_le_bytes());
+        bytes.extend_from_slice(&r.vessel_diameter_mm.to_le_bytes());
+        bytes.extend_from_slice(&n_wall.to_le_bytes());
         bytes.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&r.image));
+
+        // Flatten wall polygon into an [x0, y0, x1, y1, ...] f32 stream.
+        let mut wall_flat: Vec<f32> = Vec::with_capacity(r.vessel_wall.len() * 2);
+        for [x, y] in &r.vessel_wall {
+            wall_flat.push(*x as f32);
+            wall_flat.push(*y as f32);
+        }
+        bytes.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&wall_flat));
     }
 
     Ok(Response::new(bytes))
@@ -485,6 +505,8 @@ pub async fn compute_cross_section_image(
         image_base64,
         pixels: result.pixels,
         arc_mm: result.arc_mm,
+        vessel_diameter_mm: result.vessel_diameter_mm,
+        vessel_wall: result.vessel_wall,
     })
 }
 
@@ -537,6 +559,8 @@ pub async fn compute_cross_sections_batch(
                 image_base64,
                 pixels: r.pixels,
                 arc_mm: r.arc_mm,
+                vessel_diameter_mm: r.vessel_diameter_mm,
+                vessel_wall: r.vessel_wall,
             }
         })
         .collect())

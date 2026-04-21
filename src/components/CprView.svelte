@@ -96,6 +96,9 @@
     imageData: Float32Array;
     pixels: number;
     arc_mm: number;
+    vesselDiameterMm: number;
+    /** Lumen boundary polygon in pixel coords, one [x, y] pair per vertex. */
+    vesselWall: Float32Array;
   };
   let batchXsA = $state<BatchCrossSectionItem | null>(null);
   let batchXsB = $state<BatchCrossSectionItem | null>(null);
@@ -149,7 +152,10 @@
   /**
    * Decode the raw binary cross-sections response:
    *   [n_sections: u32 LE]
-   *   For each: [pixels: u32 LE][arc_mm: f64 LE][image: pixels*pixels * f32 LE]
+   *   For each:
+   *     [pixels: u32 LE][arc_mm: f64 LE][diameter_mm: f64 LE][n_wall: u32 LE]
+   *     [image: pixels*pixels * f32 LE]
+   *     [wall: n_wall * 2 * f32 LE]
    */
   function decodeCrossSectionsBinary(buffer: ArrayBuffer): BatchCrossSectionItem[] {
     const view = new DataView(buffer);
@@ -162,10 +168,19 @@
       offset += 4;
       const arc_mm = view.getFloat64(offset, true);
       offset += 8;
+      const vesselDiameterMm = view.getFloat64(offset, true);
+      offset += 8;
+      const nWall = view.getUint32(offset, true);
+      offset += 4;
+
       const imgLen = pixels * pixels;
       const imageData = new Float32Array(buffer, offset, imgLen);
       offset += imgLen * 4;
-      results.push({ imageData, pixels, arc_mm });
+
+      const vesselWall = new Float32Array(buffer, offset, nWall * 2);
+      offset += nWall * 2 * 4;
+
+      results.push({ imageData, pixels, arc_mm, vesselDiameterMm, vesselWall });
     }
     return results;
   }
@@ -1225,6 +1240,8 @@
             batchImageData={batchXsA?.imageData ?? null}
             batchPixels={batchXsA?.pixels ?? null}
             arcMmProp={batchXsA?.arc_mm ?? null}
+            vesselDiameterMm={batchXsA?.vesselDiameterMm ?? null}
+            vesselWall={batchXsA?.vesselWall ?? null}
             showFaiOverlay={showFaiOverlay}
           />
         </div>
@@ -1240,6 +1257,8 @@
             batchImageData={batchXsB?.imageData ?? null}
             batchPixels={batchXsB?.pixels ?? null}
             arcMmProp={batchXsB?.arc_mm ?? null}
+            vesselDiameterMm={batchXsB?.vesselDiameterMm ?? null}
+            vesselWall={batchXsB?.vesselWall ?? null}
             showFaiOverlay={showFaiOverlay}
           />
         </div>
@@ -1255,6 +1274,8 @@
             batchImageData={batchXsC?.imageData ?? null}
             batchPixels={batchXsC?.pixels ?? null}
             arcMmProp={batchXsC?.arc_mm ?? null}
+            vesselDiameterMm={batchXsC?.vesselDiameterMm ?? null}
+            vesselWall={batchXsC?.vesselWall ?? null}
             showFaiOverlay={showFaiOverlay}
           />
         </div>

@@ -24,7 +24,17 @@ pub struct CrossSectionResult {
     pub image: Vec<f32>,  // pixels x pixels, row-major
     pub pixels: usize,
     pub arc_mm: f64,      // arc-length position
+    /// Equivalent-circle lumen diameter in mm, from a per-ray FWHM scan
+    /// anchored at the image centre. See `vessel_wall::compute_vessel_geometry`.
+    pub vessel_diameter_mm: f64,
+    /// Lumen boundary polygon `[x, y]` in image pixel coords, one point per
+    /// angle starting at θ = 0.
+    pub vessel_wall: Vec<[f64; 2]>,
 }
+
+/// Number of rays used for the lumen boundary on cross-sections. Matches the
+/// annotation-side default so both UI surfaces show the same contour.
+pub const CROSS_SECTION_N_ANGLES: usize = 72;
 
 // ---------------------------------------------------------------------------
 // CprFrame — precomputed per-centerline, cached for reuse
@@ -239,10 +249,16 @@ impl CprFrame {
             }
         }
 
+        let geom = crate::vessel_wall::compute_vessel_geometry(
+            &image, pixels, width_mm, CROSS_SECTION_N_ANGLES,
+        );
+
         CrossSectionResult {
             image,
             pixels,
             arc_mm,
+            vessel_diameter_mm: geom.diameter_mm,
+            vessel_wall: geom.wall,
         }
     }
 
@@ -334,10 +350,16 @@ impl CprFrame {
                         }
                     });
 
+                let geom = crate::vessel_wall::compute_vessel_geometry(
+                    &image, pixels, width_mm, CROSS_SECTION_N_ANGLES,
+                );
+
                 CrossSectionResult {
                     image,
                     pixels,
                     arc_mm,
+                    vessel_diameter_mm: geom.diameter_mm,
+                    vessel_wall: geom.wall,
                 }
             })
             .collect()

@@ -17,4 +17,5 @@ pub mod roi;
 pub mod spline;
 pub mod stats;
 pub mod types;
+pub mod vessel_wall;
 pub mod voi;
