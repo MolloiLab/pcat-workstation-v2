@@ -61,8 +61,11 @@ impl CprFrame {
         let mut arclengths = Vec::with_capacity(n_cols);
         let mut tangents = Vec::with_capacity(n_cols);
 
+        // Matches Horos Straightened CPR convention: divisor = pixelsWide (not pixelsWide − 1),
+        // so samples run s_j = j * (total_arc / n_cols) for j = 0 .. n_cols−1.
+        let spacing = total_arc / (n_cols as f64);
         for j in 0..n_cols {
-            let s = total_arc * (j as f64) / ((n_cols - 1) as f64);
+            let s = (j as f64) * spacing;
             arclengths.push(s);
 
             let pos = spline.eval(s);
@@ -109,8 +112,15 @@ impl CprFrame {
         // Rotate the Bishop frame by the given angle
         let (rot_normals, rot_binormals) = self.rotated_frame(rotation_deg);
 
-        // MIP slab sampling parameters
-        let n_slab_steps = if slab_mm > 0.01 { 9usize } else { 1 };
+        // MIP slab sampling parameters.
+        // Nyquist-aware (Horos-style), floored at 3 for stability on thin slabs.
+        let n_slab_steps = if slab_mm > 0.01 {
+            let min_spacing = spacing.iter().cloned().fold(f64::INFINITY, f64::min);
+            let horos = (slab_mm / min_spacing).ceil() as usize + 1;
+            horos.max(3)
+        } else {
+            1
+        };
         let slab_offsets: Vec<f64> = if n_slab_steps > 1 {
             (0..n_slab_steps)
                 .map(|k| {
@@ -375,7 +385,10 @@ fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f6
     let mut normals = Vec::with_capacity(n);
     let mut binormals = Vec::with_capacity(n);
 
-    // Choose initial normal perpendicular to T[0]
+    // Choose initial normal perpendicular to T[0].
+    // Equivalent to Horos's N3VectorANormalVector(T₀) — the final image is
+    // rotation-invariant via the user's rotation slider, so the initial frame choice
+    // doesn't matter as long as it is orthogonal to T₀.
     let t0 = tangents[0];
     let world_y = Vector3::new(0.0, 1.0, 0.0);
     let world_x = Vector3::new(1.0, 0.0, 0.0);
@@ -389,6 +402,10 @@ fn bishop_frame(tangents: &[Vector3<f64>]) -> (Vec<Vector3<f64>>, Vec<Vector3<f6
     let b0 = t0.cross(&n0).normalize();
     normals.push(n0);
     binormals.push(b0);
+
+    // Bishop parallel transport — we deliberately deviate from Horos bend-lerp here.
+    // Bishop is rotation-minimizing; for low-torsion coronary centerlines the two are
+    // visually indistinguishable, and Bishop is more numerically principled.
 
     // Parallel transport: project previous normal onto the plane perp to current tangent
     for i in 1..n {
@@ -828,15 +845,17 @@ mod tests {
 
     #[test]
     fn test_from_centerline_endpoints() {
+        // Under the Horos Straightened convention, s_j = j * (total_arc / n_cols),
+        // so the first sample is at s=0 (exact centerline start) but the LAST sample
+        // is at s = (n_cols − 1) / n_cols * total_arc, NOT at total_arc. The last
+        // position therefore lies ~1/n_cols short of the input's final point.
+        let n_cols = 50;
         let pts = quarter_circle(20.0, 25);
-        let frame = CprFrame::from_centerline(&pts, 50);
+        let frame = CprFrame::from_centerline(&pts, n_cols);
         let tol = 1e-3;
 
         let first = &frame.positions[0];
-        let last = &frame.positions[frame.n_cols() - 1];
-
         let first_in = &pts[0];
-        let last_in = &pts[pts.len() - 1];
 
         for d in 0..3 {
             assert!(
@@ -844,10 +863,23 @@ mod tests {
                 "First position mismatch in dim {}: got {}, expected {}",
                 d, first[d], first_in[d]
             );
+        }
+
+        // Last sample should land at s = (n_cols − 1) / n_cols * total_arc.
+        // For a quarter-circle of radius r, total_arc = r · π / 2, so the last
+        // angle θ = (n_cols − 1) / n_cols · π / 2 and the expected position is
+        // [r·sin(θ), r·cos(θ), 0].
+        let r = 20.0_f64;
+        let theta_last = (n_cols - 1) as f64 / n_cols as f64 * std::f64::consts::FRAC_PI_2;
+        let expected_last = [r * theta_last.sin(), r * theta_last.cos(), 0.0];
+        let last = &frame.positions[frame.n_cols() - 1];
+        // Spline fit introduces slight deviation from analytic curve, so a looser tolerance.
+        let end_tol = 5e-2;
+        for d in 0..3 {
             assert!(
-                (last[d] - last_in[d]).abs() < tol,
-                "Last position mismatch in dim {}: got {}, expected {}",
-                d, last[d], last_in[d]
+                (last[d] - expected_last[d]).abs() < end_tol,
+                "Last position mismatch in dim {}: got {}, expected ~{} (Horos: s_last = (n−1)/n · total_arc)",
+                d, last[d], expected_last[d]
             );
         }
     }
@@ -1108,6 +1140,19 @@ mod tests {
         ];
 
         run_stretched_centerline_test(dicom_dir, seeds_xyz, 512, 512, "161.6");
+    }
+
+    #[test]
+    fn test_horos_straightened_spacing_convention() {
+        // Synthetic straight centerline from (0,0,0) to (0,0,100), 2 points.
+        let points = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]];
+        let frame = CprFrame::from_centerline(&points, 10);
+        // With 10 cols and total_arc=100, spacing = 100/10 = 10.
+        // Horos convention: s_j = j * 10, so arclengths = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90].
+        let expected = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0];
+        for (i, &s) in frame.arclengths.iter().enumerate() {
+            assert!((s - expected[i]).abs() < 1e-9, "col {i}: got {s}, expected {}", expected[i]);
+        }
     }
 
 }

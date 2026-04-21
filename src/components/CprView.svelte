@@ -415,7 +415,7 @@
       ctx.stroke();
 
       // Label with background
-      ctx.font = 'bold 10px -apple-system, sans-serif';
+      ctx.font = 'bold 11px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ff00ff';
       ctx.fillText('OSTIUM', ox, h - 6);
@@ -441,7 +441,7 @@
         ctx.restore();
 
         // Label
-        ctx.font = 'bold 10px -apple-system, sans-serif';
+        ctx.font = 'bold 11px -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillStyle = '#ff00ff';
         ctx.fillText('OSTIUM', cx, cy - 12);
@@ -520,7 +520,7 @@
         ctx.stroke();
 
         // Index label
-        ctx.font = 'bold 9px -apple-system, sans-serif';
+        ctx.font = 'bold 11px -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillStyle = 'white';
         ctx.fillText(`${i}`, cx, cy - radius - 3);
@@ -1289,21 +1289,21 @@
     <!-- Stretched / Straightened toggle -->
     <button
       class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
-        {cprMode === 'straightened'
-          ? 'bg-accent/20 text-accent'
-          : 'text-text-secondary/60 hover:text-text-secondary'}"
-      onclick={() => { cprMode = 'straightened'; }}
-    >
-      Straightened
-    </button>
-    <button
-      class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
         {cprMode === 'stretched'
           ? 'bg-accent/20 text-accent'
           : 'text-text-secondary/60 hover:text-text-secondary'}"
       onclick={() => { cprMode = 'stretched'; }}
     >
       Stretched
+    </button>
+    <button
+      class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors
+        {cprMode === 'straightened'
+          ? 'bg-accent/20 text-accent'
+          : 'text-text-secondary/60 hover:text-text-secondary'}"
+      onclick={() => { cprMode = 'straightened'; }}
+    >
+      Straightened
     </button>
 
     <button
