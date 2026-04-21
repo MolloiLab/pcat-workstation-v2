@@ -21,6 +21,8 @@ signal.
 """
 from __future__ import annotations
 
+import itertools
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -52,8 +54,16 @@ fig, ax = plt.subplots(figsize=(8.5, 7.0), dpi=140)
 xs = [m["mu70"] for m in MATERIALS.values()]
 ys = [m["mu150"] for m in MATERIALS.values()]
 
-# Draw connecting polyline in the order Water -> Lipid -> Collagen -> HAp -> Iodine.
-ax.plot(xs, ys, color="#888888", lw=1.2, ls="--", zorder=1, label="_nolegend_")
+# Draw every pairwise edge so basis-material triangles become visible.
+# Thick edges (water cluster <-> high-Z) are long; thin ones (within the
+# water/lipid/collagen cluster) collapse to near-zero length -> the cluster
+# is the degenerate triangle that cannot serve as an MMD basis.
+names = list(MATERIALS.keys())
+for a, b in itertools.combinations(names, 2):
+    xa, ya = MATERIALS[a]["mu70"], MATERIALS[a]["mu150"]
+    xb, yb = MATERIALS[b]["mu70"], MATERIALS[b]["mu150"]
+    ax.plot([xa, xb], [ya, yb], color="#999999", lw=0.9, ls="--",
+            alpha=0.7, zorder=1)
 
 # Plot each point.
 for name, m in MATERIALS.items():

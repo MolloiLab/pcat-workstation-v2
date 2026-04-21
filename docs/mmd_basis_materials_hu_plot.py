@@ -15,6 +15,8 @@ deviation toward the x-axis indicates excess photoelectric absorption at
 """
 from __future__ import annotations
 
+import itertools
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -73,7 +75,13 @@ fig, (axL, axR) = plt.subplots(1, 2, figsize=(14.5, 6.8), dpi=140)
 def draw(ax, ylim_lo=None, ylim_hi=None, xlim_lo=None, xlim_hi=None, symlog=True):
     xs = [points[n][0] for n in ORDER]
     ys = [points[n][1] for n in ORDER]
-    ax.plot(xs, ys, color="#888888", lw=1.2, ls="--", zorder=1)
+    # Every pairwise edge. Triangles formed by any 3 points become visible;
+    # large/open triangles = good MMD basis, near-collinear = degenerate.
+    for a, b in itertools.combinations(ORDER, 2):
+        xa, ya = points[a]
+        xb, yb = points[b]
+        ax.plot([xa, xb], [ya, yb], color="#999999", lw=0.9, ls="--",
+                alpha=0.7, zorder=1)
     for name in ORDER:
         x, y = points[name]
         s = STYLE[name]
