@@ -38,12 +38,12 @@ import numpy as np
 #   HAp           : weighted from elemental NIST  rho = 3.156 g/cm^3
 #   Iodine        : NIST elemental Z=53            rho = 4.933 g/cm^3
 MATERIALS = {
-    "Air":             {"mu70": 0.1759, "mu150": 0.1356, "rho": 0.001205, "marker": "v", "color": "#17becf"},
+    "Air":             {"mu70": 0.1759, "mu150": 0.1356, "rho": 0.001205, "marker": "o", "color": "#17becf"},
     "Water":           {"mu70": 0.1929, "mu150": 0.1505, "rho": 1.000, "marker": "o", "color": "#1f77b4"},
-    "Lipid":           {"mu70": 0.1861, "mu150": 0.1460, "rho": 0.950, "marker": "s", "color": "#ff7f0e"},
-    "Collagen":        {"mu70": 0.1875, "mu150": 0.1483, "rho": 1.350, "marker": "D", "color": "#2ca02c"},
-    "Hydroxyapatite":  {"mu70": 0.4481, "mu150": 0.1818, "rho": 3.156, "marker": "^", "color": "#d62728"},
-    "Iodine":          {"mu70": 6.097,  "mu150": 0.7961, "rho": 4.933, "marker": "*", "color": "#9467bd"},
+    "Lipid":           {"mu70": 0.1861, "mu150": 0.1460, "rho": 0.950, "marker": "o", "color": "#ff7f0e"},
+    "Collagen":        {"mu70": 0.1875, "mu150": 0.1483, "rho": 1.350, "marker": "o", "color": "#2ca02c"},
+    "Hydroxyapatite":  {"mu70": 0.4481, "mu150": 0.1818, "rho": 3.156, "marker": "o", "color": "#d62728"},
+    "Iodine":          {"mu70": 6.097,  "mu150": 0.7961, "rho": 4.933, "marker": "o", "color": "#9467bd"},
 }
 
 # ---------------------------------------------------------------------------

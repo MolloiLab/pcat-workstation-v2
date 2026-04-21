@@ -56,13 +56,13 @@ points["Iodine (10 mg/mL)"] = hu_at(mu70_10mgmL, mu150_10mgmL)
 
 # Style per material.
 STYLE = {
-    "Air":                {"color": "#17becf", "marker": "v"},
+    "Air":                {"color": "#17becf", "marker": "o"},
     "Water":              {"color": "#1f77b4", "marker": "o"},
-    "Lipid":              {"color": "#ff7f0e", "marker": "s"},
-    "Collagen":           {"color": "#2ca02c", "marker": "D"},
-    "Hydroxyapatite":     {"color": "#d62728", "marker": "^"},
-    "Iodine (pure)":      {"color": "#9467bd", "marker": "*"},
-    "Iodine (10 mg/mL)":  {"color": "#c49cf0", "marker": "*"},
+    "Lipid":              {"color": "#ff7f0e", "marker": "o"},
+    "Collagen":           {"color": "#2ca02c", "marker": "o"},
+    "Hydroxyapatite":     {"color": "#d62728", "marker": "o"},
+    "Iodine (pure)":      {"color": "#9467bd", "marker": "o"},
+    "Iodine (10 mg/mL)":  {"color": "#c49cf0", "marker": "o"},
 }
 
 # Connecting polyline order.
@@ -87,7 +87,7 @@ def draw(ax, ylim_lo=None, ylim_hi=None, xlim_lo=None, xlim_hi=None, symlog=True
     for name in ORDER:
         x, y = points[name]
         s = STYLE[name]
-        ax.scatter(x, y, s=220 if "*" in s["marker"] else 180,
+        ax.scatter(x, y, s=180,
                    marker=s["marker"], color=s["color"],
                    edgecolor="black", linewidth=0.8, zorder=3)
         # Offset label so it doesn't overlap the marker.
