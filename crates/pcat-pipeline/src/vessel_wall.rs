@@ -38,6 +38,17 @@ const BACKGROUND_HU: f64 = -100.0;
 /// and we return a degenerate polygon rather than guessing at a wall.
 const MIN_LUMEN_HU: f64 = 50.0;
 
+/// Upper bound on plausible coronary lumen radius. A ray that doesn't find a
+/// sub-threshold crossing within this radius has almost certainly walked out
+/// of the lumen into an adjacent contrast-filled structure (aortic root at
+/// the ostium, cardiac chamber, another vessel). Capping the search here
+/// keeps one rogue ray from pulling the polygon's equivalent-circle area up
+/// by 10× — the polygon is slightly over-stated on that side, never wildly.
+/// 3.5 mm → 7 mm diameter; normal RCA proximal lumen is ~4 mm, clinical max
+/// ~6 mm, so the cap sits above real vessels but well below the aorta / any
+/// chamber.
+const MAX_CORONARY_RADIUS_MM: f64 = 3.5;
+
 /// Compute the lumen boundary + diameter from a cross-section image.
 ///
 /// * `image` — row-major f32 HU, `pixels × pixels`.
@@ -62,7 +73,11 @@ pub fn compute_vessel_geometry(
 
     let threshold = (lumen_hu + BACKGROUND_HU) / 2.0;
     let step_px = 0.5_f64;
-    let max_radius_px = center_px; // sample out to image edge
+    // Bound the radial scan to a clinically-plausible coronary radius so a
+    // ray can't walk through the lumen into an adjacent contrast-filled
+    // structure (aorta, chamber). Always at least 0.5 mm so the loop runs.
+    let max_radius_px =
+        (MAX_CORONARY_RADIUS_MM / mm_per_pixel).min(center_px).max(2.0);
     let n_radial = (max_radius_px / step_px) as usize;
 
     // 2. Cast a ray per angle, detect boundary at the shared threshold.

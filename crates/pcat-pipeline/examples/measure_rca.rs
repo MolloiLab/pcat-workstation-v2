@@ -21,13 +21,34 @@ use pcat_pipeline::dicom_scan::scan_series;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dicom_dir = Path::new(
-        "/Volumes/Molloilab/Shu Nie/UCI NAEOTOM CCTA Data/512143294/MonoPlus_70keV",
+    // Override patient by setting `PATIENT=<id>` env var. Defaults to 512143294.
+    let patient = std::env::var("PATIENT").unwrap_or_else(|_| "512143294".to_string());
+    let dicom_dir_str = format!(
+        "/Volumes/Molloilab/Shu Nie/UCI NAEOTOM CCTA Data/{}/MonoPlus_70keV",
+        patient
     );
-    let seeds_path = Path::new(
-        "/Users/shunie/Library/Application Support/com.pcat.workstation/seeds/\
-MonoPlus_70keV___Volumes_Molloilab_Shu_Nie_UCI_NAEOTOM_CCTA_Data_512143294_MonoPlus_70keV.json",
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .replace("..", "_")
+    };
+    let seed_filename = format!(
+        "MonoPlus_70keV__{}.json",
+        sanitize(&dicom_dir_str)
     );
+    let seeds_path_owned = format!(
+        "/Users/shunie/Library/Application Support/com.pcat.workstation/seeds/{}",
+        seed_filename
+    );
+    let dicom_dir = Path::new(&dicom_dir_str);
+    let seeds_path = Path::new(&seeds_path_owned);
     let vessel = "RCA";
     let width_mm = 15.0_f64;
     let pixels: usize = 128;
