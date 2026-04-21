@@ -341,55 +341,57 @@
 
 <svelte:window onkeydown={handleKeyDown} />
 
-<div class="flex flex-col gap-0">
-  <!-- Canvas area -->
-  <div class="relative aspect-square w-full">
-    <canvas
-      bind:this={canvasEl}
-      class="h-full w-full cursor-crosshair rounded"
-      style="image-rendering: pixelated;"
-      onmousedown={handleMouseDown}
-      onmousemove={handleMouseMove}
-      onmouseup={handleMouseUp}
-      onmouseleave={() => { hoverIndex = null; if (dragIndex !== null) { dragIndex = null; } }}
-    ></canvas>
+<div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+  <!-- Canvas area: square, fits whichever of width/height is smaller -->
+  <div class="relative flex min-h-0 flex-1 items-center justify-center p-2">
+    <div class="relative aspect-square h-full max-h-full w-auto max-w-full">
+      <canvas
+        bind:this={canvasEl}
+        class="h-full w-full cursor-crosshair rounded"
+        style="image-rendering: pixelated;"
+        onmousedown={handleMouseDown}
+        onmousemove={handleMouseMove}
+        onmouseup={handleMouseUp}
+        onmouseleave={() => { hoverIndex = null; if (dragIndex !== null) { dragIndex = null; } }}
+      ></canvas>
 
-    <!-- Status badge overlay -->
-    <div class="absolute right-2 top-2 flex items-center gap-1.5">
-      {#if status === 'done'}
-        <span class="rounded-full bg-success/20 px-2 py-0.5 text-[10px] font-medium text-success">
-          Done
+      <!-- Status badge overlay -->
+      <div class="absolute right-2 top-2 flex items-center gap-1.5">
+        {#if status === 'done'}
+          <span class="rounded-full bg-success/20 px-2 py-0.5 text-[10px] font-medium text-success">
+            Done
+          </span>
+        {:else if status === 'in-progress'}
+          <span class="rounded-full bg-warning/20 px-2 py-0.5 text-[10px] font-medium text-warning">
+            Editing
+          </span>
+        {:else}
+          <span class="rounded-full bg-text-secondary/20 px-2 py-0.5 text-[10px] font-medium text-text-secondary">
+            Pending
+          </span>
+        {/if}
+      </div>
+
+      <!-- Frame info overlay -->
+      <div class="absolute left-2 top-2 rounded bg-black/40 px-1.5 py-0.5">
+        <span class="text-[10px] tabular-nums text-text-primary">
+          Frame {target.frame_index} | {target.arc_mm.toFixed(1)} mm
         </span>
-      {:else if status === 'in-progress'}
-        <span class="rounded-full bg-warning/20 px-2 py-0.5 text-[10px] font-medium text-warning">
-          Editing
-        </span>
-      {:else}
-        <span class="rounded-full bg-text-secondary/10 px-2 py-0.5 text-[10px] font-medium text-text-secondary">
-          Pending
-        </span>
+      </div>
+
+      <!-- Loading overlay -->
+      {#if busy}
+        <div class="absolute inset-0 flex items-center justify-center rounded bg-black/30">
+          <span class="text-xs text-text-primary">Processing...</span>
+        </div>
       {/if}
     </div>
-
-    <!-- Frame info overlay -->
-    <div class="absolute left-2 top-2">
-      <span class="text-[10px] tabular-nums text-text-secondary">
-        Frame {target.frame_index} | {target.arc_mm.toFixed(1)} mm
-      </span>
-    </div>
-
-    <!-- Loading overlay -->
-    {#if busy}
-      <div class="absolute inset-0 flex items-center justify-center bg-black/30 rounded">
-        <span class="text-xs text-text-secondary">Processing...</span>
-      </div>
-    {/if}
   </div>
 
   <!-- Toolbar -->
-  <div class="flex items-center gap-1.5 border-t border-border bg-surface-secondary px-2 py-1.5">
+  <div class="flex shrink-0 items-center gap-1.5 border-t border-border bg-surface-secondary px-2 py-1.5">
     <button
-      class="rounded px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+      class="rounded bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
       onclick={handleInit}
       disabled={busy}
       title="Initialize snake contour"
@@ -397,7 +399,7 @@
       Init
     </button>
     <button
-      class="rounded px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+      class="rounded bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
       onclick={handleEvolve}
       disabled={busy || !snakePoints}
       title="Evolve active contour (200 iterations)"
@@ -405,8 +407,8 @@
       Evolve
     </button>
     <button
-      class="rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40
-             {addPointMode ? 'bg-warning/20 text-warning' : 'text-accent hover:bg-accent/10 active:bg-accent/20'}"
+      class="rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70
+             {addPointMode ? 'bg-warning/20 text-warning' : 'bg-accent/10 text-accent hover:bg-accent/20 active:bg-accent/30'}"
       onclick={handleAddPointMode}
       disabled={busy || !snakePoints}
       title="Click canvas to add a control point"
@@ -414,7 +416,7 @@
       Add Point
     </button>
     <button
-      class="rounded px-2.5 py-1 text-xs font-medium text-text-secondary hover:bg-surface-tertiary hover:text-error disabled:opacity-40"
+      class="rounded bg-surface-tertiary px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 hover:text-error disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
       onclick={handleReset}
       disabled={busy}
       title="Reset to initial contour"
@@ -422,7 +424,7 @@
       Reset
     </button>
     <button
-      class="ml-auto rounded bg-success/10 px-3 py-1 text-xs font-medium text-success hover:bg-success/20 active:bg-success/30 disabled:opacity-40"
+      class="ml-auto rounded bg-success/15 px-3 py-1 text-xs font-medium text-success hover:bg-success/25 active:bg-success/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
       onclick={handleAccept}
       disabled={busy || !snakePoints}
       title="Accept contour and mark as done"

@@ -28,7 +28,7 @@
   ];
 </script>
 
-<div class="flex items-center gap-1.5 px-2 py-1.5">
+<div class="flex flex-wrap items-center gap-1.5">
   <!-- Material chips -->
   {#each materials as m}
     <button

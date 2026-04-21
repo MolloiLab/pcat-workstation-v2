@@ -91,7 +91,7 @@
   });
 </script>
 
-<div class="flex items-start gap-2 overflow-x-auto px-2 py-2" role="listbox" aria-label="Cross-section thumbnails">
+<div class="flex items-start gap-2 overflow-x-auto px-2 py-1.5" role="listbox" aria-label="Cross-section thumbnails">
   {#each targets as target, i}
     {@const status = statusMap[i] ?? 'pending'}
     {@const isSelected = i === selectedIndex}

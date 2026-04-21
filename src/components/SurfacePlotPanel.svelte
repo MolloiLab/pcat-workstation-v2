@@ -117,9 +117,9 @@
   });
 </script>
 
-<div class="flex flex-col gap-1.5">
+<div class="flex min-h-0 flex-1 flex-col gap-1.5 p-2">
   <!-- Plot area -->
-  <div class="relative h-64 w-full">
+  <div class="relative min-h-[16rem] w-full flex-1">
     {#if !plotlyLoaded}
       <div class="flex h-full items-center justify-center">
         <span class="text-xs text-text-secondary">Loading chart library...</span>
@@ -135,7 +135,7 @@
 
   <!-- Arc-length slider -->
   {#if surfaces && surfaces.length > 1}
-    <div class="flex items-center gap-2 px-2">
+    <div class="flex shrink-0 items-center gap-2 px-2">
       <span class="shrink-0 text-[10px] text-text-secondary">Arc</span>
       <input
         type="range"
