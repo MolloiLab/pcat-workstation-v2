@@ -22,6 +22,7 @@ import numpy as np
 
 # Mass attenuation coefficients (cm^2/g) from NIST XCOM.
 MU_RHO = {
+    "Air":            {"mu70": 0.1759, "mu150": 0.1356, "rho": 0.001205},
     "Water":          {"mu70": 0.1929, "mu150": 0.1505, "rho": 1.000},
     "Lipid":          {"mu70": 0.1861, "mu150": 0.1460, "rho": 0.950},
     "Collagen":       {"mu70": 0.1875, "mu150": 0.1483, "rho": 1.350},
@@ -55,6 +56,7 @@ points["Iodine (10 mg/mL)"] = hu_at(mu70_10mgmL, mu150_10mgmL)
 
 # Style per material.
 STYLE = {
+    "Air":                {"color": "#17becf", "marker": "v"},
     "Water":              {"color": "#1f77b4", "marker": "o"},
     "Lipid":              {"color": "#ff7f0e", "marker": "s"},
     "Collagen":           {"color": "#2ca02c", "marker": "D"},
@@ -64,7 +66,7 @@ STYLE = {
 }
 
 # Connecting polyline order.
-ORDER = ["Water", "Lipid", "Collagen", "Hydroxyapatite", "Iodine (10 mg/mL)", "Iodine (pure)"]
+ORDER = ["Air", "Water", "Lipid", "Collagen", "Hydroxyapatite", "Iodine (10 mg/mL)", "Iodine (pure)"]
 
 # ---------------------------------------------------------------------------
 # Two-panel plot: full range (symlog) + clinical zoom
@@ -117,12 +119,12 @@ def draw(ax, ylim_lo=None, ylim_hi=None, xlim_lo=None, xlim_hi=None, symlog=True
         ax.set_xlim(xlim_lo, xlim_hi)
     ax.legend(loc="lower right", fontsize=9, framealpha=0.9)
 
-# Left: full symlog range (shows pure iodine).
-draw(axL, symlog=True, xlim_lo=-300, xlim_hi=300_000, ylim_lo=-300, ylim_hi=300_000)
+# Left: full symlog range (shows pure iodine and air).
+draw(axL, symlog=True, xlim_lo=-1500, xlim_hi=300_000, ylim_lo=-1500, ylim_hi=300_000)
 axL.set_title("HU(70) vs HU(150) — full range (symlog)", fontsize=12)
 
-# Right: linear zoom around clinically relevant values.
-draw(axR, symlog=False, xlim_lo=-200, xlim_hi=7500, ylim_lo=-200, ylim_hi=3500)
+# Right: linear zoom covering air (-1000 HU) to heavily calcified (-> HAp).
+draw(axR, symlog=False, xlim_lo=-1200, xlim_hi=7500, ylim_lo=-1200, ylim_hi=3500)
 axR.set_title("HU(70) vs HU(150) — clinical range (linear)", fontsize=12)
 
 fig.suptitle("Hounsfield response of MMD basis candidates\n(NIST XCOM, water reference)",

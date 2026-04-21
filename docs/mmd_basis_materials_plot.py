@@ -38,6 +38,7 @@ import numpy as np
 #   HAp           : weighted from elemental NIST  rho = 3.156 g/cm^3
 #   Iodine        : NIST elemental Z=53            rho = 4.933 g/cm^3
 MATERIALS = {
+    "Air":             {"mu70": 0.1759, "mu150": 0.1356, "rho": 0.001205, "marker": "v", "color": "#17becf"},
     "Water":           {"mu70": 0.1929, "mu150": 0.1505, "rho": 1.000, "marker": "o", "color": "#1f77b4"},
     "Lipid":           {"mu70": 0.1861, "mu150": 0.1460, "rho": 0.950, "marker": "s", "color": "#ff7f0e"},
     "Collagen":        {"mu70": 0.1875, "mu150": 0.1483, "rho": 1.350, "marker": "D", "color": "#2ca02c"},
