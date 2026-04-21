@@ -21,7 +21,9 @@
     scanSeries,
     loadSeries,
     onDicomLoadProgress,
+    reuseLoadedVolume,
   } from '$lib/api';
+  import { cache as cornerstoneCache } from '@cornerstonejs/core';
   import { buildVolume } from '$lib/cornerstone/volumeLoader';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import type { VolumeMetadata } from '$lib/stores/volumeStore.svelte';
@@ -117,9 +119,6 @@
     }
   }
 
-  /** Counter for unique volume IDs across loads. */
-  let volumeCounter = 0;
-
   /** Load DICOM from a specific folder path. */
   async function loadFromPath(path: string) {
     errorMessage = '';
@@ -176,12 +175,49 @@
       }
       const chosen = series[0];
 
+      // Fast reload path: if both cornerstone (JS) and the Rust AppState already
+      // hold this exact (path, uid), skip the decode+IPC entirely and just rewire
+      // the store. Saves 30-70s on A→B→A workflows.
+      const fastVolumeKey = `${path}::${chosen.uid}`;
+      const fastCsId = `pcat:${fastVolumeKey}`;
+      const cachedVolume = cornerstoneCache.getVolume(fastCsId);
+      if (cachedVolume) {
+        const cachedMeta = await reuseLoadedVolume(path, chosen.uid);
+        if (cachedMeta) {
+          // Both sides already have it. Rebuild frontend store state from metadata.
+          const direction = computeDirectionMatrix(cachedMeta.orientation);
+          const ipp = cachedMeta.image_position_patient;
+          const storeMeta: VolumeMetadata = {
+            volumeId: fastVolumeKey,
+            shape: [cachedMeta.num_slices, cachedMeta.rows, cachedMeta.cols],
+            spacing: [cachedMeta.slice_spacing, cachedMeta.pixel_spacing[0], cachedMeta.pixel_spacing[1]],
+            origin: [cachedMeta.slice_positions_z[0] ?? ipp[2], ipp[1], ipp[0]],
+            direction,
+            windowCenter: cachedMeta.window_center,
+            windowWidth: cachedMeta.window_width,
+            patientName: cachedMeta.patient_name,
+            studyDescription: cachedMeta.study_description,
+            dicomPath: path,
+          };
+          volumeStore.set(storeMeta);
+          volumeStore.setCornerstoneVolumeId(fastCsId);
+          volumeStore.setLoadProgress(100);
+          volumeStore.setLoading(false);
+          try {
+            const seedsJson = await loadSeeds(path);
+            if (seedsJson) seedStore.importJson(seedsJson);
+          } catch { /* no saved seeds */ }
+          getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
+          return;
+        }
+      }
+
       // 2. Bulk load the chosen series (one binary IPC trip).
       const { metadata, voxels } = await loadSeries(path, chosen.uid);
 
       // 3. Build the cornerstone3D volume synchronously.
-      volumeCounter++;
-      const volumeKey = `vol-${volumeCounter}`;
+      // Stable key so cornerstone's cache.getVolume short-circuit fires on reload.
+      const volumeKey = `${path}::${chosen.uid}`;
       const csId = buildVolume(volumeKey, metadata, voxels);
 
       // 4. Populate the legacy volumeStore shape.

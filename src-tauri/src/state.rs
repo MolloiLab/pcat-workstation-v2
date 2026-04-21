@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pcat_pipeline::annotation::AnnotationTarget;
 use pcat_pipeline::cpr::CprFrame;
+use pcat_pipeline::dicom_load::VolumeMetadata as PipelineVolumeMetadata;
 use pcat_pipeline::dicom_loader::DualEnergyVolume;
 use pcat_pipeline::mmd::MmdResult;
 pub use pcat_pipeline::types::LoadedVolume;
@@ -49,6 +50,13 @@ pub struct AppState {
     pub finalized: HashMap<usize, bool>,
     /// Most recent MMD decomposition result.
     pub mmd_result: Option<MmdResult>,
+    /// (dicom_dir, series_uid) of the volume currently in `volume`. None if
+    /// unloaded. Used by reuse_loaded_volume to skip re-decode on A→B→A reload.
+    pub current_volume_key: Option<(String, String)>,
+    /// Full pipeline metadata for the currently loaded volume. Kept alongside
+    /// `volume` so `reuse_loaded_volume` can return the exact struct that
+    /// `load_series` produces, preserving serde field shape.
+    pub last_metadata: Option<PipelineVolumeMetadata>,
 }
 
 impl AppState {
@@ -62,6 +70,8 @@ impl AppState {
             snake_contours: HashMap::new(),
             finalized: HashMap::new(),
             mmd_result: None,
+            current_volume_key: None,
+            last_metadata: None,
         }
     }
 }

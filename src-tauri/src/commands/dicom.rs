@@ -7,7 +7,7 @@ use tauri::ipc::Response;
 
 use ndarray::Array3;
 use pcat_pipeline::dicom_scan::{self, SeriesDescriptor};
-use pcat_pipeline::dicom_load::{self, LoadedVolume as PipelineLoadedVolume};
+use pcat_pipeline::dicom_load::{self, LoadedVolume as PipelineLoadedVolume, VolumeMetadata as PipelineVolumeMetadata};
 use pcat_pipeline::types::LoadedVolume as StateLoadedVolume;
 use crate::state::AppState;
 use crate::commands::framed::encode_frame;
@@ -391,6 +391,18 @@ pub async fn load_series(
     // Mirror into legacy AppState so CPR / annotation / MMD keep working.
     bridge_into_state(&vol, &state)?;
 
+    // Record the (dir, uid) identity of the currently-loaded volume and cache
+    // a clone of its pipeline metadata. `reuse_loaded_volume` uses this to
+    // skip the decode+IPC on A→B→A reload.
+    {
+        let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+        guard.current_volume_key = Some((
+            dir_path.to_string_lossy().into_owned(),
+            uid.clone(),
+        ));
+        guard.last_metadata = Some(vol.metadata.clone());
+    }
+
     // Emit terminal event so frontend can switch to "finalizing" state.
     let _ = app.emit("dicom_load_progress", ProgressEvent {
         phase: "done",
@@ -401,6 +413,27 @@ pub async fn load_series(
     let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&vol.voxels_i16).to_vec();
     let framed = encode_frame(&vol.metadata, &voxel_bytes)?;
     Ok(Response::new(framed))
+}
+
+/// Query whether the Rust AppState currently holds the (dir, uid) volume.
+/// If so, returns its cached pipeline `VolumeMetadata` so the frontend can
+/// rebuild store state without a full decode+IPC round-trip. Returns `None`
+/// if the cached identity doesn't match or no volume is resident.
+#[tauri::command]
+pub async fn reuse_loaded_volume(
+    dir: String,
+    uid: String,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<Option<PipelineVolumeMetadata>, String> {
+    let guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+    let matches = matches!(
+        &guard.current_volume_key,
+        Some((d, u)) if d == &dir && u == &uid
+    );
+    if !matches || guard.volume.is_none() {
+        return Ok(None);
+    }
+    Ok(guard.last_metadata.clone())
 }
 
 // ---------------------------------------------------------------------------

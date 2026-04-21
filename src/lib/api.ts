@@ -142,6 +142,19 @@ export async function loadDualEnergy(
 }
 
 /**
+ * Query whether the Rust AppState currently holds the volume at (dir, uid).
+ * If so, returns the cached pipeline metadata (same shape as `loadSeries`'s
+ * `metadata` tuple field) so the frontend can skip the heavy load. Returns
+ * null when the Rust side doesn't currently hold this volume.
+ */
+export async function reuseLoadedVolume(
+  dir: string,
+  uid: string,
+): Promise<VolumeMetadata | null> {
+  return invoke<VolumeMetadata | null>('reuse_loaded_volume', { dir, uid });
+}
+
+/**
  * Subscribe to DICOM load progress events emitted by scan_series and
  * load_series. Returns an unlisten function — call it when the consumer
  * is finished to avoid leaks.
