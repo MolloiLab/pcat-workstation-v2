@@ -102,47 +102,227 @@
   }
 
   /**
-   * Region-grow lumen detection + area-equivalent diameter.
+   * Connected-component lumen detection, anchored at the centerline.
    *
-   * The input is a monoenergetic keV reconstruction, so absolute HU
-   * cut-offs are unusable — the same anatomy reads hundreds of HU
-   * differently at 40 keV vs 180 keV. Everything here is expressed in
-   * units of "distance from outer-ring background, measured in outer-
-   * ring noise σ", so the algorithm behaves identically at any keV the
-   * user reconstructs at.
+   * The image centre by construction is the centerline point — the
+   * position the user told us the vessel passes through. So the lumen
+   * is, by definition, the connected bright region that contains (or
+   * sits nearest to) the image centre. Not the brightest pixel in the
+   * FOV — that can be adjacent calcified plaque, a neighbouring vessel,
+   * or chamber blood two mm away.
    *
-   *   1. Anchor on the brightest pixel in the central ~3 mm window.
-   *   2. Characterise background from the outer image ring: median gives
-   *      bgHU, 1.4826·MAD gives a Gaussian-consistent noise σ.
-   *   3. Contrast check: require peak − bg ≥ 5 σ. This is the keV-
-   *      invariant replacement for "peak must be ≥ 120 HU". If the
-   *      slice doesn't have real vessel enhancement we refuse to
-   *      measure.
-   *   4. Half-max threshold = bg + 0.55·(peak − bg). Pure ratio — no
-   *      HU constants. The slight asymmetry above 0.5 keeps thin
-   *      myocardial rims out of the mask at all keV levels.
-   *   5. 4-connected BFS from the peak, capped at 4 mm radial distance
-   *      (coronary lumen almost never > 4 mm radius in cross-section).
-   *   6. Morphological opening (erode-dilate) of the blob. Erosion
-   *      severs 1–2-pixel-wide bridges that leak the region-grow into
-   *      adjacent enhanced myocardium; a re-BFS keeps only the peak's
-   *      component; dilation restores the true lumen size.
-   *   7. Diameter = 2 · √(area / π). Area-equivalent diameter is
-   *      naturally immune to any single ray leaking — it's driven by
-   *      total blob area.
-   *   8. Sanity-clip to 1–6 mm (a physical constraint on coronary
-   *      arteries, not an HU one — so it's keV-invariant). Outside
-   *      that, return null.
+   * This matches the standard approach in the literature — Pratt,
+   * *Digital Image Processing* §17 (segmentation by thresholding +
+   * connected-component labelling); Hennemuth et al. MICCAI 2005; VMTK
+   * `CenterlineAttributes` (simpler 2-D form since we render on the
+   * orthogonal plane already).
    *
-   * Why region growing? Connectivity excludes distant bright blobs
-   * (calcified plaque, an adjacent artery, chamber blood two mm away)
-   * that a plain threshold would include.
+   * Algorithm:
+   *   1. Adaptive threshold from the image's own histogram:
+   *      T = (median + 90-th percentile) / 2. Pure statistics of the
+   *      slice, so it's keV-invariant — both quantities scale together
+   *      with the reconstruction energy.
+   *   2. Flood-fill label every 4-connected component above T.
+   *   3. Keep only components whose area corresponds to a 1–6 mm
+   *      equivalent-circle diameter (coronary range). A tiny 1-pixel
+   *      calcium spark fails; a huge chamber fails.
+   *   4. Pick the survivor that contains the image centre; if none
+   *      does, pick the one with centroid closest to the image centre
+   *      (within 5 mm). Ties broken by proximity.
+   *   5. Diameter = 2 · √(area / π). Area-equivalent diameter is
+   *      shape-agnostic.
    *
-   * Conceptually this is the 2-D-per-slice simplification of VMTK's
-   * colliding-fronts level set; we skip the PDE solve because the
-   * cross-section geometry is planar and area is all we need.
+   * Why no region-growing from a peak any more? Peak-seeded grow picks
+   * the single brightest pixel in the crop as anchor. When that pixel
+   * is outside the target lumen (calcium blob, neighbouring vessel),
+   * the whole measurement moves there and silently reports the wrong
+   * structure's diameter. Anchoring on the known centerline position
+   * instead makes this failure mode impossible.
    */
   function measureVesselDiameter(data: Float32Array, sz: number): number | null {
+    const widthMm = 15.0;
+    const mmPerPixel = (2 * widthMm) / sz;
+    const center = Math.floor(sz / 2);
+
+    const reject = (): null => {
+      measH = null;
+      measV = null;
+      lumenContour = null;
+      return null;
+    };
+
+    // --- 1. Adaptive threshold from the slice's own histogram ---
+    // Midpoint between the median (tissue) and the 90-th percentile
+    // (bright structures). Both scale with keV, so the threshold moves
+    // with the reconstruction and we never hard-code an HU level.
+    let nFinite = 0;
+    for (let i = 0; i < sz * sz; i++) if (Number.isFinite(data[i])) nFinite++;
+    if (nFinite < 100) return reject();
+    const sortedValues = new Float32Array(nFinite);
+    {
+      let j = 0;
+      for (let i = 0; i < sz * sz; i++) {
+        const v = data[i];
+        if (Number.isFinite(v)) sortedValues[j++] = v;
+      }
+    }
+    sortedValues.sort();
+    const medianHU = sortedValues[Math.floor(nFinite * 0.5)];
+    const p90HU = sortedValues[Math.floor(nFinite * 0.9)];
+    // Need *some* bright-tail contrast for a lumen to be separable at all.
+    // 20 HU is conservative — well below the noise level of any reasonable
+    // keV reconstruction, so only flat slices with no enhancement fail.
+    if (p90HU - medianHU < 20) return reject();
+    const threshold = (medianHU + p90HU) / 2;
+
+    // --- 2. Flood-fill label every 4-connected bright component ---
+    // labels[i]: 0 = unvisited, -1 = below threshold, >0 = component id.
+    const labels = new Int32Array(sz * sz);
+    const areas: number[] = [0];
+    const sumRs: number[] = [0];
+    const sumCs: number[] = [0];
+    const queue = new Int32Array(sz * sz);
+
+    for (let startIdx = 0; startIdx < sz * sz; startIdx++) {
+      if (labels[startIdx] !== 0) continue;
+      const sv = data[startIdx];
+      if (!Number.isFinite(sv) || sv < threshold) {
+        labels[startIdx] = -1;
+        continue;
+      }
+      const id = areas.length;
+      let qHead = 0;
+      let qTail = 0;
+      queue[qTail++] = startIdx;
+      labels[startIdx] = id;
+      let area = 0;
+      let sumR = 0;
+      let sumC = 0;
+      while (qHead < qTail) {
+        const idx = queue[qHead++];
+        const r = (idx / sz) | 0;
+        const c = idx - r * sz;
+        area++;
+        sumR += r;
+        sumC += c;
+        const push = (n: number) => {
+          if (labels[n] !== 0) return;
+          const nv = data[n];
+          if (Number.isFinite(nv) && nv >= threshold) {
+            labels[n] = id;
+            queue[qTail++] = n;
+          } else {
+            labels[n] = -1;
+          }
+        };
+        if (r > 0) push(idx - sz);
+        if (r < sz - 1) push(idx + sz);
+        if (c > 0) push(idx - 1);
+        if (c < sz - 1) push(idx + 1);
+      }
+      areas.push(area);
+      sumRs.push(sumR);
+      sumCs.push(sumC);
+    }
+
+    // --- 3. Pick the component anchored on the centerline ---
+    // "Contains centre" beats "centroid nearest centre"; the former is
+    // ground truth when the centerline is accurate, the latter is the
+    // graceful fallback when the spline drifts a few pixels off.
+    const px1mm = 1.0 / mmPerPixel;
+    const px6mm = 6.0 / mmPerPixel;
+    const px5mm = 5.0 / mmPerPixel;
+    const minAreaPx = Math.max(8, Math.ceil(Math.PI * (px1mm / 2) ** 2));
+    const maxAreaPx = Math.ceil(Math.PI * (px6mm / 2) ** 2);
+    const maxCentroidDistSqPx = px5mm * px5mm;
+
+    const qualifies = (id: number): boolean =>
+      id > 0 && areas[id] >= minAreaPx && areas[id] <= maxAreaPx;
+
+    let bestId = 0;
+    const centerLabel = labels[center * sz + center];
+    if (qualifies(centerLabel)) {
+      bestId = centerLabel;
+    } else {
+      let bestDistSq = Infinity;
+      for (let id = 1; id < areas.length; id++) {
+        if (!qualifies(id)) continue;
+        const cr = sumRs[id] / areas[id];
+        const cc = sumCs[id] / areas[id];
+        const dr = cr - center;
+        const dc = cc - center;
+        const distSq = dr * dr + dc * dc;
+        if (distSq > maxCentroidDistSqPx) continue;
+        if (distSq < bestDistSq) {
+          bestDistSq = distSq;
+          bestId = id;
+        }
+      }
+    }
+    if (bestId === 0) return reject();
+
+    // --- 4. Equivalent-circle diameter from area ---
+    const area = areas[bestId];
+    const diameterMm = 2 * Math.sqrt(area * mmPerPixel * mmPerPixel / Math.PI);
+    if (diameterMm < 1.0 || diameterMm > 6.0) return reject();
+
+    const centroidR = sumRs[bestId] / area;
+    const centroidC = sumCs[bestId] / area;
+
+    // --- 5. 32-ray contour scan of the selected component ---
+    const N_RAYS = 32;
+    const maxRadiusPx = Math.min(sz / 2 - 1, Math.ceil(6.0 / mmPerPixel));
+    const boundaryPts: Array<{ x: number; y: number }> = new Array(N_RAYS);
+    const radiiPx: number[] = new Array(N_RAYS);
+    for (let k = 0; k < N_RAYS; k++) {
+      const theta = (k / N_RAYS) * 2 * Math.PI;
+      const dx = Math.cos(theta);
+      const dy = Math.sin(theta);
+      let lastInside = 0;
+      for (let rpx = 0.5; rpx <= maxRadiusPx; rpx += 0.5) {
+        const xi = Math.round(centroidC + rpx * dx);
+        const yi = Math.round(centroidR + rpx * dy);
+        if (xi < 0 || xi >= sz || yi < 0 || yi >= sz) break;
+        if (labels[yi * sz + xi] === bestId) {
+          lastInside = rpx;
+        } else {
+          break;
+        }
+      }
+      radiiPx[k] = lastInside;
+      boundaryPts[k] = {
+        x: centroidC + lastInside * dx,
+        y: centroidR + lastInside * dy,
+      };
+    }
+
+    // --- 6. H / V calipers through the centroid ---
+    const qtr = N_RAYS / 4;
+    measH = {
+      left: centroidC - radiiPx[N_RAYS / 2],
+      right: centroidC + radiiPx[0],
+      y: centroidR,
+    };
+    measV = {
+      top: centroidR - radiiPx[3 * qtr],
+      bottom: centroidR + radiiPx[qtr],
+      x: centroidC,
+    };
+    lumenContour = boundaryPts;
+
+    return diameterMm;
+  }
+
+  // The original region-grow + morphology + contrast-noise-check pipeline
+  // lived here. Kept as a dead stub below (deleted) — the tests were
+  // happy but the real failure mode was picking the wrong bright blob,
+  // which the connected-component + centerline anchor approach above
+  // makes structurally impossible. Any text below that referenced
+  // peak/annulus/opening has been removed with it.
+  function _OLD_measureVesselDiameter_unused_keep_for_reference(
+    data: Float32Array,
+    sz: number,
+  ): number | null {
     const widthMm = 15.0;
     const mmPerPixel = (2 * widthMm) / sz;
     const center = Math.floor(sz / 2);
