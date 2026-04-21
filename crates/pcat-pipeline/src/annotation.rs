@@ -38,6 +38,9 @@ pub struct AnnotationBatchParams {
     pub pixels: usize,
     /// Number of points on snake contour (default: 72).
     pub n_snake_points: usize,
+    /// Optional ostium position in patient (mm) coords, order [z, y, x].
+    /// When set, sections start at the arc-length nearest this point.
+    pub ostium_zyx: Option<[f64; 3]>,
 }
 
 impl Default for AnnotationBatchParams {
@@ -48,8 +51,57 @@ impl Default for AnnotationBatchParams {
             width_mm: 15.0,
             pixels: 128,
             n_snake_points: 72,
+            ostium_zyx: None,
         }
     }
+}
+
+/// Resolve the starting arc-length (mm) for a batch of annotation cross-sections.
+///
+/// If `ostium_zyx` is `Some`, finds the frame column nearest that patient-space
+/// point and returns its arc-length, clamped so that at least one section fits
+/// within the remaining centerline. If `None`, returns 0.0 (start at first
+/// centerline waypoint — legacy behaviour).
+///
+/// Coordinate note: `CprFrame::positions` is stored in `[z, y, x]` patient mm
+/// (see `cpr.rs::CprFrame`). `ostium_zyx` is in the same order, so we compare
+/// component-wise without any swap.
+fn resolve_start_arc(
+    frame: &CprFrame,
+    ostium_zyx: Option<[f64; 3]>,
+    section_spacing_mm: f64,
+) -> f64 {
+    let Some(ostium) = ostium_zyx else {
+        return 0.0;
+    };
+
+    let n_cols = frame.n_cols();
+    if n_cols == 0 {
+        return 0.0;
+    }
+
+    // Argmin squared distance over frame columns.
+    let mut best_idx = 0usize;
+    let mut best_d2 = f64::INFINITY;
+    for (i, p) in frame.positions.iter().enumerate() {
+        // Both p and ostium are [z, y, x].
+        let dz = p[0] - ostium[0];
+        let dy = p[1] - ostium[1];
+        let dx = p[2] - ostium[2];
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best_idx = i;
+        }
+    }
+
+    // Clamp so we always produce at least one section when possible.
+    // If the ostium is downstream of the last frame column, start_arc falls
+    // back to (total_arc − section_spacing_mm) so we still emit one target
+    // rather than silently producing zero.
+    let total_arc = frame.arclengths[n_cols - 1];
+    let raw = frame.arclengths[best_idx];
+    raw.min((total_arc - section_spacing_mm).max(0.0))
 }
 
 /// Generate annotation targets for a segment of the centerline.
@@ -74,10 +126,14 @@ pub fn generate_annotation_batch(
     let mm_per_pixel = 2.0 * params.width_mm / params.pixels as f64;
     let center_px = params.pixels as f64 / 2.0;
 
+    // If an ostium is provided, shift the start of the batch to its arc-length;
+    // otherwise start at 0 (first centerline waypoint) as before.
+    let start_arc_mm = resolve_start_arc(frame, params.ostium_zyx, params.section_spacing_mm);
+
     let mut targets = Vec::with_capacity(params.n_sections);
 
     for section in 0..params.n_sections {
-        let arc_mm = section as f64 * params.section_spacing_mm;
+        let arc_mm = start_arc_mm + section as f64 * params.section_spacing_mm;
 
         // Stop if we exceed the centerline length.
         if arc_mm > total_arc {
@@ -430,5 +486,93 @@ mod tests {
             );
             assert_eq!(t.pixels, params.pixels);
         }
+    }
+
+    #[test]
+    fn test_resolve_start_arc_none_returns_zero() {
+        // No ostium → legacy behaviour (start at 0).
+        let frame = make_frame(64);
+        assert_eq!(resolve_start_arc(&frame, None, 2.0), 0.0);
+    }
+
+    #[test]
+    fn test_resolve_start_arc_snaps_to_nearest_column() {
+        // Straight centerline along +z axis from z=0 to z=40 (at y=0, x=0).
+        // CprFrame stores positions as [z, y, x] in mm.
+        let points: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]];
+        let frame = CprFrame::from_centerline(&points, 64);
+
+        // Ostium at z=5 mm (in [z, y, x] order). The nearest frame column's
+        // arc-length should be ≈ 5 mm.
+        let start = resolve_start_arc(&frame, Some([5.0, 0.0, 0.0]), 2.0);
+
+        // Frame has ~64 columns spanning ~40 mm, so arc quantum ≈ 0.625 mm.
+        // Expect snap to ≈ 5 mm within 1.5 × quantum tolerance.
+        let arc_per_col = 40.0 / 64.0;
+        assert!(
+            (start - 5.0).abs() < arc_per_col * 1.5,
+            "resolve_start_arc returned {}, expected ≈5 (tolerance {:.3})",
+            start,
+            arc_per_col * 1.5,
+        );
+    }
+
+    #[test]
+    fn test_resolve_start_arc_clamps_past_end() {
+        // Ostium placed far downstream of the centerline end.
+        // Should clamp to (total_arc − section_spacing_mm).
+        let points: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]];
+        let frame = CprFrame::from_centerline(&points, 64);
+
+        // An ostium at z=1000 mm maps to the last frame column (farthest
+        // reachable), whose arc-length is < total_arc. The clamp should never
+        // produce a value > total_arc − section_spacing_mm.
+        let start = resolve_start_arc(&frame, Some([1000.0, 0.0, 0.0]), 2.0);
+        let total_arc = frame.arclengths[frame.n_cols() - 1];
+        assert!(
+            start <= total_arc - 2.0 + 1e-9,
+            "start {} should be clamped ≤ total_arc − spacing = {}",
+            start,
+            total_arc - 2.0,
+        );
+        assert!(start >= 0.0, "start should be non-negative, got {}", start);
+    }
+
+    #[test]
+    fn test_batch_starts_at_ostium() {
+        // Full batch: check the first target's arc_mm reflects the ostium.
+        let (vol, spacing, origin) = make_vessel_phantom();
+        let frame = make_frame(200);
+
+        // make_frame builds a centerline at y=32, x=32, z in [2, 62).
+        // Put the ostium at z=10 mm (patient mm), in [z, y, x] order.
+        let params = AnnotationBatchParams {
+            n_sections: 5,
+            section_spacing_mm: 2.0,
+            ostium_zyx: Some([10.0, 32.0, 32.0]),
+            ..AnnotationBatchParams::default()
+        };
+        let targets = generate_annotation_batch(
+            &frame,
+            &vol,
+            spacing,
+            origin,
+            &crate::types::IDENTITY_DIRECTION,
+            &params,
+        );
+        assert!(!targets.is_empty(), "expected ≥1 target when ostium set");
+
+        // The first target's arc_mm should land near the ostium's arc-length,
+        // which corresponds to ~(z=10 − centerline_start_z=2) = 8 mm along the
+        // straight centerline, within one frame column quantum.
+        let total_arc = frame.arclengths[frame.n_cols() - 1];
+        let arc_per_col = total_arc / frame.n_cols() as f64;
+        let first_arc = targets[0].arc_mm;
+        assert!(
+            (first_arc - 8.0).abs() < arc_per_col * 2.0,
+            "first arc_mm = {}, expected ≈8 (tolerance {:.3})",
+            first_arc,
+            arc_per_col * 2.0,
+        );
     }
 }

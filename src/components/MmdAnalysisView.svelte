@@ -29,6 +29,7 @@
     exportMmdCsv,
   } from '$lib/api';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
+  import { seedStore } from '$lib/stores/seedStore.svelte';
 
   import SnakeEditor from './SnakeEditor.svelte';
   import CrossSectionStrip from './CrossSectionStrip.svelte';
@@ -90,7 +91,15 @@
   async function loadTargets() {
     loadingTargets = true;
     try {
-      targets = await generateAnnotationTargets(centerlineMm);
+      // Prefer the user-placed ostium marker over the first centerline waypoint
+      // so MMD cross-sections start at the true coronary ostium (matches FAI).
+      // seedStore returns [x, y, z] (cornerstone world); Rust pipeline expects
+      // [z, y, x] — flip to match (same convention as pipelineStore.toZyx).
+      const ostiumWorld = seedStore.getOstiumWorldPosForVessel(seedStore.activeVessel);
+      const ostiumZyx: [number, number, number] | null = ostiumWorld
+        ? [ostiumWorld[2], ostiumWorld[1], ostiumWorld[0]]
+        : null;
+      targets = await generateAnnotationTargets(centerlineMm, ostiumZyx);
       selectedIndex = 0;
       statusMap = {};
       snakePoints = {};

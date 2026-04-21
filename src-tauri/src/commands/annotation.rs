@@ -77,6 +77,7 @@ fn clone_frame(frame: &CprFrame) -> CprFrame {
 #[tauri::command]
 pub async fn generate_annotation_targets(
     centerline_mm: Vec<[f64; 3]>,
+    ostium_mm: Option<[f64; 3]>,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<Vec<AnnotationTarget>, String> {
     if centerline_mm.len() < 2 {
@@ -101,7 +102,10 @@ pub async fn generate_annotation_targets(
 
     // Run heavy computation on a blocking thread.
     let targets = tokio::task::spawn_blocking(move || {
-        let params = AnnotationBatchParams::default();
+        let params = AnnotationBatchParams {
+            ostium_zyx: ostium_mm,
+            ..AnnotationBatchParams::default()
+        };
         annotation::generate_annotation_batch(
             &frame_clone,
             &volume_data,

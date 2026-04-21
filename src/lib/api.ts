@@ -187,12 +187,18 @@ export type MmdSummary = {
   mean_calcium_frac: number;
 };
 
-/** Generate annotation targets for all cross-section frames along a centerline. */
+/** Generate annotation targets for all cross-section frames along a centerline.
+ *
+ * `ostiumMm` (optional, in `[z, y, x]` pipeline order) shifts the first
+ * cross-section to start at the coronary ostium rather than the first
+ * centerline waypoint. Pass `null` to keep legacy behaviour. */
 export async function generateAnnotationTargets(
   centerlineMm: [number, number, number][],
+  ostiumMm: [number, number, number] | null = null,
 ): Promise<AnnotationTarget[]> {
   return invoke<AnnotationTarget[]>('generate_annotation_targets', {
     centerlineMm,
+    ostiumMm,
   });
 }
 
