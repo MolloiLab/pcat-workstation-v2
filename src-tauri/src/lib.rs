@@ -1,5 +1,6 @@
 pub mod commands;
 mod state;
+pub mod volume_cache;
 
 use state::AppState;
 use std::sync::Mutex;

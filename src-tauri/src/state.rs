@@ -9,6 +9,8 @@ use pcat_pipeline::dicom_loader::DualEnergyVolume;
 use pcat_pipeline::mmd::MmdResult;
 pub use pcat_pipeline::types::LoadedVolume;
 
+use crate::volume_cache::{VolumeCache, VOLUME_CACHE_MAX};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Vessel {
     LAD,
@@ -39,6 +41,9 @@ pub struct VesselResult {
 /// Application state managed by Tauri.
 pub struct AppState {
     pub volume: Option<LoadedVolume>,
+    /// Bounded LRU cache of recently-decoded volumes keyed by `(dir, uid)`.
+    /// Lets A→B→A reload skip pixel decode + IPC memcpy on the Rust side.
+    pub volume_cache: VolumeCache,
     pub dual_energy: Option<DualEnergyVolume>,
     pub cpr_frame: Option<Arc<CprFrame>>,
     pub analysis_results: Option<AnalysisResults>,
@@ -63,6 +68,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             volume: None,
+            volume_cache: VolumeCache::new(VOLUME_CACHE_MAX),
             dual_energy: None,
             cpr_frame: None,
             analysis_results: None,

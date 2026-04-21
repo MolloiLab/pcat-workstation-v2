@@ -10,6 +10,7 @@ use pcat_pipeline::dicom_scan::{self, SeriesDescriptor};
 use pcat_pipeline::dicom_load::{self, LoadedVolume as PipelineLoadedVolume, VolumeMetadata as PipelineVolumeMetadata};
 use pcat_pipeline::types::LoadedVolume as StateLoadedVolume;
 use crate::state::AppState;
+use crate::volume_cache::CachedVolume;
 use crate::commands::framed::encode_frame;
 
 const MAX_RECENT: usize = 10;
@@ -374,8 +375,43 @@ pub async fn load_series(
 ) -> Result<Response, String> {
     push_recent(&app, &dir);
     let dir_path = PathBuf::from(dir);
+    let cache_key = (dir_path.to_string_lossy().into_owned(), uid.clone());
 
-    // Build a progress callback that forwards to Tauri events.
+    // Rust-side LRU cache lookup. Cloning the Arc is a refcount bump; the
+    // underlying voxel buffer is not copied.
+    let cached_hit = {
+        let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+        guard.volume_cache.get(&cache_key)
+    };
+
+    if let Some(cached) = cached_hit {
+        // Fast path: reuse the decoded volume. Swap it into `state.volume` so
+        // CPR / FAI / MMD operate on this patient's data after the reload.
+        {
+            let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+            guard.volume = Some(cached.volume.clone());
+            guard.current_volume_key = Some(cache_key.clone());
+            guard.last_metadata = Some(cached.metadata.clone());
+        }
+
+        let _ = app.emit(
+            "dicom_load_progress",
+            ProgressEvent {
+                phase: "done",
+                done: cached.metadata.num_slices,
+                total: cached.metadata.num_slices,
+            },
+        );
+
+        // bytemuck::cast_slice is a zero-cost reinterpret over the borrow;
+        // .to_vec() is still required for Response::new. The expensive thing
+        // we skipped is the parallel DICOM pixel decode.
+        let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&cached.voxels_i16[..]).to_vec();
+        let framed = encode_frame(&cached.metadata, &voxel_bytes)?;
+        return Ok(Response::new(framed));
+    }
+
+    // Miss path: do the full decode.
     let app_cb = app.clone();
     let progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total| {
         let _ = app_cb.emit(
@@ -391,49 +427,67 @@ pub async fn load_series(
     // Mirror into legacy AppState so CPR / annotation / MMD keep working.
     bridge_into_state(&vol, &state)?;
 
-    // Record the (dir, uid) identity of the currently-loaded volume and cache
-    // a clone of its pipeline metadata. `reuse_loaded_volume` uses this to
-    // skip the decode+IPC on A→B→A reload.
+    // Break `vol` into pieces now so we can share the voxel buffer via Arc
+    // between the cache entry and the framed IPC response without a second
+    // ~150 MB memcpy. The `Arc::clone` below is a refcount bump.
+    let metadata = vol.metadata;
+    let voxels_arc: Arc<Vec<i16>> = Arc::new(vol.voxels_i16);
+
+    // Record identity, metadata, and insert into the LRU cache. Reads the
+    // freshly-built `state.volume` (set by bridge_into_state) so the cache
+    // stores the exact same f32 Array3 consumers use.
     {
         let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
-        guard.current_volume_key = Some((
-            dir_path.to_string_lossy().into_owned(),
-            uid.clone(),
-        ));
-        guard.last_metadata = Some(vol.metadata.clone());
+        guard.current_volume_key = Some(cache_key.clone());
+        guard.last_metadata = Some(metadata.clone());
+
+        let cached_volume = guard
+            .volume
+            .clone()
+            .expect("bridge_into_state populated state.volume");
+        guard.volume_cache.insert(
+            cache_key,
+            CachedVolume {
+                metadata: metadata.clone(),
+                voxels_i16: Arc::clone(&voxels_arc),
+                volume: cached_volume,
+            },
+        );
     }
 
     // Emit terminal event so frontend can switch to "finalizing" state.
     let _ = app.emit("dicom_load_progress", ProgressEvent {
         phase: "done",
-        done: vol.metadata.num_slices,
-        total: vol.metadata.num_slices,
+        done: metadata.num_slices,
+        total: metadata.num_slices,
     });
 
-    let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&vol.voxels_i16).to_vec();
-    let framed = encode_frame(&vol.metadata, &voxel_bytes)?;
+    let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&voxels_arc[..]).to_vec();
+    let framed = encode_frame(&metadata, &voxel_bytes)?;
     Ok(Response::new(framed))
 }
 
-/// Query whether the Rust AppState currently holds the (dir, uid) volume.
-/// If so, returns its cached pipeline `VolumeMetadata` so the frontend can
-/// rebuild store state without a full decode+IPC round-trip. Returns `None`
-/// if the cached identity doesn't match or no volume is resident.
+/// Query whether the Rust-side volume cache can serve the (dir, uid) request
+/// without a decode. On hit, swaps the cached `LoadedVolume` into
+/// `state.volume` (so downstream CPR / FAI / MMD calls operate on the
+/// right patient) and returns its `VolumeMetadata`. On miss returns `None`
+/// and the caller should fall back to `load_series`.
 #[tauri::command]
 pub async fn reuse_loaded_volume(
     dir: String,
     uid: String,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<Option<PipelineVolumeMetadata>, String> {
-    let guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
-    let matches = matches!(
-        &guard.current_volume_key,
-        Some((d, u)) if d == &dir && u == &uid
-    );
-    if !matches || guard.volume.is_none() {
+    let key = (dir, uid);
+    let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+    let Some(cached) = guard.volume_cache.get(&key) else {
         return Ok(None);
-    }
-    Ok(guard.last_metadata.clone())
+    };
+    let metadata = cached.metadata.clone();
+    guard.volume = Some(cached.volume.clone());
+    guard.current_volume_key = Some(key);
+    guard.last_metadata = Some(metadata.clone());
+    Ok(Some(metadata))
 }
 
 // ---------------------------------------------------------------------------

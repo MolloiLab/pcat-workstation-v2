@@ -4,6 +4,7 @@ use std::sync::Arc;
 /// CT volume loaded from DICOM, stored in Rust memory.
 /// `data` is wrapped in `Arc` so commands can share it without
 /// cloning ~300MB on every render call.
+#[derive(Clone)]
 pub struct LoadedVolume {
     pub data: Arc<Array3<f32>>,  // (Z, Y, X) HU values -- shared, not cloned
     pub spacing: [f64; 3],       // [sz, sy, sx] mm
