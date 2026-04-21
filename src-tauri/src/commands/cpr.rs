@@ -99,17 +99,17 @@ pub async fn render_cpr_image(
         return Err("pixels_high must be at least 2".into());
     }
 
-    let (volume_data, spacing, origin, frame) = {
+    let (volume_data, spacing, origin, direction, frame) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard.volume.as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
         let frame_ref = guard.cpr_frame.as_ref()
             .ok_or_else(|| "no CPR frame built -- call build_cpr_frame first".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction, clone_frame(frame_ref))
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        frame.render_cpr(&volume_data, spacing, origin, rotation_deg, width_mm, pixels_high, slab_mm)
+        frame.render_cpr(&volume_data, spacing, origin, &direction, rotation_deg, width_mm, pixels_high, slab_mm)
     })
     .await
     .map_err(|e| format!("render_cpr_image task failed: {e}"))?;
@@ -148,13 +148,13 @@ pub async fn render_stretched_cpr_image(
         return Err("output dimensions must be at least 2".into());
     }
 
-    let (volume_data, spacing, origin, frame) = {
+    let (volume_data, spacing, origin, direction, frame) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard.volume.as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
         let frame_ref = guard.cpr_frame.as_ref()
             .ok_or_else(|| "no CPR frame built -- call build_cpr_frame first".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction, clone_frame(frame_ref))
     };
 
     // Grow the vertical viewport so the vessel's out-of-plane depth
@@ -171,7 +171,7 @@ pub async fn render_stretched_cpr_image(
 
     let result = tokio::task::spawn_blocking(move || {
         frame.render_stretched(
-            &volume_data, spacing, origin,
+            &volume_data, spacing, origin, &direction,
             rotation_deg, width_mm,
             pixels_wide, effective_high, slab_mm,
         )
@@ -218,18 +218,18 @@ pub async fn render_cross_sections(
         }
     }
 
-    let (volume_data, spacing, origin, frame) = {
+    let (volume_data, spacing, origin, direction, frame) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard.volume.as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
         let frame_ref = guard.cpr_frame.as_ref()
             .ok_or_else(|| "no CPR frame built -- call build_cpr_frame first".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin, clone_frame(frame_ref))
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction, clone_frame(frame_ref))
     };
 
     let results = tokio::task::spawn_blocking(move || {
         frame.render_cross_sections(
-            &volume_data, spacing, origin,
+            &volume_data, spacing, origin, &direction,
             &position_fractions, rotation_deg, width_mm, pixels,
         )
     })
@@ -414,16 +414,16 @@ pub async fn compute_cpr_image(
         return Err("output dimensions must be at least 2".into());
     }
 
-    let (volume_data, spacing, origin) = {
+    let (volume_data, spacing, origin, direction) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard.volume.as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin)
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction)
     };
 
     let result = tokio::task::spawn_blocking(move || {
         cpr::compute_cpr(
-            &volume_data, &centerline_mm, spacing, origin,
+            &volume_data, &centerline_mm, spacing, origin, &direction,
             width_mm, slab_mm, pixels_wide, pixels_high, rotation_deg,
         )
     })
@@ -462,16 +462,16 @@ pub async fn compute_cross_section_image(
         ));
     }
 
-    let (volume_data, spacing, origin) = {
+    let (volume_data, spacing, origin, direction) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard.volume.as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin)
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction)
     };
 
     let result = tokio::task::spawn_blocking(move || {
         cpr::compute_cross_section(
-            &volume_data, &centerline_mm, spacing, origin,
+            &volume_data, &centerline_mm, spacing, origin, &direction,
             position_fraction, rotation_deg, width_mm, pixels,
         )
     })
@@ -512,16 +512,16 @@ pub async fn compute_cross_sections_batch(
         }
     }
 
-    let (volume_data, spacing, origin) = {
+    let (volume_data, spacing, origin, direction) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard.volume.as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin)
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction)
     };
 
     let results = tokio::task::spawn_blocking(move || {
         cpr::compute_cross_sections_batch(
-            &volume_data, &centerline_mm, spacing, origin,
+            &volume_data, &centerline_mm, spacing, origin, &direction,
             &position_fractions, rotation_deg, width_mm, pixels,
         )
     })

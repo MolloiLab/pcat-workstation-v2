@@ -361,7 +361,7 @@ mod tests {
 
         let result = render_stretched(
             &positions, &normals, &binormals, &arclengths,
-            &vol, spacing, origin,
+            &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION,
             20.0, pixels_wide, pixels_high, 0.5, 0.0,
         );
 
@@ -444,7 +444,7 @@ mod tests {
         let pixels_high = 60usize;
         let result = render_stretched(
             &positions, &normals, &binormals, &arclengths,
-            &vol, [1.0, 1.0, 1.0], [0.0, 0.0, 0.0],
+            &vol, [1.0, 1.0, 1.0], [0.0, 0.0, 0.0], &crate::types::IDENTITY_DIRECTION,
             30.0, pixels_wide, pixels_high, 0.0, 0.0,
         );
 

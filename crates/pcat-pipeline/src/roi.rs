@@ -364,6 +364,7 @@ mod tests {
             volume_dims,
             spacing,
             origin,
+            &crate::types::IDENTITY_DIRECTION,
             cs_width_mm,
             cs_pixels,
         );
@@ -422,6 +423,7 @@ mod tests {
             volume_dims,
             spacing,
             origin,
+            &crate::types::IDENTITY_DIRECTION,
             cs_width_mm,
             cs_pixels,
         );
@@ -488,6 +490,7 @@ mod tests {
             volume_dims,
             spacing,
             origin,
+            &crate::types::IDENTITY_DIRECTION,
             cs_width_mm,
             cs_pixels,
         );

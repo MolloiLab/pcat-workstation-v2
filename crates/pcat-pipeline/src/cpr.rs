@@ -508,6 +508,7 @@ mod tests {
             &centerline,
             spacing,
             origin,
+            &crate::types::IDENTITY_DIRECTION,
             10.0,  // width_mm
             0.0,   // no slab
             60,    // pixels_wide
@@ -550,6 +551,7 @@ mod tests {
             &centerline,
             spacing,
             origin,
+            &crate::types::IDENTITY_DIRECTION,
             0.5,   // middle of the centerline
             0.0,   // no rotation
             10.0,  // width_mm
@@ -595,8 +597,9 @@ mod tests {
         assert_eq!(frame.arclengths.len(), 60);
 
         // Render at two different rotations — both should produce valid images
-        let r1 = frame.render_cpr(&vol, spacing, origin, 0.0, 10.0, 21, 0.0);
-        let r2 = frame.render_cpr(&vol, spacing, origin, 90.0, 10.0, 21, 0.0);
+        let id = &crate::types::IDENTITY_DIRECTION;
+        let r1 = frame.render_cpr(&vol, spacing, origin, id, 0.0, 10.0, 21, 0.0);
+        let r2 = frame.render_cpr(&vol, spacing, origin, id, 90.0, 10.0, 21, 0.0);
 
         assert_eq!(r1.image.len(), 60 * 21);
         assert_eq!(r2.image.len(), 60 * 21);
@@ -622,7 +625,7 @@ mod tests {
 
         // Batch cross-sections
         let results = frame.render_cross_sections(
-            &vol, spacing, origin,
+            &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION,
             &[0.25, 0.5, 0.75],
             0.0, 10.0, 21,
         );
@@ -932,6 +935,7 @@ mod tests {
                 &vol.data,
                 vol.spacing,
                 vol.origin,
+                &vol.direction,
                 rot_deg as f64,
                 25.0,
                 px_w,

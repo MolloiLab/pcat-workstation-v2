@@ -84,7 +84,7 @@ pub async fn generate_annotation_targets(
     }
 
     // Extract volume data and CprFrame under lock, then release.
-    let (volume_data, spacing, origin, frame) = {
+    let (volume_data, spacing, origin, direction, frame) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard
             .volume
@@ -94,7 +94,7 @@ pub async fn generate_annotation_targets(
             .cpr_frame
             .as_ref()
             .ok_or_else(|| "no CPR frame built — call build_cpr_frame first".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin, Arc::clone(frame))
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction, Arc::clone(frame))
     };
 
     let frame_clone = clone_frame(&frame);
@@ -107,6 +107,7 @@ pub async fn generate_annotation_targets(
             &volume_data,
             spacing,
             origin,
+            &direction,
             &params,
         )
     })
@@ -352,6 +353,7 @@ pub async fn run_mmd_on_roi(
         volume_shape,
         spacing,
         origin,
+        direction,
     ) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
 
@@ -420,6 +422,7 @@ pub async fn run_mmd_on_roi(
             volume_shape,
             vol.spacing,
             vol.origin,
+            vol.direction,
         )
     };
 
@@ -446,6 +449,7 @@ pub async fn run_mmd_on_roi(
             volume_shape,
             spacing,
             origin,
+            &direction,
             cs_width_mm,
             cs_pixels,
         );
@@ -586,7 +590,7 @@ pub async fn sample_surfaces(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<Vec<CrossSectionSurface>, String> {
     // Extract everything under the lock, then release.
-    let (material_map, frame, targets, finalized_contours, spacing, origin) = {
+    let (material_map, frame, targets, finalized_contours, spacing, origin, direction) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
 
         let mmd_result = guard
@@ -634,6 +638,7 @@ pub async fn sample_surfaces(
             finalized_contours,
             vol.spacing,
             vol.origin,
+            vol.direction,
         )
     };
 
@@ -647,6 +652,7 @@ pub async fn sample_surfaces(
             &finalized_contours,
             spacing,
             origin,
+            &direction,
             &params,
         )
     })
@@ -701,6 +707,7 @@ pub async fn get_mmd_overlay(
 
     let spacing = vol.spacing;
     let origin = vol.origin;
+    let direction = vol.direction;
 
     let frame_idx = target.frame_index;
     if frame_idx >= frame.n_cols() {
@@ -729,10 +736,13 @@ pub async fn get_mmd_overlay(
             let wy = pos_mm[1] + offset_n * normal[1] + offset_b * binormal[1];
             let wx = pos_mm[2] + offset_n * normal[2] + offset_b * binormal[2];
 
-            // Convert world coords to voxel indices.
-            let vz = (wz - origin[0]) * inv_spacing[0];
-            let vy = (wy - origin[1]) * inv_spacing[1];
-            let vx = (wx - origin[2]) * inv_spacing[2];
+            // Convert world coords to voxel indices (IOP-aware).
+            let [vz, vy, vx] = pcat_pipeline::types::patient_to_voxel(
+                [wz, wy, wx],
+                origin,
+                inv_spacing,
+                &direction,
+            );
 
             let val = pcat_pipeline::interp::trilinear(material_map, vz, vy, vx);
             overlay[row * pixels + col] = val;
@@ -886,7 +896,7 @@ pub async fn export_mmd_csv(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<String, String> {
     // Extract everything we need from state under one lock.
-    let (mmd_result_arrays, frame, targets, finalized_contours, spacing, origin) = {
+    let (mmd_result_arrays, frame, targets, finalized_contours, spacing, origin, direction) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
 
         let mmd_result = guard
@@ -942,6 +952,7 @@ pub async fn export_mmd_csv(
             finalized_contours,
             vol.spacing,
             vol.origin,
+            vol.direction,
         )
     };
 
@@ -959,6 +970,7 @@ pub async fn export_mmd_csv(
                 &finalized_contours,
                 spacing,
                 origin,
+                &direction,
                 &params,
             );
             all_surfaces.push((key, surfaces));

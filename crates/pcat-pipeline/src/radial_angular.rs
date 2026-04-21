@@ -333,7 +333,8 @@ mod tests {
         finalized.insert(0, outer_contour);
 
         let surfaces = sample_radial_angular(
-            &vol, &frame, &targets, &finalized, spacing, origin, &params,
+            &vol, &frame, &targets, &finalized, spacing, origin,
+            &crate::types::IDENTITY_DIRECTION, &params,
         );
 
         assert_eq!(surfaces.len(), 1, "Should produce 1 surface");
@@ -372,7 +373,8 @@ mod tests {
         finalized.insert(0, outer_contour);
 
         let surfaces = sample_radial_angular(
-            &vol, &frame, &targets, &finalized, spacing, origin, &params,
+            &vol, &frame, &targets, &finalized, spacing, origin,
+            &crate::types::IDENTITY_DIRECTION, &params,
         );
 
         assert_eq!(surfaces.len(), 1);
@@ -426,7 +428,8 @@ mod tests {
         finalized.insert(0, outer_contour);
 
         let surfaces = sample_radial_angular(
-            &vol, &frame, &targets, &finalized, spacing, origin, &params,
+            &vol, &frame, &targets, &finalized, spacing, origin,
+            &crate::types::IDENTITY_DIRECTION, &params,
         );
 
         assert_eq!(surfaces.len(), 1);
@@ -471,7 +474,8 @@ mod tests {
         finalized.insert(0, outer_contour);
 
         let surfaces = sample_radial_angular(
-            &vol, &frame, &targets, &finalized, spacing, origin, &params,
+            &vol, &frame, &targets, &finalized, spacing, origin,
+            &crate::types::IDENTITY_DIRECTION, &params,
         );
 
         assert_eq!(surfaces.len(), 1);
@@ -522,7 +526,8 @@ mod tests {
         let finalized = HashMap::new();
 
         let surfaces = sample_radial_angular(
-            &vol, &frame, &targets, &finalized, spacing, origin, &params,
+            &vol, &frame, &targets, &finalized, spacing, origin,
+            &crate::types::IDENTITY_DIRECTION, &params,
         );
 
         assert_eq!(surfaces.len(), 0, "No surfaces if no finalized contours");

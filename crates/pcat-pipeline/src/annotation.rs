@@ -61,6 +61,7 @@ pub fn generate_annotation_batch(
     volume: &Array3<f32>,
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     params: &AnnotationBatchParams,
 ) -> Vec<AnnotationTarget> {
     let n_cols = frame.n_cols();
@@ -92,6 +93,7 @@ pub fn generate_annotation_batch(
             volume,
             spacing,
             origin,
+            direction,
             position_frac,
             0.0, // rotation_deg = 0
             params.width_mm,
@@ -322,7 +324,7 @@ mod tests {
         let (vol, spacing, origin) = make_vessel_phantom();
         let frame = make_frame(200);
         let params = AnnotationBatchParams::default();
-        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &params);
+        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION, &params);
         assert_eq!(
             targets.len(),
             params.n_sections,
@@ -337,7 +339,7 @@ mod tests {
         let (vol, spacing, origin) = make_vessel_phantom();
         let frame = make_frame(200);
         let params = AnnotationBatchParams::default();
-        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &params);
+        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION, &params);
 
         // Verify consecutive targets are spaced at approximately section_spacing_mm.
         for i in 1..targets.len() {
@@ -358,7 +360,7 @@ mod tests {
         let (vol, spacing, origin) = make_vessel_phantom();
         let frame = make_frame(200);
         let params = AnnotationBatchParams::default();
-        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &params);
+        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION, &params);
 
         for (i, t) in targets.iter().enumerate() {
             assert!(
@@ -380,7 +382,7 @@ mod tests {
         let (vol, spacing, origin) = make_vessel_phantom();
         let frame = make_frame(200);
         let params = AnnotationBatchParams::default();
-        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &params);
+        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION, &params);
 
         let mm_per_pixel = 2.0 * params.width_mm / params.pixels as f64;
         let center_px = params.pixels as f64 / 2.0;
@@ -415,7 +417,7 @@ mod tests {
         let (vol, spacing, origin) = make_vessel_phantom();
         let frame = make_frame(200);
         let params = AnnotationBatchParams::default();
-        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &params);
+        let targets = generate_annotation_batch(&frame, &vol, spacing, origin, &crate::types::IDENTITY_DIRECTION, &params);
 
         for (i, t) in targets.iter().enumerate() {
             assert_eq!(

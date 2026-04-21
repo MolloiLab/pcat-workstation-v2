@@ -48,6 +48,7 @@ fn build_dense_centerline(
     waypoints_mm: &[[f64; 3]],
     spacing: [f64; 3],
     origin: [f64; 3],
+    direction: &[f64; 9],
     step_mm: f64,
 ) -> Vec<[f64; 3]> {
     // Collect all control points in order: ostium, then waypoints
@@ -59,14 +60,12 @@ fn build_dense_centerline(
         return control_pts;
     }
 
-    // Convert mm to voxel coords: voxel = (mm - origin) / spacing
+    // Convert mm → voxel through the IOP-aware helper so non-axial acquisitions
+    // (rare but possible) don't silently mis-locate the centerline.
+    let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
     let control_vox: Vec<[f64; 3]> = control_pts
         .iter()
-        .map(|pt| [
-            (pt[0] - origin[0]) / spacing[0],
-            (pt[1] - origin[1]) / spacing[1],
-            (pt[2] - origin[2]) / spacing[2],
-        ])
+        .map(|pt| pcat_pipeline::types::patient_to_voxel(*pt, origin, inv_spacing, direction))
         .collect();
 
     // Densely interpolate between consecutive control points at step_mm intervals
@@ -123,13 +122,13 @@ pub async fn run_pipeline(
     }
 
     // Extract volume data under the lock, then release immediately
-    let (volume_data, spacing, origin) = {
+    let (volume_data, spacing, origin, direction) = {
         let guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
         let vol = guard
             .volume
             .as_ref()
             .ok_or_else(|| "no volume loaded".to_string())?;
-        (vol.data.clone(), vol.spacing, vol.origin)
+        (vol.data.clone(), vol.spacing, vol.origin, vol.direction)
     };
 
     let volume_shape = [
@@ -171,6 +170,7 @@ pub async fn run_pipeline(
                 &vessel_seeds.waypoints_mm,
                 spacing,
                 origin,
+                &direction,
                 0.5, // 0.5mm step
             );
 

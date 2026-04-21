@@ -55,3 +55,85 @@ pub const IDENTITY_DIRECTION: [f64; 9] = [
     0.0, 1.0, 0.0,
     0.0, 0.0, 1.0,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Identity direction + zero origin: voxel index = sample_zyx / spacing.
+    #[test]
+    fn axial_identity_origin_zero() {
+        let inv_spacing = [1.0, 0.5, 0.25];
+        let v = patient_to_voxel(
+            [10.0, 20.0, 40.0],
+            [0.0, 0.0, 0.0],
+            inv_spacing,
+            &IDENTITY_DIRECTION,
+        );
+        assert_eq!(v, [10.0, 10.0, 10.0]);
+    }
+
+    /// Identity direction with non-zero IPP: voxel index must subtract
+    /// origin in *every* axis. The pre-fix code dropped X and Y, which would
+    /// have returned [10, 100, 200] here instead of [0, 0, 0].
+    #[test]
+    fn axial_identity_full_ipp_subtracted() {
+        let origin = [10.0, 50.0, 50.0]; // ZYX patient mm
+        let inv_spacing = [1.0, 1.0, 1.0];
+        let v = patient_to_voxel(
+            [10.0, 50.0, 50.0],
+            origin,
+            inv_spacing,
+            &IDENTITY_DIRECTION,
+        );
+        // sample == origin, so voxel index must be zero on every axis.
+        assert_eq!(v, [0.0, 0.0, 0.0]);
+    }
+
+    /// Tilted direction: stepping +1mm along the IOP row direction must
+    /// advance voxel-X by 1, even when that direction is not aligned with
+    /// patient X. Pre-fix this silently mis-mapped.
+    #[test]
+    fn oblique_iop_indexes_along_basis() {
+        // IOP row = +Y patient axis; IOP col = -X patient axis;
+        // slice normal = +Z patient axis. (90° in-plane rotation.)
+        let direction: [f64; 9] = [
+            0.0, 1.0, 0.0,    // iop_row → patient +Y
+            -1.0, 0.0, 0.0,   // iop_col → patient -X
+            0.0, 0.0, 1.0,    // normal  → patient +Z
+        ];
+        let origin = [0.0, 0.0, 0.0];
+        let inv_spacing = [1.0, 1.0, 1.0];
+        // Step +1mm in patient Y. With IOP row = +Y, that should be voxel-X +1.
+        let v = patient_to_voxel(
+            [0.0, 1.0, 0.0],   // ZYX = (z=0, y=1, x=0) patient mm
+            origin,
+            inv_spacing,
+            &direction,
+        );
+        assert!((v[2] - 1.0).abs() < 1e-12, "voxel x should be 1, got {v:?}");
+        assert!(v[0].abs() < 1e-12, "voxel z should be 0, got {v:?}");
+        assert!(v[1].abs() < 1e-12, "voxel y should be 0, got {v:?}");
+    }
+
+    /// Oblique IOP combined with non-zero origin: both bug fixes interact.
+    #[test]
+    fn oblique_iop_with_offset_origin() {
+        let direction: [f64; 9] = [
+            0.0, 1.0, 0.0,
+            -1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0,
+        ];
+        let origin = [5.0, 7.0, 11.0]; // ZYX
+        let inv_spacing = [1.0, 1.0, 1.0];
+        // Walk +2mm along iop_row (patient +Y) from origin: sample_zyx = (5, 9, 11).
+        let v = patient_to_voxel(
+            [5.0, 9.0, 11.0],
+            origin,
+            inv_spacing,
+            &direction,
+        );
+        assert!((v[2] - 2.0).abs() < 1e-12, "voxel x should be 2, got {v:?}");
+        assert!(v[1].abs() < 1e-12 && v[0].abs() < 1e-12);
+    }
+}
