@@ -75,6 +75,39 @@ fn scanline_fill(polygon: &[[f64; 2]], grid_rows: usize, grid_cols: usize) -> Ve
 }
 
 // ---------------------------------------------------------------------------
+// Polygon radial dilation (used to build a ring ROI outside the lumen)
+// ---------------------------------------------------------------------------
+
+/// Dilate a closed polygon outward by `dilation_px` pixels along the radial
+/// direction from its centroid. Each vertex moves to `centroid + (r + d)/r *
+/// (vertex - centroid)`. Works well for roughly convex, centroid-enclosing
+/// shapes like a coronary lumen; for non-convex shapes the dilation is
+/// approximate but monotonic.
+fn dilate_polygon_radial(polygon: &[[f64; 2]], dilation_px: f64) -> Vec<[f64; 2]> {
+    if polygon.is_empty() || dilation_px <= 0.0 {
+        return polygon.to_vec();
+    }
+    let n = polygon.len() as f64;
+    let cx: f64 = polygon.iter().map(|p| p[0]).sum::<f64>() / n;
+    let cy: f64 = polygon.iter().map(|p| p[1]).sum::<f64>() / n;
+
+    polygon
+        .iter()
+        .map(|&[x, y]| {
+            let dx = x - cx;
+            let dy = y - cy;
+            let r = (dx * dx + dy * dy).sqrt();
+            if r < 1e-9 {
+                [x, y]
+            } else {
+                let s = (r + dilation_px) / r;
+                [cx + dx * s, cy + dy * s]
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Contour interpolation
 // ---------------------------------------------------------------------------
 
@@ -100,11 +133,17 @@ fn lerp_contour(a: &[[f64; 2]], b: &[[f64; 2]], t: f64) -> Vec<[f64; 2]> {
 
 /// Build a 3D boolean mask from snake contours interpolated along a Bishop frame.
 ///
-/// Given a sparse set of annotated cross-section contours (e.g. 20 snake
-/// contours), this function linearly interpolates between adjacent contours
+/// Given a sparse set of annotated lumen contours (e.g. 20 cross-section
+/// polygons), this function linearly interpolates between adjacent contours
 /// at every frame column, maps each contour from cross-section pixel
 /// coordinates to volume voxel coordinates via the Bishop frame, and
-/// rasterizes the filled polygons into the output mask.
+/// rasterizes a ring region into the output mask.
+///
+/// * `ring_outer_mm <= 0` — the mask is the interior of the contour (legacy
+///   "lumen fill" mode).
+/// * `ring_outer_mm > 0` — the mask is a ring *outside* the contour, from the
+///   contour itself out to a radially-dilated copy `ring_outer_mm` farther
+///   away. This is the pericoronary region used for PVAT / MMD analysis.
 ///
 /// # Arguments
 ///
@@ -118,6 +157,8 @@ fn lerp_contour(a: &[[f64; 2]], b: &[[f64; 2]], t: f64) -> Vec<[f64; 2]> {
 /// * `origin` — `[oz, oy, ox]` volume origin in mm.
 /// * `cross_section_width_mm` — Physical width of cross-section images in mm.
 /// * `cross_section_pixels` — Pixel dimension of cross-section images.
+/// * `ring_outer_mm` — Outer radial extent of the ring in millimeters
+///   (measured from each contour vertex). `<= 0` selects legacy lumen-fill.
 ///
 /// # Panics
 ///
@@ -134,6 +175,7 @@ pub fn build_3d_roi_mask(
     direction: &[f64; 9],
     cross_section_width_mm: f64,
     cross_section_pixels: usize,
+    ring_outer_mm: f64,
 ) -> Array3<bool> {
     assert!(!contours.is_empty(), "need at least one contour");
     assert_eq!(
@@ -170,7 +212,14 @@ pub fn build_3d_roi_mask(
     }
 
     let center_px = cross_section_pixels as f64 / 2.0;
-    let scale = cross_section_width_mm / cross_section_pixels as f64; // mm per pixel
+    // cross_section_width_mm is the half-width (center-to-edge); the full image
+    // spans 2 * cross_section_width_mm across cross_section_pixels pixels.
+    let scale = 2.0 * cross_section_width_mm / cross_section_pixels as f64; // mm per pixel
+    let ring_px = if ring_outer_mm > 0.0 {
+        ring_outer_mm / scale
+    } else {
+        0.0
+    };
 
     let inv_spacing = [1.0 / spacing[0], 1.0 / spacing[1], 1.0 / spacing[2]];
 
@@ -231,12 +280,29 @@ pub fn build_3d_roi_mask(
         // corresponding voxel. We do this by rasterizing the polygon in
         // cross-section pixel space and mapping filled pixels to voxel coords.
 
-        // Rasterize in cross-section pixel space
-        // The polygon in cross-section space is the contour itself: [x, y] pixels.
-        // Convert to [row, col] = [y, x] for scanline fill.
-        let polygon_rc: Vec<[f64; 2]> = contour_at_j.iter().map(|pt| [pt[1], pt[0]]).collect();
+        // Rasterize in cross-section pixel space. Convert [x, y] to [row, col]
+        // = [y, x] for scanline fill.
+        let inner_rc: Vec<[f64; 2]> = contour_at_j.iter().map(|pt| [pt[1], pt[0]]).collect();
 
-        let filled = scanline_fill(&polygon_rc, cross_section_pixels, cross_section_pixels);
+        let filled: Vec<(usize, usize)> = if ring_px > 0.0 {
+            // Ring mode: fill outer (dilated) polygon, subtract inner.
+            let outer_xy = dilate_polygon_radial(&contour_at_j, ring_px);
+            let outer_rc: Vec<[f64; 2]> =
+                outer_xy.iter().map(|pt| [pt[1], pt[0]]).collect();
+            let outer_pixels =
+                scanline_fill(&outer_rc, cross_section_pixels, cross_section_pixels);
+            let inner_pixels: std::collections::HashSet<(usize, usize)> =
+                scanline_fill(&inner_rc, cross_section_pixels, cross_section_pixels)
+                    .into_iter()
+                    .collect();
+            outer_pixels
+                .into_iter()
+                .filter(|p| !inner_pixels.contains(p))
+                .collect()
+        } else {
+            // Lumen-fill mode (legacy): fill the contour interior.
+            scanline_fill(&inner_rc, cross_section_pixels, cross_section_pixels)
+        };
 
         for (row, col) in filled {
             // Cross-section pixel (col, row) = (x, y)
@@ -344,8 +410,8 @@ mod tests {
         let n_cols = 41; // z = 10..50 inclusive
         let frame = make_z_axis_frame(10.0, 32.0, 32.0, 40.0, n_cols);
 
-        // Cross-section: 64 pixels, 64 mm wide → 1 mm/pixel.
-        let cs_width_mm = 64.0;
+        // Cross-section: 64 pixels, half-width 32 mm (= full span 64 mm) → 1 mm/px.
+        let cs_width_mm = 32.0;
         let cs_pixels = 64;
         let center = cs_pixels as f64 / 2.0; // 32.0
 
