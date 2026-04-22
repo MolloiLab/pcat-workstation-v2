@@ -16,7 +16,11 @@ use pcat_pipeline::dicom_load::VolumeMetadata as PipelineVolumeMetadata;
 use pcat_pipeline::types::LoadedVolume;
 
 /// Default maximum number of decoded volumes retained in the LRU cache.
-pub const VOLUME_CACHE_MAX: usize = 3;
+///
+/// Sized for a full patient load: CaScore + CCTA + up to four MonoPlus keV
+/// series resident at once so the header volume switcher can cross-reference
+/// modalities without redecoding.
+pub const VOLUME_CACHE_MAX: usize = 8;
 
 /// A single cached volume. `voxels_i16` is shared via `Arc` so both the
 /// IPC framed-response path and the cache entry reference the same buffer;

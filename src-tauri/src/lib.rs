@@ -23,6 +23,8 @@ pub fn run() {
             commands::dicom::load_series,
             commands::dicom::reuse_loaded_volume,
             commands::dicom::load_dual_energy,
+            commands::dicom::load_patient_all,
+            commands::dicom::set_active_volume,
             commands::dicom::list_patients,
             commands::dicom::list_series_dirs,
             commands::cpr::build_cpr_frame,

@@ -15,6 +15,7 @@
   let { material, unit, onMaterialChange, onUnitChange }: Props = $props();
 
   const materials = [
+    { key: 'ct', label: 'CT' },
     { key: 'water', label: 'Water' },
     { key: 'lipid', label: 'Lipid' },
     { key: 'iodine', label: 'Iodine' },
@@ -52,9 +53,9 @@
              {unit === u.key
                ? 'bg-accent text-white'
                : 'bg-surface-tertiary text-text-secondary hover:text-text-primary'}
-             {material === 'density' ? 'opacity-40 pointer-events-none' : ''}"
+             {material === 'density' || material === 'ct' ? 'opacity-40 pointer-events-none' : ''}"
       onclick={() => onUnitChange(u.key)}
-      disabled={material === 'density'}
+      disabled={material === 'density' || material === 'ct'}
     >
       {u.label}
     </button>

@@ -753,3 +753,336 @@ fn bridge_into_state(
     guard.volume = Some(legacy);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Patient-level loader + active-volume switcher
+// ---------------------------------------------------------------------------
+
+/// One series in a patient load, surfaced to the frontend switcher.
+#[derive(serde::Serialize)]
+pub struct LoadedSeriesDescriptor {
+    /// Folder name, e.g. `MonoPlus_70keV` or `CCTA_Soft`.
+    pub name: String,
+    /// Absolute path to the series folder (used as cache key + switch key).
+    pub path: String,
+    /// DICOM SeriesInstanceUID — second half of the cache key.
+    pub uid: String,
+    /// SeriesDescription from the DICOM header (may be mislabeled for MonoPlus).
+    pub series_description: String,
+    /// keV parsed from the folder name, if present. `None` for CaScore/CCTA.
+    pub kev: Option<f64>,
+    /// Number of slices (metadata-only, no full decode).
+    pub num_slices: usize,
+    /// Shape [rows, cols] — useful for grouping volumes on the same grid.
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[derive(serde::Serialize)]
+pub struct PatientLoadResult {
+    pub series: Vec<LoadedSeriesDescriptor>,
+    /// Index into `series` for the volume now in `state.volume`.
+    pub active_index: usize,
+    /// Errors hit while loading individual series — the command does not
+    /// abort the whole patient on a single decode failure. Entries are
+    /// `"<folder name>: <error>"`.
+    pub failures: Vec<String>,
+}
+
+/// Load every DICOM series under `patient_dir` into the volume cache so the
+/// user can switch between modalities (CaScore, CCTA, multiple MonoPlus keV)
+/// without redecoding. Picks a default "active" volume — the CCTA if
+/// recognizable, else the lowest keV MonoPlus, else the first series.
+///
+/// Also auto-pairs the first two MonoPlus keV series as the MMD dual-energy
+/// volume (replaces `state.dual_energy`).
+#[tauri::command]
+pub async fn load_patient_all(
+    patient_dir: String,
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<PatientLoadResult, String> {
+    let root = PathBuf::from(&patient_dir);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {patient_dir}"));
+    }
+
+    // Discover series subfolders (cheap, no DICOM parse).
+    let subdirs = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || -> Result<Vec<(String, PathBuf)>, String> {
+            let mut out = Vec::new();
+            let read = std::fs::read_dir(&root).map_err(|e| format!("read_dir: {e}"))?;
+            for entry in read.flatten() {
+                let Ok(ty) = entry.file_type() else { continue };
+                if !ty.is_dir() { continue; }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || name.starts_with('_') { continue; }
+                out.push((name, entry.path()));
+            }
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(out)
+        }
+    })
+    .await
+    .map_err(|e| format!("subdir task failed: {e}"))??;
+
+    if subdirs.is_empty() {
+        return Err(format!("no series subfolders under {patient_dir}"));
+    }
+
+    push_recent(&app, &patient_dir);
+
+    let total = subdirs.len();
+    let mut descriptors: Vec<LoadedSeriesDescriptor> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    for (i, (name, series_dir)) in subdirs.into_iter().enumerate() {
+        let _ = app.emit(
+            "dicom_load_progress",
+            ProgressEvent {
+                phase: "patient_series",
+                done: i,
+                total,
+            },
+        );
+
+        // Scan to get the series UID (first series in the folder).
+        let scan = match dicom_scan::scan_series(&series_dir).await {
+            Ok(s) => s,
+            Err(e) => {
+                failures.push(format!("{name}: scan failed: {e}"));
+                continue;
+            }
+        };
+        let Some(first) = scan.into_iter().next() else {
+            failures.push(format!("{name}: no DICOM series found"));
+            continue;
+        };
+        let uid = first.uid.clone();
+        let path_str = series_dir.to_string_lossy().into_owned();
+        let cache_key = (path_str.clone(), uid.clone());
+
+        // Skip decode if already cached.
+        let already_cached = {
+            let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+            guard.volume_cache.get(&cache_key).is_some()
+        };
+
+        let metadata: PipelineVolumeMetadata = if already_cached {
+            // Already resident — just read the cached metadata back.
+            let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+            guard.volume_cache.get(&cache_key).unwrap().metadata.clone()
+        } else {
+            let series_idx = i + 1;
+            let app_cb = app.clone();
+            let progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total_slices| {
+                let _ = app_cb.emit(
+                    "dicom_load_progress",
+                    ProgressEvent {
+                        phase: "patient_series_decode",
+                        done: series_idx,
+                        total,
+                    },
+                );
+                // Also emit fine-grained decode progress.
+                let _ = app_cb.emit(
+                    "dicom_load_progress",
+                    ProgressEvent { phase: "decoding", done, total: total_slices },
+                );
+            });
+
+            let vol = match dicom_load::load_series(&series_dir, &uid, Some(progress)).await {
+                Ok(v) => v,
+                Err(e) => {
+                    failures.push(format!("{name}: decode failed: {e}"));
+                    continue;
+                }
+            };
+
+            if let Err(e) = bridge_into_state(&vol, &state) {
+                failures.push(format!("{name}: bridge failed: {e}"));
+                continue;
+            }
+
+            let meta_clone = vol.metadata.clone();
+            let voxels_arc: Arc<Vec<i16>> = Arc::new(vol.voxels_i16);
+            {
+                let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+                guard.current_volume_key = Some(cache_key.clone());
+                guard.last_metadata = Some(meta_clone.clone());
+                let cached_volume = guard
+                    .volume
+                    .clone()
+                    .expect("bridge_into_state populated state.volume");
+                guard.volume_cache.insert(
+                    cache_key.clone(),
+                    CachedVolume {
+                        metadata: meta_clone.clone(),
+                        voxels_i16: Arc::clone(&voxels_arc),
+                        volume: cached_volume,
+                    },
+                );
+            }
+            meta_clone
+        };
+
+        descriptors.push(LoadedSeriesDescriptor {
+            name: name.clone(),
+            path: path_str,
+            uid,
+            series_description: metadata.series_description.clone(),
+            kev: parse_kev_from_folder(&name),
+            num_slices: metadata.num_slices,
+            rows: metadata.rows as usize,
+            cols: metadata.cols as usize,
+        });
+    }
+
+    if descriptors.is_empty() {
+        return Err(format!(
+            "failed to load any series from {patient_dir}: {:?}",
+            failures
+        ));
+    }
+
+    // Pick the default active volume: CCTA-like name first, else lowest keV,
+    // else first in sort order.
+    let active_index = descriptors
+        .iter()
+        .position(|d| {
+            let n = d.name.to_ascii_lowercase();
+            n.contains("ccta")
+        })
+        .or_else(|| {
+            // Lowest-keV MonoPlus.
+            let mut best: Option<(usize, f64)> = None;
+            for (i, d) in descriptors.iter().enumerate() {
+                if let Some(k) = d.kev {
+                    if best.map(|(_, bk)| k < bk).unwrap_or(true) {
+                        best = Some((i, k));
+                    }
+                }
+            }
+            best.map(|(i, _)| i)
+        })
+        .unwrap_or(0);
+
+    // Bridge the active one into state.volume (may already be there if it
+    // was the last-loaded series; the cache-get-then-write is cheap).
+    {
+        let active = &descriptors[active_index];
+        let key = (active.path.clone(), active.uid.clone());
+        let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+        if let Some(cached) = guard.volume_cache.get(&key) {
+            guard.volume = Some(cached.volume.clone());
+            guard.current_volume_key = Some(key);
+            guard.last_metadata = Some(cached.metadata.clone());
+        }
+    }
+
+    // Auto-pair the two lowest-keV MonoPlus series into state.dual_energy
+    // so MMD can run without a separate dual-energy load step. If the user
+    // loaded a patient without a keV pair, leave dual_energy alone.
+    let mut kev_entries: Vec<(usize, f64)> = descriptors
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| d.kev.map(|k| (i, k)))
+        .collect();
+    kev_entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    if kev_entries.len() >= 2 {
+        let (low_idx, low_kev) = kev_entries[0];
+        let (high_idx, high_kev) = kev_entries[kev_entries.len() - 1];
+        let low_key = (
+            descriptors[low_idx].path.clone(),
+            descriptors[low_idx].uid.clone(),
+        );
+        let high_key = (
+            descriptors[high_idx].path.clone(),
+            descriptors[high_idx].uid.clone(),
+        );
+
+        // Pull both voxel buffers out from cache and rebuild the f32
+        // Array3 pair for DualEnergyVolume.
+        let (low_meta, low_voxels, high_meta, high_voxels) = {
+            let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+            let low = guard.volume_cache.get(&low_key);
+            let high = guard.volume_cache.get(&high_key);
+            match (low, high) {
+                (Some(l), Some(h)) => (
+                    l.metadata.clone(),
+                    Arc::clone(&l.voxels_i16),
+                    h.metadata.clone(),
+                    Arc::clone(&h.voxels_i16),
+                ),
+                _ => {
+                    // One missing — skip DE pairing.
+                    drop(guard);
+                    let _ = app.emit(
+                        "dicom_load_progress",
+                        ProgressEvent { phase: "done", done: total, total },
+                    );
+                    return Ok(PatientLoadResult { series: descriptors, active_index, failures });
+                }
+            }
+        };
+
+        let low_vol = PipelineLoadedVolume { metadata: low_meta, voxels_i16: (*low_voxels).clone() };
+        let high_vol = PipelineLoadedVolume { metadata: high_meta, voxels_i16: (*high_voxels).clone() };
+
+        if low_vol.metadata.rows == high_vol.metadata.rows
+            && low_vol.metadata.cols == high_vol.metadata.cols
+            && low_vol.metadata.num_slices == high_vol.metadata.num_slices
+        {
+            match build_dual_energy_volume(&low_vol, &high_vol, low_kev, high_kev) {
+                Ok(de) => {
+                    let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+                    guard.dual_energy = Some(de);
+                }
+                Err(e) => {
+                    failures.push(format!("dual-energy pairing failed: {e}"));
+                }
+            }
+        } else {
+            failures.push(
+                "dual-energy pairing skipped: keV series have different voxel grids".into(),
+            );
+        }
+    }
+
+    let _ = app.emit(
+        "dicom_load_progress",
+        ProgressEvent { phase: "done", done: total, total },
+    );
+
+    Ok(PatientLoadResult { series: descriptors, active_index, failures })
+}
+
+/// Switch the active volume to a previously-loaded series (must be resident
+/// in the volume cache — call `load_patient_all` or `load_series` first).
+///
+/// Returns the framed low-energy-style binary bundle so the frontend can
+/// rebuild the cornerstone3D volume identical to `load_series`.
+#[tauri::command]
+pub async fn set_active_volume(
+    dir: String,
+    uid: String,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<Response, String> {
+    let key = (dir, uid);
+    let (metadata, voxels) = {
+        let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+        let cached = guard
+            .volume_cache
+            .get(&key)
+            .ok_or_else(|| "volume not in cache — load it first".to_string())?;
+        guard.volume = Some(cached.volume.clone());
+        guard.current_volume_key = Some(key.clone());
+        guard.last_metadata = Some(cached.metadata.clone());
+        (cached.metadata.clone(), Arc::clone(&cached.voxels_i16))
+    };
+
+    let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&voxels[..]).to_vec();
+    let framed = encode_frame(&metadata, &voxel_bytes)?;
+    Ok(Response::new(framed))
+}

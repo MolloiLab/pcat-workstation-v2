@@ -433,6 +433,7 @@ mod tests {
             &crate::types::IDENTITY_DIRECTION,
             cs_width_mm,
             cs_pixels,
+            0.0, // legacy lumen-fill mode
         );
 
         let total = mask.iter().filter(|&&v| v).count();
@@ -471,7 +472,8 @@ mod tests {
         let n_cols = 21;
         let frame = make_z_axis_frame(5.0, 32.0, 32.0, 20.0, n_cols);
 
-        let cs_width_mm = 64.0;
+        // Half-width 32 mm → full span 64 mm across 64 px → 1 mm/px.
+        let cs_width_mm = 32.0;
         let cs_pixels = 64;
         let center = 32.0;
 
@@ -492,6 +494,7 @@ mod tests {
             &crate::types::IDENTITY_DIRECTION,
             cs_width_mm,
             cs_pixels,
+            0.0, // legacy lumen-fill mode
         );
 
         // Count voxels in the slice at z=5 (frame index 0, r=3) and z=15 (frame index 10, r≈6)
@@ -559,6 +562,7 @@ mod tests {
             &crate::types::IDENTITY_DIRECTION,
             cs_width_mm,
             cs_pixels,
+            0.0, // legacy lumen-fill mode
         );
 
         // Some voxels should be filled (the portion inside the volume)
@@ -576,6 +580,63 @@ mod tests {
             "clipped mask ({}) should have fewer voxels than full circle ({:.0})",
             total,
             full_circle_total,
+        );
+    }
+
+    // -- Test 3b: ring mode excludes lumen and fills a band outside --
+
+    #[test]
+    fn test_ring_mode_excludes_lumen() {
+        let volume_dims = [64, 64, 64];
+        let spacing = [1.0, 1.0, 1.0];
+        let origin = [0.0, 0.0, 0.0];
+        let n_cols = 41;
+        let frame = make_z_axis_frame(10.0, 32.0, 32.0, 40.0, n_cols);
+
+        // Half-width 32 mm → full span 64 mm / 64 px → 1 mm/px.
+        let cs_width_mm = 32.0;
+        let cs_pixels = 64;
+        let center = 32.0;
+
+        // Lumen radius 5 px = 5 mm. Ring 3 mm outward → outer radius 8 mm.
+        let radius_px = 5.0;
+        let ring_outer_mm = 3.0;
+        let n_points = 72;
+        let contour = make_circular_contour(center, center, radius_px, n_points);
+        let contours = vec![contour.clone(), contour.clone(), contour.clone()];
+        let cross_section_indices = vec![0, 20, 40];
+
+        let mask = build_3d_roi_mask(
+            &contours,
+            &frame,
+            &cross_section_indices,
+            volume_dims,
+            spacing,
+            origin,
+            &crate::types::IDENTITY_DIRECTION,
+            cs_width_mm,
+            cs_pixels,
+            ring_outer_mm,
+        );
+
+        // Lumen center (5 mm from centerline at y=32) must NOT be filled.
+        assert!(!mask[[30, 32, 32]], "center of lumen should be empty in ring mode");
+        // A point 7 mm from center along +y (within ring 5..8 mm) should be filled.
+        assert!(mask[[30, 39, 32]], "point inside the ring should be filled");
+        // A point 12 mm from center along +y (beyond outer ring) should NOT be filled.
+        assert!(!mask[[30, 44, 32]], "point beyond the ring should be empty");
+
+        // Total volume should be positive and consistent with ring annulus area.
+        let total = mask.iter().filter(|&&v| v).count();
+        let ring_area = std::f64::consts::PI * (8.0_f64.powi(2) - 5.0_f64.powi(2));
+        let expected = (n_cols as f64) * ring_area;
+        let ratio = total as f64 / expected;
+        assert!(
+            ratio > 0.6 && ratio < 1.5,
+            "ring voxel count {} vs expected {:.0} (ratio {:.2})",
+            total,
+            expected,
+            ratio,
         );
     }
 

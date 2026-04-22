@@ -71,7 +71,7 @@
    *  section, then cached until material/unit/mmdSummary change. */
   let overlayCache = $state<Record<number, number[]>>({});
   let currentOverlay = $derived<number[] | null>(
-    overlayCache[selectedIndex] ?? null,
+    material === 'ct' ? null : (overlayCache[selectedIndex] ?? null),
   );
 
   let loadingTargets = $state(false);
@@ -212,9 +212,11 @@
 
   // Lazily fetch the material overlay for the currently-selected cross-section
   // whenever MMD has produced a result and the cache hasn't seen this target
-  // under the active material/unit.
+  // under the active material/unit. Skip when the user has set material='ct'
+  // (no overlay, plain HU grayscale).
   $effect(() => {
     if (!mmdSummary) return;
+    if (material === 'ct') return;
     const idx = selectedIndex;
     if (overlayCache[idx]) return;
     getMmdOverlay(idx, material, unit)
@@ -247,6 +249,7 @@
   }
 
   async function refreshSurfaces() {
+    if (material === 'ct') return; // surfaces are only defined for decomposed materials
     try {
       surfaces = await sampleSurfaces(material, unit);
       surfaceIndex = Math.min(surfaceIndex, Math.max(0, surfaces.length - 1));

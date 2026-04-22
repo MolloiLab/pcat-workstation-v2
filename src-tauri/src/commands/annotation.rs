@@ -534,7 +534,11 @@ pub async fn run_mmd_on_roi(
             },
         );
 
-        // Build 3D ROI mask.
+        // Build a ring ROI in the pericoronary region: starts at the user's
+        // finalized lumen contour and extends outward by PVAT_RING_OUTER_MM.
+        // Matches the radial-angular surface-plot extent so every analysis
+        // view samples the same tissue.
+        const PVAT_RING_OUTER_MM: f64 = 10.0;
         let mask = roi::build_3d_roi_mask(
             &finalized_contours,
             &frame,
@@ -545,6 +549,7 @@ pub async fn run_mmd_on_roi(
             &direction,
             cs_width_mm,
             cs_pixels,
+            PVAT_RING_OUTER_MM,
         );
 
         let n_voxels = mask.iter().filter(|&&v| v).count();
@@ -833,6 +838,26 @@ pub async fn get_mmd_overlay(
                 inv_spacing,
                 &direction,
             );
+
+            // Only voxels inside the ROI mask have meaningful material
+            // fractions (solver only runs there). Elsewhere the backing
+            // array is zero — return NaN so the UI can fall back to CT.
+            let mask_shape = mmd_result.mask.shape();
+            let zi = vz.round() as i64;
+            let yi = vy.round() as i64;
+            let xi = vx.round() as i64;
+            let inside_volume = zi >= 0
+                && yi >= 0
+                && xi >= 0
+                && (zi as usize) < mask_shape[0]
+                && (yi as usize) < mask_shape[1]
+                && (xi as usize) < mask_shape[2];
+            let inside_mask = inside_volume
+                && mmd_result.mask[[zi as usize, yi as usize, xi as usize]];
+            if !inside_mask {
+                overlay[row * pixels + col] = f32::NAN;
+                continue;
+            }
 
             let val = pcat_pipeline::interp::trilinear(material_map, vz, vy, vx);
             overlay[row * pixels + col] = val;
