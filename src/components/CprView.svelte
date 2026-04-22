@@ -91,6 +91,16 @@
   // Ostium fraction for the active vessel (used in overlays + toolbar)
   let activeOstiumFrac = $derived(seedStore.getOstiumFraction(seedStore.activeVessel));
 
+  // Absolute arc-length (mm) of the ostium along the centerline. Displayed
+  // cross-section distances are computed relative to this so that lengths
+  // match the MMD view (measured from the ostium, not centerline point 0).
+  let ostiumArcMm = $derived.by<number | null>(() => {
+    if (activeOstiumFrac === null || arclengths.length === 0) return null;
+    const n = arclengths.length;
+    const idx = Math.max(0, Math.min(n - 1, Math.round(activeOstiumFrac * (n - 1))));
+    return arclengths[idx];
+  });
+
   // Batch cross-section results (one per needle: A, B, C)
   type BatchCrossSectionItem = {
     imageData: Float32Array;
@@ -1243,6 +1253,7 @@
             vesselDiameterMm={batchXsA?.vesselDiameterMm ?? null}
             vesselWall={batchXsA?.vesselWall ?? null}
             showFaiOverlay={showFaiOverlay}
+            arcOffsetMm={ostiumArcMm}
           />
         </div>
         <div class="flex min-h-0 flex-1 flex-col bg-black">
@@ -1260,6 +1271,7 @@
             vesselDiameterMm={batchXsB?.vesselDiameterMm ?? null}
             vesselWall={batchXsB?.vesselWall ?? null}
             showFaiOverlay={showFaiOverlay}
+            arcOffsetMm={ostiumArcMm}
           />
         </div>
         <div class="flex min-h-0 flex-1 flex-col bg-black">
@@ -1277,6 +1289,7 @@
             vesselDiameterMm={batchXsC?.vesselDiameterMm ?? null}
             vesselWall={batchXsC?.vesselWall ?? null}
             showFaiOverlay={showFaiOverlay}
+            arcOffsetMm={ostiumArcMm}
           />
         </div>
       {:else}

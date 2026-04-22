@@ -298,6 +298,60 @@ pub async fn add_snake_point(
     Ok(idx)
 }
 
+/// Adopt the auto-detected vessel wall polygon as the finalized contour for a
+/// cross-section, bypassing snake evolution entirely.
+///
+/// Copies `target.vessel_wall` into `snake_contours[target_index]` and marks
+/// the entry as finalized. If `all == true`, does the same for every target
+/// that has a non-empty vessel wall.
+///
+/// Returns the number of targets finalized.
+#[tauri::command]
+pub async fn use_vessel_wall_as_contour(
+    target_index: Option<usize>,
+    all: Option<bool>,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<usize, String> {
+    let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
+
+    let targets = guard
+        .annotation_targets
+        .as_ref()
+        .ok_or_else(|| "no annotation targets generated".to_string())?
+        .clone();
+
+    let do_all = all.unwrap_or(false);
+    let mut count = 0usize;
+
+    if do_all {
+        for (idx, target) in targets.iter().enumerate() {
+            if target.vessel_wall.is_empty() {
+                continue;
+            }
+            guard.snake_contours.insert(idx, target.vessel_wall.clone());
+            guard.finalized.insert(idx, true);
+            count += 1;
+        }
+    } else {
+        let idx = target_index.ok_or_else(|| {
+            "target_index must be provided when all=false".to_string()
+        })?;
+        let target = targets.get(idx).ok_or_else(|| {
+            format!("target_index {idx} out of range (0..{})", targets.len())
+        })?;
+        if target.vessel_wall.is_empty() {
+            return Err(format!(
+                "target {idx} has no auto-detected vessel wall"
+            ));
+        }
+        guard.snake_contours.insert(idx, target.vessel_wall.clone());
+        guard.finalized.insert(idx, true);
+        count = 1;
+    }
+
+    Ok(count)
+}
+
 /// Mark a cross-section's contour as finalized.
 #[tauri::command]
 pub async fn finalize_contour(

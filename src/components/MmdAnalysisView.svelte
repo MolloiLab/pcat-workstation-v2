@@ -27,6 +27,7 @@
     saveAnnotations,
     loadAnnotations,
     exportMmdCsv,
+    useVesselWallAsContour,
   } from '$lib/api';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import { seedStore } from '$lib/stores/seedStore.svelte';
@@ -79,6 +80,11 @@
     Object.values(statusMap).filter((s) => s === 'done').length,
   );
   let totalCount = $derived(targets.length);
+
+  // Arc-length offset: the first target sits at `start_arc_mm` (the ostium's
+  // arc-length along the centerline). Subtracting this in the UI displays
+  // distances as offsets from the ostium rather than from centerline point 0.
+  let arcOffsetMm = $derived(targets[0]?.arc_mm ?? 0);
 
   /* ── Load targets on mount / centerline change ────── */
 
@@ -232,6 +238,34 @@
     }
   }
 
+  async function handleUseWallAll() {
+    if (mmdBusy) return;
+    mmdBusy = true;
+    mmdError = '';
+    try {
+      await useVesselWallAsContour({ all: true });
+      // Reflect the bulk finalization in the local UI state.
+      const newSnake: Record<number, [number, number][]> = { ...snakePoints };
+      const newStatus: Record<number, 'pending' | 'in-progress' | 'done'> = { ...statusMap };
+      for (let i = 0; i < targets.length; i++) {
+        if (targets[i].vessel_wall.length > 0) {
+          newSnake[i] = targets[i].vessel_wall.map(
+            (p) => [p[0], p[1]] as [number, number],
+          );
+          newStatus[i] = 'done';
+        }
+      }
+      snakePoints = newSnake;
+      statusMap = newStatus;
+      await autoSave();
+    } catch (err) {
+      mmdError = err instanceof Error ? err.message : String(err);
+      console.error('Use wall (all) failed:', err);
+    } finally {
+      mmdBusy = false;
+    }
+  }
+
   async function refreshSurfaces() {
     try {
       surfaces = await sampleSurfaces(material, unit);
@@ -264,6 +298,7 @@
             onSnakeUpdate={handleSnakeUpdate}
             onFinalize={handleFinalize}
             status={currentStatus}
+            {arcOffsetMm}
           />
         {/if}
       </div>
@@ -276,6 +311,7 @@
           {material}
           {unit}
           onSliderChange={handleSurfaceSlider}
+          {arcOffsetMm}
         />
 
         <!-- Radial profile placeholder -->
@@ -292,6 +328,7 @@
         {selectedIndex}
         {statusMap}
         onSelect={handleSelect}
+        {arcOffsetMm}
       />
     </div>
 
@@ -305,6 +342,14 @@
       />
 
       <div class="ml-auto flex items-center gap-2">
+        <button
+          class="rounded bg-surface-tertiary px-3 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 active:bg-surface-tertiary/60 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
+          onclick={handleUseWallAll}
+          disabled={mmdBusy || targets.length === 0}
+          title="Use the auto-detected vessel wall as the contour for every cross-section"
+        >
+          Use Wall (All)
+        </button>
         <button
           class="rounded bg-accent/15 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/25 active:bg-accent/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
           onclick={handleRunMmd}

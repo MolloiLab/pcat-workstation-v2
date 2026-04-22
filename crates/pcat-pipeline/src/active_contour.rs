@@ -114,6 +114,29 @@ pub fn compute_gradient_field(image: &Array2<f32>) -> (Array2<f64>, Array2<f64>)
         }
     }
 
+    // Step 4: Normalize the external-force field so its peak magnitude is 1.
+    // Raw Sobel-of-gmag scales with HU range (~thousands for clinical data),
+    // which multiplied by gamma * step_size explodes the snake. Normalizing
+    // keeps forces in pixel-scale units independent of window/level.
+    let mut max_mag = 0.0_f64;
+    for r in 0..rows {
+        for c in 0..cols {
+            let m = (grad_gm_x[[r, c]].powi(2) + grad_gm_y[[r, c]].powi(2)).sqrt();
+            if m > max_mag {
+                max_mag = m;
+            }
+        }
+    }
+    if max_mag > 1e-12 {
+        let s = 1.0 / max_mag;
+        for r in 0..rows {
+            for c in 0..cols {
+                grad_gm_x[[r, c]] *= s;
+                grad_gm_y[[r, c]] *= s;
+            }
+        }
+    }
+
     (grad_gm_x, grad_gm_y)
 }
 

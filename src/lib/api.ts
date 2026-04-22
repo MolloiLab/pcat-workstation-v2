@@ -268,6 +268,18 @@ export async function finalizeContour(
   });
 }
 
+/** Adopt the auto-detected vessel wall as the finalized contour, skipping
+ *  the snake evolve step. Pass `all: true` to finalize every target whose
+ *  vessel wall is non-empty. Returns the number of targets finalized. */
+export async function useVesselWallAsContour(
+  opts: { targetIndex?: number; all?: boolean } = {},
+): Promise<number> {
+  return invoke<number>('use_vessel_wall_as_contour', {
+    targetIndex: opts.targetIndex ?? null,
+    all: opts.all ?? false,
+  });
+}
+
 /** Run multi-material decomposition on the annotated ROI. */
 export async function runMmdOnRoi(
   method: string = 'direct',

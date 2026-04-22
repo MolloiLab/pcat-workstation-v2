@@ -14,9 +14,12 @@
     /** Map of target index to annotation status */
     statusMap: Record<number, 'pending' | 'in-progress' | 'done'>;
     onSelect: (index: number) => void;
+    /** Absolute arc-length (mm) of the ostium along the centerline.
+     *  Displayed arc = target.arc_mm - arcOffsetMm. */
+    arcOffsetMm?: number;
   };
 
-  let { targets, selectedIndex, statusMap, onSelect }: Props = $props();
+  let { targets, selectedIndex, statusMap, onSelect, arcOffsetMm = 0 }: Props = $props();
 
   const THUMB_SIZE = 64;
   const WC = 40;
@@ -101,7 +104,7 @@
       role="option"
       aria-selected={isSelected}
       onclick={() => onSelect(i)}
-      title="Frame {target.frame_index} — {target.arc_mm.toFixed(1)} mm"
+      title="Frame {target.frame_index} — {(target.arc_mm - arcOffsetMm).toFixed(1)} mm"
     >
       <!-- Thumbnail canvas -->
       <div
@@ -116,9 +119,9 @@
         ></canvas>
       </div>
 
-      <!-- Arc-length label -->
+      <!-- Arc-length label (relative to ostium) -->
       <span class="text-[10px] tabular-nums text-text-secondary">
-        {target.arc_mm.toFixed(0)}mm
+        {(target.arc_mm - arcOffsetMm).toFixed(0)}mm
       </span>
 
       <!-- Status badge -->

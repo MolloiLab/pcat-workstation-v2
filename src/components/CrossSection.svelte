@@ -32,6 +32,9 @@
     vesselWall?: Float32Array | null;
     /** Whether to show FAI color overlay. */
     showFaiOverlay?: boolean;
+    /** Absolute arc-length (mm) of the ostium along the centerline.
+     *  Displayed arc = arc_mm - arcOffsetMm. */
+    arcOffsetMm?: number | null;
   };
 
   let {
@@ -48,6 +51,7 @@
     vesselDiameterMm = null,
     vesselWall = null,
     showFaiOverlay = false,
+    arcOffsetMm = null,
   }: Props = $props();
 
   let canvas: HTMLCanvasElement | undefined = $state();
@@ -223,7 +227,7 @@
     </span>
     {#if arcMm !== null}
       <span class="text-[10px] tabular-nums text-text-secondary">
-        {arcMm.toFixed(1)} mm
+        {(arcMm - (arcOffsetMm ?? 0)).toFixed(1)} mm
       </span>
     {/if}
   </div>

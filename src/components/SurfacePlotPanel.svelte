@@ -15,9 +15,19 @@
     material: string;
     unit: string;
     onSliderChange: (index: number) => void;
+    /** Absolute arc-length (mm) of the ostium along the centerline.
+     *  Displayed arc = surface.arc_mm - arcOffsetMm. */
+    arcOffsetMm?: number;
   };
 
-  let { surfaces, selectedIndex, material, unit, onSliderChange }: Props = $props();
+  let {
+    surfaces,
+    selectedIndex,
+    material,
+    unit,
+    onSliderChange,
+    arcOffsetMm = 0,
+  }: Props = $props();
 
   let plotDiv: HTMLDivElement | undefined = $state();
   let Plotly: typeof import('plotly.js-dist-min') | null = $state(null);
@@ -77,7 +87,7 @@
       font: { color: '#e5e5e7', size: 10 },
       margin: { l: 10, r: 10, t: 30, b: 10 },
       title: {
-        text: `${materialLabel(material, unit)} — arc ${s.arc_mm.toFixed(1)} mm`,
+        text: `${materialLabel(material, unit)} — arc ${(s.arc_mm - arcOffsetMm).toFixed(1)} mm`,
         font: { size: 11, color: '#e5e5e7' },
       },
       scene: {
@@ -146,7 +156,9 @@
         class="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-surface-tertiary accent-accent"
       />
       <span class="shrink-0 text-[10px] tabular-nums text-text-secondary">
-        {surfaces[selectedIndex]?.arc_mm.toFixed(1) ?? '—'} mm
+        {surfaces[selectedIndex] !== undefined
+          ? (surfaces[selectedIndex].arc_mm - arcOffsetMm).toFixed(1)
+          : '—'} mm
       </span>
     </div>
   {/if}

@@ -40,6 +40,7 @@ pub fn run() {
             commands::annotation::update_snake_points,
             commands::annotation::add_snake_point,
             commands::annotation::finalize_contour,
+            commands::annotation::use_vessel_wall_as_contour,
             commands::annotation::run_mmd_on_roi,
             commands::annotation::sample_surfaces,
             commands::annotation::get_mmd_overlay,

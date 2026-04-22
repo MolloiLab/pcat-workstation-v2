@@ -14,6 +14,7 @@
     updateSnakePoints,
     addSnakePoint,
     finalizeContour,
+    useVesselWallAsContour,
   } from '$lib/api';
 
   type Props = {
@@ -24,9 +25,20 @@
     onSnakeUpdate: (points: [number, number][]) => void;
     onFinalize: () => void;
     status: 'pending' | 'in-progress' | 'done';
+    /** Absolute arc-length (mm) of the ostium along the centerline.
+     *  Displayed arc = target.arc_mm - arcOffsetMm. */
+    arcOffsetMm?: number;
   };
 
-  let { target, targetIndex, snakePoints, onSnakeUpdate, onFinalize, status }: Props = $props();
+  let {
+    target,
+    targetIndex,
+    snakePoints,
+    onSnakeUpdate,
+    onFinalize,
+    status,
+    arcOffsetMm = 0,
+  }: Props = $props();
 
   /* ── Canvas state ──────────────────────────────────────── */
 
@@ -337,6 +349,21 @@
       busy = false;
     }
   }
+
+  async function handleUseWall() {
+    if (busy) return;
+    busy = true;
+    try {
+      await useVesselWallAsContour({ targetIndex });
+      // Mirror the backend state into the UI: snake contour = vessel wall, finalized.
+      onSnakeUpdate(target.vessel_wall.map((p) => [p[0], p[1]] as [number, number]));
+      onFinalize();
+    } catch (err) {
+      console.error('Use vessel wall failed:', err);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleKeyDown} />
@@ -375,7 +402,7 @@
       <!-- Frame info overlay -->
       <div class="absolute left-2 top-2 rounded bg-black/40 px-1.5 py-0.5">
         <span class="text-[10px] tabular-nums text-text-primary">
-          Frame {target.frame_index} | {target.arc_mm.toFixed(1)} mm
+          Frame {target.frame_index} | {(target.arc_mm - arcOffsetMm).toFixed(1)} mm
         </span>
       </div>
 
@@ -422,6 +449,14 @@
       title="Reset to initial contour"
     >
       Reset
+    </button>
+    <button
+      class="rounded bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
+      onclick={handleUseWall}
+      disabled={busy || target.vessel_wall.length === 0}
+      title="Use the auto-detected vessel wall as the contour and mark as done"
+    >
+      Use Wall
     </button>
     <button
       class="ml-auto rounded bg-success/15 px-3 py-1 text-xs font-medium text-success hover:bg-success/25 active:bg-success/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
