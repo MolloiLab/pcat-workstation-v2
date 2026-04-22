@@ -33,6 +33,9 @@
     /** Unit for the overlay: 'fraction' or 'mass'. Controls the colorbar
      *  range and label. */
     unit?: string;
+    /** Scroll-wheel navigation: called with +1 to advance to the next
+     *  cross-section, -1 to step back. Optional — omit to disable. */
+    onStepTarget?: (delta: number) => void;
   };
 
   let {
@@ -45,6 +48,7 @@
     overlay = null,
     material = '',
     unit = 'fraction',
+    onStepTarget,
   }: Props = $props();
 
   /* ── Canvas state ──────────────────────────────────────── */
@@ -315,6 +319,29 @@
     }
   }
 
+  /** Accumulated wheel deltaY — wheel events arrive as small fractional
+   *  values on trackpads, so we stage them and fire a step when enough
+   *  scroll distance has piled up. Threshold tuned so a normal trackpad
+   *  swipe advances one cross-section. */
+  let wheelAccum = 0;
+  const WHEEL_STEP_THRESHOLD = 40;
+
+  function handleWheel(e: WheelEvent) {
+    if (!onStepTarget) return;
+    // Don't hijack scroll while dragging a point.
+    if (dragIndex !== null) return;
+    e.preventDefault();
+    wheelAccum += e.deltaY;
+    while (wheelAccum >= WHEEL_STEP_THRESHOLD) {
+      onStepTarget(1);
+      wheelAccum -= WHEEL_STEP_THRESHOLD;
+    }
+    while (wheelAccum <= -WHEEL_STEP_THRESHOLD) {
+      onStepTarget(-1);
+      wheelAccum += WHEEL_STEP_THRESHOLD;
+    }
+  }
+
   /* ── Toolbar actions ───────────────────────────────────── */
 
   async function handleAddPoint(position: [number, number]) {
@@ -409,6 +436,7 @@
         onmousemove={handleMouseMove}
         onmouseup={handleMouseUp}
         onmouseleave={() => { hoverIndex = null; if (dragIndex !== null) { dragIndex = null; } }}
+        onwheel={handleWheel}
       ></canvas>
 
       <!-- Status badge overlay -->

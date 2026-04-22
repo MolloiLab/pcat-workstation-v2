@@ -289,6 +289,11 @@
             overlay={currentOverlay}
             {material}
             {unit}
+            onStepTarget={(delta) => {
+              if (targets.length === 0) return;
+              const next = Math.max(0, Math.min(targets.length - 1, selectedIndex + delta));
+              if (next !== selectedIndex) selectedIndex = next;
+            }}
           />
         {/if}
       </div>

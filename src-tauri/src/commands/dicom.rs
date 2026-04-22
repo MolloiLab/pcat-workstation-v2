@@ -159,6 +159,25 @@ fn looks_like_patient_dir(entry: &std::fs::DirEntry) -> bool {
     }
 }
 
+/// True if any seeds JSON file has been saved under the given patient folder.
+/// Seeds are saved per-series (`seeds/{series}__{sanitized-full-path}.json`),
+/// so we scan the seeds directory for any filename that contains the
+/// sanitized patient path — any hit means the user placed + saved seeds on
+/// at least one series of this patient.
+fn patient_has_seeds(app: &tauri::AppHandle, patient_path: &str) -> bool {
+    let seeds_dir = app.path().app_data_dir().expect("app data dir").join("seeds");
+    let Ok(read) = std::fs::read_dir(&seeds_dir) else { return false };
+    let needle = sanitize_for_filename(patient_path);
+    if needle.is_empty() { return false }
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.contains(&needle) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Reads saved annotation JSON for a given patient folder name and returns
 /// (finalized_count, has_mmd). Returns (0, false) if no save exists.
 fn read_annotation_summary(app: &tauri::AppHandle, folder_name: &str) -> (usize, bool) {
@@ -216,20 +235,26 @@ pub async fn list_patients(
     .await
     .map_err(|e| format!("walk task failed: {e}"))??;
 
-    // Cross-reference annotation saves on the main task (cheap local FS reads).
+    // Cross-reference annotation + seeds saves on the main task (cheap local
+    // FS reads). Status rules, in priority order:
+    //   complete    — MMD has been run (mmd_method present in saved JSON)
+    //   in_progress — any activity: seeds saved, contours saved, or both
+    //   not_started — nothing on disk for this patient yet
     let mut patients = Vec::with_capacity(entries.len());
     for (id, path) in entries {
+        let path_str = path.to_string_lossy().to_string();
         let (finalized_count, has_mmd) = read_annotation_summary(&app, &id);
-        let status = if has_mmd && finalized_count > 0 {
+        let has_seeds = patient_has_seeds(&app, &path_str);
+        let status = if has_mmd {
             "complete"
-        } else if finalized_count > 0 {
+        } else if has_seeds || finalized_count > 0 {
             "in_progress"
         } else {
             "not_started"
         };
         patients.push(PatientInfo {
             id,
-            path: path.to_string_lossy().to_string(),
+            path: path_str,
             status: status.to_string(),
             finalized_count,
             has_mmd,
