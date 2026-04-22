@@ -298,12 +298,36 @@ pub async fn add_snake_point(
     Ok(idx)
 }
 
+/// Number of control points kept when adopting the auto-detected vessel wall
+/// as a snake contour. Matches `SnakeParams::default().n_points` so subsequent
+/// evolve/drag operations have a familiar density, and keeps point spacing
+/// wide enough (~5° per point on a ~360-sample polygon) for comfortable
+/// manual dragging.
+const VESSEL_WALL_CONTOUR_POINTS: usize = 72;
+
+/// Subsample a dense closed polygon to `target_count` evenly-spaced points
+/// (by input index). Input points are assumed roughly uniform — the vessel
+/// wall scanner emits 360 samples evenly in angle around the lumen center.
+fn resample_polygon(points: &[[f64; 2]], target_count: usize) -> Vec<[f64; 2]> {
+    if target_count == 0 || points.len() <= target_count {
+        return points.to_vec();
+    }
+    let n = points.len();
+    let mut out = Vec::with_capacity(target_count);
+    for i in 0..target_count {
+        let src_idx = (i * n) / target_count;
+        out.push(points[src_idx]);
+    }
+    out
+}
+
 /// Adopt the auto-detected vessel wall polygon as the finalized contour for a
 /// cross-section, bypassing snake evolution entirely.
 ///
-/// Copies `target.vessel_wall` into `snake_contours[target_index]` and marks
-/// the entry as finalized. If `all == true`, does the same for every target
-/// that has a non-empty vessel wall.
+/// Copies `target.vessel_wall` into `snake_contours[target_index]` (resampled
+/// to `VESSEL_WALL_CONTOUR_POINTS` control points so manual dragging is
+/// feasible) and marks the entry as finalized. If `all == true`, does the
+/// same for every target that has a non-empty vessel wall.
 ///
 /// Returns the number of targets finalized.
 #[tauri::command]
@@ -328,7 +352,8 @@ pub async fn use_vessel_wall_as_contour(
             if target.vessel_wall.is_empty() {
                 continue;
             }
-            guard.snake_contours.insert(idx, target.vessel_wall.clone());
+            let contour = resample_polygon(&target.vessel_wall, VESSEL_WALL_CONTOUR_POINTS);
+            guard.snake_contours.insert(idx, contour);
             guard.finalized.insert(idx, true);
             count += 1;
         }
@@ -344,7 +369,8 @@ pub async fn use_vessel_wall_as_contour(
                 "target {idx} has no auto-detected vessel wall"
             ));
         }
-        guard.snake_contours.insert(idx, target.vessel_wall.clone());
+        let contour = resample_polygon(&target.vessel_wall, VESSEL_WALL_CONTOUR_POINTS);
+        guard.snake_contours.insert(idx, contour);
         guard.finalized.insert(idx, true);
         count = 1;
     }
