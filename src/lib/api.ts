@@ -67,7 +67,13 @@ export interface VolumeMetadata {
   image_position_patient: [number, number, number];
 }
 
-export type DicomLoadPhase = 'scanning' | 'scanned' | 'decoding' | 'done';
+export type DicomLoadPhase =
+  | 'scanning'
+  | 'scanned'
+  | 'decoding'
+  | 'patient_series'
+  | 'patient_series_decode'
+  | 'done';
 
 export interface DicomLoadProgress {
   phase: DicomLoadPhase;
@@ -119,6 +125,57 @@ export async function loadSeries(
  * and returns the low-energy framed bundle so the caller can build the
  * cornerstone volume exactly as with `loadSeries`.
  */
+export type LoadedSeriesDescriptor = {
+  name: string;
+  path: string;
+  uid: string;
+  series_description: string;
+  kev: number | null;
+  num_slices: number;
+  rows: number;
+  cols: number;
+};
+
+export type PatientLoadResult = {
+  series: LoadedSeriesDescriptor[];
+  active_index: number;
+  failures: string[];
+};
+
+/** Load every DICOM series under the patient directory into the Rust-side
+ *  volume cache. After this returns, `setActiveVolume` can switch between
+ *  them instantly without redecoding. Auto-pairs MonoPlus keV series for MMD. */
+export async function loadPatientAll(
+  patientDir: string,
+): Promise<PatientLoadResult> {
+  return invoke<PatientLoadResult>('load_patient_all', { patientDir });
+}
+
+/** Switch the active volume to a series previously loaded into the cache.
+ *  Returns the framed binary bundle so the caller can rebuild the
+ *  cornerstone3D volume exactly as with `loadSeries`. */
+export async function setActiveVolume(
+  dir: string,
+  uid: string,
+): Promise<{ metadata: VolumeMetadata; voxels: Int16Array }> {
+  const buf = await invoke<ArrayBuffer>('set_active_volume', { dir, uid });
+  const view = new DataView(buf);
+  const metaLen = view.getUint32(0, true);
+  const metaBytes = new Uint8Array(buf, 4, metaLen);
+  const metadata = JSON.parse(new TextDecoder().decode(metaBytes)) as VolumeMetadata;
+
+  const voxelOffset = 4 + metaLen;
+  let voxels: Int16Array;
+  if (voxelOffset % 2 === 0) {
+    voxels = new Int16Array(buf, voxelOffset);
+  } else {
+    const copy = new Uint8Array(buf.byteLength - voxelOffset);
+    copy.set(new Uint8Array(buf, voxelOffset));
+    voxels = new Int16Array(copy.buffer);
+  }
+  return { metadata, voxels };
+}
+
 export async function loadDualEnergy(
   lowDir: string,
   highDir: string,

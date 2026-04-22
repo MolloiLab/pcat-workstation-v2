@@ -23,6 +23,9 @@
      *  the browser auto-finds the other keV in the same patient folder and
      *  hands both paths to the parent for dual-energy loading. */
     onSelectDualEnergy?: (lowDir: string, highDir: string) => void;
+    /** Called when the user asks to load an entire patient folder (every
+     *  series under it) so cross-referencing modalities is instant. */
+    onSelectPatient?: (patientPath: string) => void;
     /** Close the browser without selecting. */
     onClose: () => void;
   };
@@ -31,6 +34,7 @@
     initialRootDir = '/Volumes/Molloilab/Shu Nie/UCI NAEOTOM CCTA Data',
     onSelect,
     onSelectDualEnergy,
+    onSelectPatient,
     onClose,
   }: Props = $props();
 
@@ -243,21 +247,32 @@
           {@const isOpen = !!expanded[p.id]}
           <div class="border-b border-border/60">
             <!-- Patient row: click expands to show series subfolders -->
-            <button
-              class="flex w-full items-center justify-between px-4 py-2 text-left hover:bg-accent/10 active:bg-accent/20"
-              onclick={() => toggleExpand(p)}
+            <div
+              class="flex w-full items-center justify-between gap-2 px-4 py-2 hover:bg-accent/5"
             >
-              <div class="flex items-center gap-2 min-w-0">
+              <button
+                class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                onclick={() => toggleExpand(p)}
+              >
                 <span class="inline-block w-4 text-center text-sm font-bold text-accent">
                   {isOpen ? '▾' : '▸'}
                 </span>
                 <div class="flex flex-col gap-0.5 min-w-0">
                   <span class="text-xs font-medium text-text-primary">{p.id}</span>
                   <span class="text-[10px] text-text-secondary truncate" title={p.path}>
-                    {isOpen ? 'click a series below to load' : 'click to expand series'}
+                    {isOpen ? 'click a series, or Load All for cross-ref' : 'click to expand series'}
                   </span>
                 </div>
-              </div>
+              </button>
+              {#if onSelectPatient}
+                <button
+                  class="shrink-0 rounded bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/25 active:bg-accent/35"
+                  onclick={(e) => { e.stopPropagation(); onSelectPatient(p.path); }}
+                  title="Load every series in this patient folder — CaScore, CCTA, all keV energies — for instant cross-reference"
+                >
+                  Load All
+                </button>
+              {/if}
               <div class="flex shrink-0 items-center gap-3">
                 {#if p.finalized_count > 0}
                   <span class="text-[10px] tabular-nums text-text-secondary">
@@ -274,7 +289,7 @@
                   {statusLabel(p.status)}
                 </span>
               </div>
-            </button>
+            </div>
 
             <!-- Series subfolders, shown when expanded -->
             {#if isOpen}

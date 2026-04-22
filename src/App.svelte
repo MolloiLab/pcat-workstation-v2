@@ -21,9 +21,12 @@
     scanSeries,
     loadSeries,
     loadDualEnergy,
+    loadPatientAll,
+    setActiveVolume,
     onDicomLoadProgress,
     reuseLoadedVolume,
   } from '$lib/api';
+  import type { LoadedSeriesDescriptor } from '$lib/api';
   import { cache as cornerstoneCache } from '@cornerstonejs/core';
   import { buildVolume } from '$lib/cornerstone/volumeLoader';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
@@ -348,6 +351,132 @@
       if (unlistenProgress) unlistenProgress();
     }
   }
+
+  /** Load every DICOM series under a patient folder into the Rust cache.
+   *  Hydrates the cornerstone volume for the chosen "active" series. After
+   *  this, the volume switcher in the header swaps between siblings
+   *  instantly (no re-decode). */
+  async function loadPatientFolder(patientPath: string) {
+    errorMessage = '';
+    let unlistenProgress: (() => void) | undefined;
+    try {
+      volumeStore.clear();
+      volumeStore.setLoading(true);
+      volumeStore.setLoadProgress(0);
+
+      unlistenProgress = await onDicomLoadProgress((p) => {
+        if (p.phase === 'patient_series' && p.total > 0) {
+          // Coarse per-series progress (0-95 %), fine decode events lift it.
+          volumeStore.setLoadProgress(Math.round((p.done / p.total) * 95));
+        } else if (p.phase === 'done') {
+          volumeStore.setLoadProgress(95);
+        }
+      });
+
+      const result = await loadPatientAll(patientPath);
+
+      // Hydrate cornerstone for the active series via the cache-hit path.
+      const active = result.series[result.active_index];
+      const { metadata, voxels } = await setActiveVolume(active.path, active.uid);
+
+      const volumeKey = `${active.path}::${active.uid}`;
+      const csId = buildVolume(volumeKey, metadata, voxels);
+
+      const direction = computeDirectionMatrix(metadata.orientation);
+      const ipp = metadata.image_position_patient;
+      const storeMeta: VolumeMetadata = {
+        volumeId: volumeKey,
+        shape: [metadata.num_slices, metadata.rows, metadata.cols],
+        spacing: [metadata.slice_spacing, metadata.pixel_spacing[0], metadata.pixel_spacing[1]],
+        origin: [metadata.slice_positions_z[0] ?? ipp[2], ipp[1], ipp[0]],
+        direction,
+        windowCenter: metadata.window_center,
+        windowWidth: metadata.window_width,
+        patientName: metadata.patient_name,
+        studyDescription: metadata.study_description,
+        dicomPath: active.path,
+      };
+      volumeStore.set(storeMeta);
+      volumeStore.setCornerstoneVolumeId(csId);
+      volumeStore.setLoaded(
+        result.series.map((s) => ({
+          name: s.name,
+          path: s.path,
+          uid: s.uid,
+          seriesDescription: s.series_description,
+          kev: s.kev,
+          numSlices: s.num_slices,
+          rows: s.rows,
+          cols: s.cols,
+        })),
+      );
+      volumeStore.setLoadProgress(100);
+      volumeStore.setLoading(false);
+
+      try {
+        const seedsJson = await loadSeeds(active.path);
+        if (seedsJson) seedStore.importJson(seedsJson);
+      } catch { /* no saved seeds */ }
+
+      if (result.failures.length > 0) {
+        errorMessage = `Loaded ${result.series.length} series; skipped: ${result.failures.join('; ')}`;
+      }
+
+      getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
+    } catch (e) {
+      volumeStore.setLoading(false);
+      errorMessage = e instanceof Error ? e.message : String(e);
+      console.error('Failed to load patient:', e);
+    } finally {
+      if (unlistenProgress) unlistenProgress();
+    }
+  }
+
+  /** Switch the active volume to one already in the Rust cache. Re-hydrates
+   *  the cornerstone3D volume (fast: no decode) and updates volumeStore. */
+  async function switchToLoaded(entry: LoadedSeriesDescriptor | typeof volumeStore.loaded[number]) {
+    if (volumeStore.loading) return;
+    errorMessage = '';
+    try {
+      volumeStore.setLoading(true);
+      volumeStore.setLoadProgress(0);
+
+      const { metadata, voxels } = await setActiveVolume(entry.path, entry.uid);
+      const volumeKey = `${entry.path}::${entry.uid}`;
+
+      // If cornerstone already holds this volume, buildVolume short-circuits.
+      let csId: string;
+      const cached = cornerstoneCache.getVolume(`pcat:${volumeKey}`);
+      if (cached) {
+        csId = `pcat:${volumeKey}`;
+      } else {
+        csId = buildVolume(volumeKey, metadata, voxels);
+      }
+
+      const direction = computeDirectionMatrix(metadata.orientation);
+      const ipp = metadata.image_position_patient;
+      const storeMeta: VolumeMetadata = {
+        volumeId: volumeKey,
+        shape: [metadata.num_slices, metadata.rows, metadata.cols],
+        spacing: [metadata.slice_spacing, metadata.pixel_spacing[0], metadata.pixel_spacing[1]],
+        origin: [metadata.slice_positions_z[0] ?? ipp[2], ipp[1], ipp[0]],
+        direction,
+        windowCenter: metadata.window_center,
+        windowWidth: metadata.window_width,
+        patientName: metadata.patient_name,
+        studyDescription: metadata.study_description,
+        dicomPath: entry.path,
+      };
+      volumeStore.set(storeMeta);
+      volumeStore.setCornerstoneVolumeId(csId);
+      volumeStore.setLoadProgress(100);
+    } catch (e) {
+      errorMessage = e instanceof Error ? e.message : String(e);
+      console.error('Failed to switch volume:', e);
+    } finally {
+      volumeStore.setLoading(false);
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} onclick={() => { showRecent = false; }} />
@@ -368,6 +497,27 @@
     {#if volumeStore.current}
       <div class="flex items-center gap-3">
         <SeedToolbar />
+      </div>
+    {/if}
+
+    <!-- Volume switcher: shown only when a full patient has been loaded and
+         multiple volumes are resident in the cache. Clicking a chip swaps
+         the active volume (MPR/CPR/FAI re-bind) without another decode. -->
+    {#if volumeStore.loaded.length > 1 && volumeStore.current}
+      <div class="flex items-center gap-1 overflow-x-auto px-2" title="Active volume — click to switch">
+        {#each volumeStore.loaded as entry (entry.path + entry.uid)}
+          {@const isActive = volumeStore.current?.dicomPath === entry.path}
+          <button
+            class="shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors
+                   {isActive
+                     ? 'bg-accent text-white'
+                     : 'bg-surface-tertiary text-text-secondary hover:text-text-primary'}"
+            onclick={() => !isActive && switchToLoaded(entry)}
+            title={entry.seriesDescription || entry.name}
+          >
+            {entry.kev !== null ? `${entry.kev} keV` : entry.name}
+          </button>
+        {/each}
       </div>
     {/if}
 
@@ -497,6 +647,7 @@
         showPatientBrowser = false;
         loadDualEnergyPair(lowDir, highDir);
       }}
+      onSelectPatient={(path) => { showPatientBrowser = false; loadPatientFolder(path); }}
       onClose={() => { showPatientBrowser = false; }}
     />
   {/if}

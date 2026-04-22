@@ -21,10 +21,25 @@ export type VolumeMetadata = {
   dicomPath: string;
 };
 
+/** One volume resident in the Rust-side volume cache, usable as an
+ *  immediate switch target without another decode. */
+export type LoadedSeriesEntry = {
+  name: string;
+  path: string;
+  uid: string;
+  seriesDescription: string;
+  kev: number | null;
+  numSlices: number;
+  rows: number;
+  cols: number;
+};
+
 let currentVolume = $state<VolumeMetadata | null>(null);
 let cornerstoneVolumeId = $state<string | null>(null);
 let loading = $state(false);
 let loadProgress = $state(0);
+/** Volumes currently loaded in the Rust cache for the active patient. */
+let loaded = $state<LoadedSeriesEntry[]>([]);
 
 export const volumeStore = {
   get current() {
@@ -43,6 +58,9 @@ export const volumeStore = {
   get loadProgress() {
     return loadProgress;
   },
+  get loaded() {
+    return loaded;
+  },
 
   set(vol: VolumeMetadata) {
     currentVolume = vol;
@@ -56,6 +74,9 @@ export const volumeStore = {
   setLoadProgress(v: number) {
     loadProgress = v;
   },
+  setLoaded(entries: LoadedSeriesEntry[]) {
+    loaded = entries;
+  },
   clear() {
     // Null the stored references only. Cornerstone's own LRU cache handles
     // eviction if memory pressure arises; keeping the volume cached lets the
@@ -64,5 +85,6 @@ export const volumeStore = {
     cornerstoneVolumeId = null;
     loading = false;
     loadProgress = 0;
+    loaded = [];
   },
 };
