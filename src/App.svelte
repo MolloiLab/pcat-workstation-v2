@@ -648,20 +648,31 @@
     </nav>
   {/if}
 
-  <!-- ===== Main viewport area ===== -->
+  <!-- ===== Main viewport area =====
+       Both panes stay mounted; we toggle visibility instead of using {#if}
+       so tab switches don't destroy component state (MMD results, cornerstone
+       MIP viewport bindings, contour edits, etc.). Each pane is absolutely
+       positioned inside the relative <main> so hiding one doesn't collapse
+       the other's layout. `display: none` also stops offscreen work on
+       hidden canvases. -->
   <main class="relative min-h-0 flex-1">
-    {#if activeTab === 'editor'}
-      <MprPanel />
-
-      <!-- Contextual hint line -->
-      <HintLine />
-
-      <!-- Pipeline progress overlay -->
-      {#if pipelineStore.status === 'running'}
-        <ProgressOverlay />
-      {/if}
-    {:else if activeTab === 'mmd'}
-      <MmdAnalysisView centerlineMm={activeCenterlineMm} />
+    {#if volumeStore.current}
+      <div
+        class="absolute inset-0 flex flex-col"
+        class:hidden={activeTab !== 'editor'}
+      >
+        <MprPanel />
+        <HintLine />
+        {#if pipelineStore.status === 'running'}
+          <ProgressOverlay />
+        {/if}
+      </div>
+      <div
+        class="absolute inset-0 flex flex-col"
+        class:hidden={activeTab !== 'mmd'}
+      >
+        <MmdAnalysisView centerlineMm={activeCenterlineMm} />
+      </div>
     {/if}
   </main>
 

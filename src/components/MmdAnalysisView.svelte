@@ -92,12 +92,30 @@
   // distances as offsets from the ostium rather than from centerline point 0.
   let arcOffsetMm = $derived(targets[0]?.arc_mm ?? 0);
 
-  /* ── Load targets on mount / centerline change ────── */
+  /* ── Load targets on mount / centerline change ──────
+   *
+   * Fingerprint of the centerline we last loaded targets for. The parent
+   * re-derives `centerlineMm` on every seedStore tick (returns a fresh
+   * array even when the vessel path is identical), and Svelte tracks
+   * dependencies by identity — without this guard every unrelated seed
+   * tweak would fire `loadTargets()` and wipe an existing MMD result.
+   * We skip when the centerline shape is unchanged: same point count +
+   * same first and last waypoints. Only genuine edits trigger a reload. */
+  let lastCenterlineKey = $state<string | null>(null);
+
+  function centerlineKey(cl: [number, number, number][]): string {
+    if (cl.length === 0) return '';
+    const first = cl[0];
+    const last = cl[cl.length - 1];
+    return `${cl.length}|${first[0]},${first[1]},${first[2]}|${last[0]},${last[1]},${last[2]}`;
+  }
 
   $effect(() => {
-    if (centerlineMm.length >= 2) {
-      loadTargets();
-    }
+    if (centerlineMm.length < 2) return;
+    const key = centerlineKey(centerlineMm);
+    if (key === lastCenterlineKey) return;
+    lastCenterlineKey = key;
+    loadTargets();
   });
 
   async function loadTargets() {
