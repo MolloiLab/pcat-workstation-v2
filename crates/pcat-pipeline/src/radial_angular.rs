@@ -43,16 +43,22 @@ impl Default for RadialAngularParams {
         Self {
             n_theta: 16,
             radial_step_mm: 0.5,
-            max_radius_mm: 20.0,
+            // 10 mm outward from the lumen wall covers the pericoronary
+            // fat band (typically < 6 mm) plus a margin for context.
+            max_radius_mm: 10.0,
         }
     }
 }
 
 /// Sample material values on polar grids around cross-section centerline positions.
 ///
-/// For each annotation target, samples the specified material map at (theta, r) grid points
-/// in the cross-section plane, where theta spans 0-360 deg and r extends outward from the
-/// vessel wall to the annotation contour boundary.
+/// For each annotation target, samples the specified material map at (theta, r)
+/// grid points in the cross-section plane. r=0 sits on the user's finalized
+/// contour (auto-adopted lumen wall by default) and r extends outward to
+/// `params.max_radius_mm`. Samples that fall outside the CT volume are
+/// returned as NaN (from `trilinear`). There is no independent "outer
+/// boundary" any more — the r axis is a fixed span so sections can be
+/// compared at the same radial depth.
 ///
 /// # Arguments
 ///
@@ -86,8 +92,9 @@ pub fn sample_radial_angular(
     let mut surfaces = Vec::new();
 
     for (target_idx, target) in annotation_targets.iter().enumerate() {
-        // Only process targets that have finalized contours.
-        let outer_contour = match finalized_contours.get(&target_idx) {
+        // Only process targets that have a user-finalized contour — that's
+        // the lumen-wall reference we sample outward from.
+        let wall_contour = match finalized_contours.get(&target_idx) {
             Some(c) if !c.is_empty() => c,
             _ => continue,
         };
@@ -105,8 +112,9 @@ pub fn sample_radial_angular(
         let normal = frame.normals[frame_idx];
         let binormal = frame.binormals[frame_idx];
 
-        // Compute max_r_per_theta: for each angular bin, find intersection distances
-        // with the vessel wall and outer contour.
+        // max_r_per_theta now records max_radius_mm uniformly since r extends
+        // to a fixed outward distance. Kept for backward compatibility with
+        // consumers that used it as a per-angle mask cue.
         let mut max_r_per_theta_vec = Vec::with_capacity(params.n_theta);
         let mut surface_data = vec![f32::NAN; params.n_theta * n_radial];
 
@@ -119,21 +127,15 @@ pub fn sample_radial_angular(
             let ray_dx = cos_t;
             let ray_dy = -sin_t;
 
-            // Find vessel wall intersection (distance from center in pixels).
+            // Distance from image center to the wall contour along this ray.
+            // Convert to mm so r is measured in physical units outward from
+            // the wall.
             let r_wall_px = ray_contour_intersection(
-                center_px, center_px, ray_dx, ray_dy, &target.vessel_wall,
+                center_px, center_px, ray_dx, ray_dy, wall_contour,
             );
-
-            // Find outer contour intersection.
-            let r_outer_px =
-                ray_contour_intersection(center_px, center_px, ray_dx, ray_dy, outer_contour);
-
-            // Convert to mm.
             let r_wall_mm = r_wall_px * mm_per_pixel;
-            let r_outer_mm = r_outer_px * mm_per_pixel;
 
-            let usable_depth_mm = (r_outer_mm - r_wall_mm).max(0.0);
-            max_r_per_theta_vec.push(usable_depth_mm);
+            max_r_per_theta_vec.push(params.max_radius_mm);
 
             // Direction in 3D world coords for this angle in the cross-section plane.
             // The cross-section image maps: row -> normal direction, col -> binormal direction.
@@ -163,13 +165,8 @@ pub fn sample_radial_angular(
             // dir_3d has magnitude 1 since normal and binormal are orthonormal and
             // (-ray_dy)^2 + (-ray_dx)^2 = sin^2 + cos^2 = 1.
 
-            // Sample along the radial direction.
+            // Sample along the radial direction, from the wall outward.
             for (i_r, &r) in r_mm.iter().enumerate() {
-                if r > usable_depth_mm {
-                    // Beyond contour boundary: already NaN from initialization.
-                    break;
-                }
-
                 // World position: center + (r_wall_mm + r) along the radial direction.
                 let dist_from_center_mm = r_wall_mm + r;
                 let world_z = pos_mm[0] + dist_from_center_mm * dir_3d[0];
@@ -447,67 +444,48 @@ mod tests {
     }
 
     #[test]
-    fn test_nan_beyond_contour_boundary() {
+    fn test_r_axis_uniform_across_contours() {
+        // The r axis is a fixed grid [0, step, 2*step, ..., max_radius_mm];
+        // it does not depend on the contour shape. Two different finalized
+        // contours must produce the same r_mm and max_r_per_theta.
         let vol = Array3::<f32>::from_elem((64, 64, 64), 0.5);
         let spacing = [1.0, 1.0, 1.0];
         let origin = [0.0, 0.0, 0.0];
 
         let frame = make_simple_frame(100);
-        // Use a small max_radius but large grid to guarantee some NaN beyond boundary.
         let params = RadialAngularParams {
             n_theta: 8,
             radial_step_mm: 0.5,
-            max_radius_mm: 20.0,
+            max_radius_mm: 4.0,
         };
 
         let target = make_target(50, 25.0, 128, 15.0);
         let targets = vec![target];
 
-        // Small outer contour so max_r_per_theta is small relative to max_radius_mm.
         let center_px = 64.0;
         let mm_per_pixel = 2.0 * 15.0 / 128.0;
-        // Outer contour at 5mm from center, vessel wall at 3mm -> only 2mm usable depth.
-        let outer_radius_px = 5.0 / mm_per_pixel;
-        let outer_contour = circular_contour(center_px, center_px, outer_radius_px, 72);
+        let small = circular_contour(center_px, center_px, 3.0 / mm_per_pixel, 72);
+        let large = circular_contour(center_px, center_px, 5.0 / mm_per_pixel, 72);
 
-        let mut finalized = HashMap::new();
-        finalized.insert(0, outer_contour);
+        let mut finalized_small = HashMap::new();
+        finalized_small.insert(0, small);
+        let mut finalized_large = HashMap::new();
+        finalized_large.insert(0, large);
 
-        let surfaces = sample_radial_angular(
-            &vol, &frame, &targets, &finalized, spacing, origin,
+        let s_small = &sample_radial_angular(
+            &vol, &frame, &targets, &finalized_small, spacing, origin,
             &crate::types::IDENTITY_DIRECTION, &params,
-        );
+        )[0];
+        let s_large = &sample_radial_angular(
+            &vol, &frame, &targets, &finalized_large, spacing, origin,
+            &crate::types::IDENTITY_DIRECTION, &params,
+        )[0];
 
-        assert_eq!(surfaces.len(), 1);
-        let s = &surfaces[0];
-
-        // With ~2mm usable depth and 0.5mm step, only ~4 radial steps should be non-NaN.
-        // The rest should be NaN.
-        let mut nan_count = 0;
-        let mut non_nan_count = 0;
-        for &v in &s.surface {
-            if v.is_nan() {
-                nan_count += 1;
-            } else {
-                non_nan_count += 1;
-            }
+        assert_eq!(s_small.r_mm, s_large.r_mm);
+        assert_eq!(s_small.max_r_per_theta, s_large.max_r_per_theta);
+        for &m in &s_small.max_r_per_theta {
+            assert!((m - params.max_radius_mm).abs() < 1e-9);
         }
-
-        assert!(
-            nan_count > 0,
-            "Should have NaN values beyond the contour boundary"
-        );
-        assert!(
-            non_nan_count > 0,
-            "Should have non-NaN values within the contour boundary"
-        );
-        // NaN should be the majority since usable depth (~2mm) << max_radius_mm (20mm).
-        assert!(
-            nan_count > non_nan_count,
-            "NaN count ({}) should exceed non-NaN count ({}) with small outer contour",
-            nan_count,
-            non_nan_count
-        );
     }
 
     #[test]

@@ -17,8 +17,12 @@
   type Props = {
     /** Initial root directory (the user can edit it before scanning). */
     initialRootDir?: string;
-    /** Called when the user picks a patient. Parent is responsible for loading. */
+    /** Called for a regular single-series pick. */
     onSelect: (path: string) => void;
+    /** Called when the picked series is one half of a MonoPlus keV pair —
+     *  the browser auto-finds the other keV in the same patient folder and
+     *  hands both paths to the parent for dual-energy loading. */
+    onSelectDualEnergy?: (lowDir: string, highDir: string) => void;
     /** Close the browser without selecting. */
     onClose: () => void;
   };
@@ -26,6 +30,7 @@
   let {
     initialRootDir = '/Volumes/Molloilab/Shu Nie/UCI NAEOTOM CCTA Data',
     onSelect,
+    onSelectDualEnergy,
     onClose,
   }: Props = $props();
 
@@ -118,7 +123,36 @@
     }
   }
 
-  function handleSelectSeries(_p: PatientInfo, s: SeriesDirInfo) {
+  /** Parse a keV label from a folder/series name — matches `MonoPlus_70keV`,
+   *  `Mono 100 keV`, `kev-150`, etc. Returns null if no integer keV tag is
+   *  present. Same heuristic as the Rust-side `parse_kev_from_folder`. */
+  function parseKev(name: string): number | null {
+    const m = name.match(/(\d{2,3})\s*ke?v/i);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function handleSelectSeries(p: PatientInfo, s: SeriesDirInfo) {
+    // If the picked series has a keV tag AND a sibling with a different keV
+    // exists, load them together as a dual-energy pair. Otherwise fall back
+    // to single-volume load.
+    const kev = parseKev(s.name);
+    const siblings = seriesCache[p.id] ?? [];
+    if (kev !== null && onSelectDualEnergy) {
+      const pair = siblings.find((x) => {
+        if (x.path === s.path) return false;
+        const k = parseKev(x.name);
+        return k !== null && k !== kev;
+      });
+      if (pair) {
+        const pairKev = parseKev(pair.name)!;
+        const lowDir = kev <= pairKev ? s.path : pair.path;
+        const highDir = kev <= pairKev ? pair.path : s.path;
+        onSelectDualEnergy(lowDir, highDir);
+        return;
+      }
+    }
     onSelect(s.path);
   }
 
@@ -253,11 +287,21 @@
                   <div class="py-2 text-[11px] text-text-secondary">No series subfolders.</div>
                 {:else}
                   {#each seriesCache[p.id]! as s (s.path)}
+                    {@const kev = parseKev(s.name)}
+                    {@const willPair = kev !== null && !!onSelectDualEnergy && (seriesCache[p.id] ?? []).some((x) => x.path !== s.path && parseKev(x.name) !== null && parseKev(x.name) !== kev)}
                     <button
                       class="flex w-full items-center justify-between rounded px-2 py-1 text-left hover:bg-accent/10 active:bg-accent/20"
                       onclick={() => handleSelectSeries(p, s)}
+                      title={willPair
+                        ? `Loads both keV series as a dual-energy pair for MMD`
+                        : s.path}
                     >
-                      <span class="text-[11px] text-text-primary truncate" title={s.path}>{s.name}</span>
+                      <span class="flex min-w-0 items-center gap-1.5">
+                        <span class="text-[11px] text-text-primary truncate">{s.name}</span>
+                        {#if willPair}
+                          <span class="shrink-0 rounded bg-accent/20 px-1 py-px text-[9px] font-medium text-accent">dual keV</span>
+                        {/if}
+                      </span>
                       <span class="text-[10px] tabular-nums text-text-secondary">
                         {s.num_files} {s.num_files === 1 ? 'file' : 'files'}
                       </span>

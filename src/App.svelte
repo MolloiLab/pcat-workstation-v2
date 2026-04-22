@@ -288,19 +288,11 @@
     loadFromPath(path);
   }
 
-  /** Open two folder pickers (low keV, high keV) and load both for MMD.
-   *
-   * Folder names must each contain a keV tag (e.g. `MonoPlus_70keV`,
-   * `MonoPlus_150keV`) — the backend parses keV from the folder name because
-   * de-identified series have `SeriesDescription` mislabeled and
-   * `ImageComments` stripped. */
-  async function handleOpenDualEnergy() {
+  /** Load a low/high keV pair as a dual-energy volume. Triggered from the
+   *  patient browser when the user picks a MonoPlus keV series that has a
+   *  sibling at a different keV — the browser does the auto-pairing. */
+  async function loadDualEnergyPair(lowDir: string, highDir: string) {
     errorMessage = '';
-    const lowDir = await openDicomDialog();
-    if (!lowDir) return;
-    const highDir = await openDicomDialog();
-    if (!highDir) return;
-
     let unlistenProgress: (() => void) | undefined;
     try {
       volumeStore.clear();
@@ -409,15 +401,6 @@
         Patients
       </button>
 
-      <button
-        class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
-        onclick={handleOpenDualEnergy}
-        disabled={volumeStore.loading}
-        title="Load two DICOM folders (low keV + high keV) for multi-material decomposition. Folder names must include a keV tag (e.g. MonoPlus_70keV, MonoPlus_150keV)."
-      >
-        Open Dual-Energy
-      </button>
-
       <div class="relative flex items-center">
         <button
           class="rounded-l px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
@@ -510,6 +493,10 @@
   {#if showPatientBrowser}
     <PatientBrowser
       onSelect={(path) => { showPatientBrowser = false; loadFromPath(path); }}
+      onSelectDualEnergy={(lowDir, highDir) => {
+        showPatientBrowser = false;
+        loadDualEnergyPair(lowDir, highDir);
+      }}
       onClose={() => { showPatientBrowser = false; }}
     />
   {/if}
