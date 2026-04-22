@@ -20,6 +20,7 @@
     loadSeeds,
     scanSeries,
     loadSeries,
+    loadDualEnergy,
     onDicomLoadProgress,
     reuseLoadedVolume,
   } from '$lib/api';
@@ -286,6 +287,75 @@
     if (!path) return;
     loadFromPath(path);
   }
+
+  /** Open two folder pickers (low keV, high keV) and load both for MMD.
+   *
+   * Folder names must each contain a keV tag (e.g. `MonoPlus_70keV`,
+   * `MonoPlus_150keV`) — the backend parses keV from the folder name because
+   * de-identified series have `SeriesDescription` mislabeled and
+   * `ImageComments` stripped. */
+  async function handleOpenDualEnergy() {
+    errorMessage = '';
+    const lowDir = await openDicomDialog();
+    if (!lowDir) return;
+    const highDir = await openDicomDialog();
+    if (!highDir) return;
+
+    let unlistenProgress: (() => void) | undefined;
+    try {
+      volumeStore.clear();
+      volumeStore.setLoading(true);
+      volumeStore.setLoadProgress(0);
+
+      unlistenProgress = await onDicomLoadProgress((p) => {
+        if (p.phase === 'decoding' && p.total > 0) {
+          volumeStore.setLoadProgress(Math.round((p.done / p.total) * 95));
+        } else if (p.phase === 'done') {
+          volumeStore.setLoadProgress(95);
+        }
+      });
+
+      // Backend parses keV + loads both series + populates state.dual_energy
+      // + mirrors low into state.volume. Returns the framed low-energy bundle
+      // so we can build the cornerstone volume without a second fetch.
+      const { metadata, voxels } = await loadDualEnergy(lowDir, highDir);
+
+      const volumeKey = `${lowDir}::dual_energy`;
+      const csId = buildVolume(volumeKey, metadata, voxels);
+
+      const direction = computeDirectionMatrix(metadata.orientation);
+      const ipp = metadata.image_position_patient;
+      const storeMeta: VolumeMetadata = {
+        volumeId: volumeKey,
+        shape: [metadata.num_slices, metadata.rows, metadata.cols],
+        spacing: [metadata.slice_spacing, metadata.pixel_spacing[0], metadata.pixel_spacing[1]],
+        origin: [metadata.slice_positions_z[0] ?? ipp[2], ipp[1], ipp[0]],
+        direction,
+        windowCenter: metadata.window_center,
+        windowWidth: metadata.window_width,
+        patientName: metadata.patient_name,
+        studyDescription: metadata.study_description,
+        dicomPath: lowDir,
+      };
+      volumeStore.set(storeMeta);
+      volumeStore.setCornerstoneVolumeId(csId);
+      volumeStore.setLoadProgress(100);
+      volumeStore.setLoading(false);
+
+      try {
+        const seedsJson = await loadSeeds(lowDir);
+        if (seedsJson) seedStore.importJson(seedsJson);
+      } catch { /* no saved seeds */ }
+
+      getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
+    } catch (e) {
+      volumeStore.setLoading(false);
+      errorMessage = e instanceof Error ? e.message : String(e);
+      console.error('Failed to load dual-energy:', e);
+    } finally {
+      if (unlistenProgress) unlistenProgress();
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} onclick={() => { showRecent = false; }} />
@@ -337,6 +407,15 @@
         title="Browse patients in cohort directory"
       >
         Patients
+      </button>
+
+      <button
+        class="rounded px-3 py-1 text-xs font-medium text-accent hover:bg-accent/10 active:bg-accent/20 disabled:opacity-40"
+        onclick={handleOpenDualEnergy}
+        disabled={volumeStore.loading}
+        title="Load two DICOM folders (low keV + high keV) for multi-material decomposition. Folder names must include a keV tag (e.g. MonoPlus_70keV, MonoPlus_150keV)."
+      >
+        Open Dual-Energy
       </button>
 
       <div class="relative flex items-center">

@@ -113,12 +113,12 @@
       mmdSummary = null;
       mmdError = '';
 
-      // Try to restore saved annotations for this patient.
+      // Saved annotations take precedence over auto-detection.
+      let restoredFromSave = false;
       if (dicomPath) {
         try {
           const saved = await loadAnnotations(dicomPath);
           if (saved) {
-            // Restore snake points and status map.
             const restoredSnake: Record<number, [number, number][]> = {};
             const restoredStatus: Record<number, 'pending' | 'in-progress' | 'done'> = {};
             for (const [key, pts] of Object.entries(saved.snake_contours)) {
@@ -128,10 +128,30 @@
             }
             snakePoints = restoredSnake;
             statusMap = restoredStatus;
+            restoredFromSave = true;
             console.log('Restored saved annotations');
           }
         } catch (err) {
           console.warn('Could not load saved annotations:', err);
+        }
+      }
+
+      // No saved state → auto-adopt the auto-detected vessel wall on every
+      // cross-section. User can drag/add points to refine before running MMD;
+      // any edit sets the section back to 'in-progress' until they re-accept.
+      if (!restoredFromSave) {
+        try {
+          const adopted = await useVesselWallAsContour({ all: true });
+          const initSnake: Record<number, [number, number][]> = {};
+          const initStatus: Record<number, 'pending' | 'in-progress' | 'done'> = {};
+          for (const c of adopted) {
+            initSnake[c.target_index] = c.points;
+            initStatus[c.target_index] = 'done';
+          }
+          snakePoints = initSnake;
+          statusMap = initStatus;
+        } catch (err) {
+          console.warn('Auto-adopt vessel wall failed:', err);
         }
       }
     } catch (err) {
@@ -238,34 +258,6 @@
     }
   }
 
-  async function handleUseWallAll() {
-    if (mmdBusy) return;
-    mmdBusy = true;
-    mmdError = '';
-    try {
-      await useVesselWallAsContour({ all: true });
-      // Reflect the bulk finalization in the local UI state.
-      const newSnake: Record<number, [number, number][]> = { ...snakePoints };
-      const newStatus: Record<number, 'pending' | 'in-progress' | 'done'> = { ...statusMap };
-      for (let i = 0; i < targets.length; i++) {
-        if (targets[i].vessel_wall.length > 0) {
-          newSnake[i] = targets[i].vessel_wall.map(
-            (p) => [p[0], p[1]] as [number, number],
-          );
-          newStatus[i] = 'done';
-        }
-      }
-      snakePoints = newSnake;
-      statusMap = newStatus;
-      await autoSave();
-    } catch (err) {
-      mmdError = err instanceof Error ? err.message : String(err);
-      console.error('Use wall (all) failed:', err);
-    } finally {
-      mmdBusy = false;
-    }
-  }
-
   async function refreshSurfaces() {
     try {
       surfaces = await sampleSurfaces(material, unit);
@@ -286,6 +278,14 @@
       <span class="text-xs text-text-secondary">No annotation targets. Ensure a centerline with 2+ points is selected.</span>
     </div>
   {:else}
+    {#if !mmdSummary}
+      <div class="shrink-0 border-b border-border bg-accent/5 px-3 py-1.5 text-[11px] text-text-secondary">
+        <span class="font-medium text-accent">Auto-detected contours.</span>
+        Check each cross-section below — drag a point or click <span class="font-medium">Add Point</span>
+        to refine, then <span class="font-medium">Accept</span> again. Use <span class="font-medium">Reset</span>
+        to re-adopt the auto-detected wall. Click <span class="font-medium">Run MMD</span> when all sections look right.
+      </div>
+    {/if}
     <!-- Main content: editor + surface plot side-by-side -->
     <div class="flex min-h-0 flex-1 overflow-hidden">
       <!-- Left: SnakeEditor for the selected cross-section -->
@@ -342,14 +342,6 @@
       />
 
       <div class="ml-auto flex items-center gap-2">
-        <button
-          class="rounded bg-surface-tertiary px-3 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 active:bg-surface-tertiary/60 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
-          onclick={handleUseWallAll}
-          disabled={mmdBusy || targets.length === 0}
-          title="Use the auto-detected vessel wall as the contour for every cross-section"
-        >
-          Use Wall (All)
-        </button>
         <button
           class="rounded bg-accent/15 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/25 active:bg-accent/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
           onclick={handleRunMmd}

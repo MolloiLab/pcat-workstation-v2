@@ -7,10 +7,8 @@
    * polygon, init boundary as blue dashed polygon, and the snake contour as
    * a green polygon with draggable control points.
    */
-  import type { AnnotationTarget, SnakeResult } from '$lib/api';
+  import type { AnnotationTarget } from '$lib/api';
   import {
-    evolveSnake,
-    initSnake,
     updateSnakePoints,
     addSnakePoint,
     finalizeContour,
@@ -278,41 +276,17 @@
 
   /* ── Toolbar actions ───────────────────────────────────── */
 
-  async function handleInit() {
-    if (busy) return;
-    busy = true;
-    try {
-      const points = await initSnake(targetIndex);
-      onSnakeUpdate(points);
-    } catch (err) {
-      console.error('Init snake failed:', err);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function handleEvolve() {
-    if (busy) return;
-    busy = true;
-    try {
-      const result: SnakeResult = await evolveSnake(targetIndex, 200);
-      onSnakeUpdate(result.points);
-    } catch (err) {
-      console.error('Evolve snake failed:', err);
-    } finally {
-      busy = false;
-    }
-  }
-
   async function handleAddPoint(position: [number, number]) {
     if (busy) return;
     busy = true;
     addPointMode = false;
     try {
+      // Backend inserts the point at the nearest edge and returns the new
+      // polygon on the very next read; compute that locally to avoid an
+      // extra fetch (addSnakePoint only returns the inserted index).
       await addSnakePoint(targetIndex, position);
-      // Re-fetch updated points by evolving 0 iterations
-      const result = await evolveSnake(targetIndex, 0);
-      onSnakeUpdate(result.points);
+      const inserted = insertPointLocal(snakePoints ?? [], position);
+      onSnakeUpdate(inserted);
     } catch (err) {
       console.error('Add point failed:', err);
     } finally {
@@ -320,18 +294,61 @@
     }
   }
 
+  /** Mirror of `pcat_pipeline::active_contour::insert_control_point` —
+   *  find the closest polygon edge and insert `position` after it. */
+  function insertPointLocal(
+    points: [number, number][],
+    position: [number, number],
+  ): [number, number][] {
+    if (points.length < 2) return [...points, position];
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < points.length; i++) {
+      const j = (i + 1) % points.length;
+      const d = pointToSegmentDistance(position, points[i], points[j]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    const out = points.slice();
+    out.splice(best + 1, 0, position);
+    return out;
+  }
+
+  function pointToSegmentDistance(
+    p: [number, number],
+    a: [number, number],
+    b: [number, number],
+  ): number {
+    const abx = b[0] - a[0];
+    const aby = b[1] - a[1];
+    const apx = p[0] - a[0];
+    const apy = p[1] - a[1];
+    const abSq = abx * abx + aby * aby;
+    if (abSq < 1e-12) return Math.hypot(apx, apy);
+    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / abSq));
+    const dx = p[0] - (a[0] + t * abx);
+    const dy = p[1] - (a[1] + t * aby);
+    return Math.hypot(dx, dy);
+  }
+
   function handleAddPointMode() {
     addPointMode = !addPointMode;
   }
 
+  /** Reset = re-adopt the auto-detected vessel wall (resampled). */
   async function handleReset() {
     if (busy) return;
     busy = true;
     try {
-      const points = await initSnake(targetIndex);
-      onSnakeUpdate(points);
+      const adopted = await useVesselWallAsContour({ targetIndex });
+      if (adopted.length > 0) {
+        onSnakeUpdate(adopted[0].points);
+        onFinalize();
+      }
     } catch (err) {
-      console.error('Reset snake failed:', err);
+      console.error('Reset failed:', err);
     } finally {
       busy = false;
     }
@@ -345,21 +362,6 @@
       onFinalize();
     } catch (err) {
       console.error('Finalize contour failed:', err);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function handleUseWall() {
-    if (busy) return;
-    busy = true;
-    try {
-      await useVesselWallAsContour({ targetIndex });
-      // Mirror the backend state into the UI: snake contour = vessel wall, finalized.
-      onSnakeUpdate(target.vessel_wall.map((p) => [p[0], p[1]] as [number, number]));
-      onFinalize();
-    } catch (err) {
-      console.error('Use vessel wall failed:', err);
     } finally {
       busy = false;
     }
@@ -418,22 +420,6 @@
   <!-- Toolbar -->
   <div class="flex shrink-0 items-center gap-1.5 border-t border-border bg-surface-secondary px-2 py-1.5">
     <button
-      class="rounded bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
-      onclick={handleInit}
-      disabled={busy}
-      title="Initialize snake contour"
-    >
-      Init
-    </button>
-    <button
-      class="rounded bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
-      onclick={handleEvolve}
-      disabled={busy || !snakePoints}
-      title="Evolve active contour (200 iterations)"
-    >
-      Evolve
-    </button>
-    <button
       class="rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70
              {addPointMode ? 'bg-warning/20 text-warning' : 'bg-accent/10 text-accent hover:bg-accent/20 active:bg-accent/30'}"
       onclick={handleAddPointMode}
@@ -443,20 +429,12 @@
       Add Point
     </button>
     <button
-      class="rounded bg-surface-tertiary px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 hover:text-error disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
+      class="rounded bg-surface-tertiary px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-surface-tertiary/80 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
       onclick={handleReset}
-      disabled={busy}
-      title="Reset to initial contour"
+      disabled={busy || target.vessel_wall.length === 0}
+      title="Re-adopt the auto-detected vessel wall"
     >
       Reset
-    </button>
-    <button
-      class="rounded bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:bg-accent/30 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
-      onclick={handleUseWall}
-      disabled={busy || target.vessel_wall.length === 0}
-      title="Use the auto-detected vessel wall as the contour and mark as done"
-    >
-      Use Wall
     </button>
     <button
       class="ml-auto rounded bg-success/15 px-3 py-1 text-xs font-medium text-success hover:bg-success/25 active:bg-success/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"

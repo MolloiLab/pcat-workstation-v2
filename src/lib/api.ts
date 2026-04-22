@@ -268,13 +268,19 @@ export async function finalizeContour(
   });
 }
 
+export type AdoptedContour = {
+  target_index: number;
+  points: [number, number][];
+};
+
 /** Adopt the auto-detected vessel wall as the finalized contour, skipping
  *  the snake evolve step. Pass `all: true` to finalize every target whose
- *  vessel wall is non-empty. Returns the number of targets finalized. */
+ *  vessel wall is non-empty. Returns the resampled contours the backend
+ *  now holds so the UI stays in sync. */
 export async function useVesselWallAsContour(
   opts: { targetIndex?: number; all?: boolean } = {},
-): Promise<number> {
-  return invoke<number>('use_vessel_wall_as_contour', {
+): Promise<AdoptedContour[]> {
+  return invoke<AdoptedContour[]>('use_vessel_wall_as_contour', {
     targetIndex: opts.targetIndex ?? null,
     all: opts.all ?? false,
   });

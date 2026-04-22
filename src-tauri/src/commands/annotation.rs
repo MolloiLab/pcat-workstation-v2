@@ -299,11 +299,12 @@ pub async fn add_snake_point(
 }
 
 /// Number of control points kept when adopting the auto-detected vessel wall
-/// as a snake contour. Matches `SnakeParams::default().n_points` so subsequent
-/// evolve/drag operations have a familiar density, and keeps point spacing
-/// wide enough (~5° per point on a ~360-sample polygon) for comfortable
-/// manual dragging.
-const VESSEL_WALL_CONTOUR_POINTS: usize = 72;
+/// as an editable contour. 16 points = one every 22.5°, the classical density
+/// for smooth closed medical contours — loose enough to drag a single point
+/// cleanly on a ~2mm-radius lumen (~13 px apart on the editor canvas) while
+/// still capturing mild eccentricity. The underlying vessel_wall polygon
+/// keeps its full 360 samples for display.
+const VESSEL_WALL_CONTOUR_POINTS: usize = 16;
 
 /// Subsample a dense closed polygon to `target_count` evenly-spaced points
 /// (by input index). Input points are assumed roughly uniform — the vessel
@@ -321,21 +322,31 @@ fn resample_polygon(points: &[[f64; 2]], target_count: usize) -> Vec<[f64; 2]> {
     out
 }
 
+/// Per-target resampled vessel-wall contour, returned to the frontend so the
+/// canvas and backend stay in sync without an extra round-trip.
+#[derive(Serialize)]
+pub struct AdoptedContour {
+    pub target_index: usize,
+    pub points: Vec<[f64; 2]>,
+}
+
 /// Adopt the auto-detected vessel wall polygon as the finalized contour for a
 /// cross-section, bypassing snake evolution entirely.
 ///
-/// Copies `target.vessel_wall` into `snake_contours[target_index]` (resampled
-/// to `VESSEL_WALL_CONTOUR_POINTS` control points so manual dragging is
-/// feasible) and marks the entry as finalized. If `all == true`, does the
-/// same for every target that has a non-empty vessel wall.
+/// Resamples `target.vessel_wall` to `VESSEL_WALL_CONTOUR_POINTS` control
+/// points (comfortable dragging density), stores the result in
+/// `snake_contours[target_index]`, and marks the entry as finalized. If
+/// `all == true`, does the same for every target that has a non-empty
+/// vessel wall.
 ///
-/// Returns the number of targets finalized.
+/// Returns the resampled contours so the frontend can display the same
+/// points the backend now holds.
 #[tauri::command]
 pub async fn use_vessel_wall_as_contour(
     target_index: Option<usize>,
     all: Option<bool>,
     state: tauri::State<'_, Mutex<AppState>>,
-) -> Result<usize, String> {
+) -> Result<Vec<AdoptedContour>, String> {
     let mut guard = state.lock().map_err(|e| format!("lock poisoned: {e}"))?;
 
     let targets = guard
@@ -345,7 +356,7 @@ pub async fn use_vessel_wall_as_contour(
         .clone();
 
     let do_all = all.unwrap_or(false);
-    let mut count = 0usize;
+    let mut out = Vec::new();
 
     if do_all {
         for (idx, target) in targets.iter().enumerate() {
@@ -353,9 +364,9 @@ pub async fn use_vessel_wall_as_contour(
                 continue;
             }
             let contour = resample_polygon(&target.vessel_wall, VESSEL_WALL_CONTOUR_POINTS);
-            guard.snake_contours.insert(idx, contour);
+            guard.snake_contours.insert(idx, contour.clone());
             guard.finalized.insert(idx, true);
-            count += 1;
+            out.push(AdoptedContour { target_index: idx, points: contour });
         }
     } else {
         let idx = target_index.ok_or_else(|| {
@@ -370,12 +381,12 @@ pub async fn use_vessel_wall_as_contour(
             ));
         }
         let contour = resample_polygon(&target.vessel_wall, VESSEL_WALL_CONTOUR_POINTS);
-        guard.snake_contours.insert(idx, contour);
+        guard.snake_contours.insert(idx, contour.clone());
         guard.finalized.insert(idx, true);
-        count = 1;
+        out.push(AdoptedContour { target_index: idx, points: contour });
     }
 
-    Ok(count)
+    Ok(out)
 }
 
 /// Mark a cross-section's contour as finalized.
