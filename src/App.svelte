@@ -363,13 +363,37 @@
       volumeStore.clear();
       volumeStore.setLoading(true);
       volumeStore.setLoadProgress(0);
+      volumeStore.setLoadMessage('');
+
+      // Smooth 0-95% progress by combining coarse per-series index (from
+      // "patient_series" events) with fine per-slice decode progress (from
+      // "decoding" events emitted during each series' decode callback).
+      let seriesIdx = 0;
+      let seriesTotal = 0;
+      const scaleToOuter = (withinSeries: number): number => {
+        if (seriesTotal === 0) return 0;
+        const base = (seriesIdx / seriesTotal) * 95;
+        const span = (1 / seriesTotal) * 95;
+        return Math.min(95, Math.round(base + withinSeries * span));
+      };
 
       unlistenProgress = await onDicomLoadProgress((p) => {
         if (p.phase === 'patient_series' && p.total > 0) {
-          // Coarse per-series progress (0-95 %), fine decode events lift it.
-          volumeStore.setLoadProgress(Math.round((p.done / p.total) * 95));
+          // New series starting — record its index and name for the label.
+          seriesIdx = p.done;
+          seriesTotal = p.total;
+          if (p.detail) {
+            volumeStore.setLoadMessage(
+              `Loading ${p.done + 1}/${p.total}: ${p.detail}`,
+            );
+          }
+          volumeStore.setLoadProgress(scaleToOuter(0));
+        } else if (p.phase === 'decoding' && p.total > 0 && seriesTotal > 0) {
+          // Fine-grained slice decode within the current series.
+          volumeStore.setLoadProgress(scaleToOuter(p.done / p.total));
         } else if (p.phase === 'done') {
           volumeStore.setLoadProgress(95);
+          volumeStore.setLoadMessage('Finalizing');
         }
       });
 
@@ -411,6 +435,7 @@
         })),
       );
       volumeStore.setLoadProgress(100);
+      volumeStore.setLoadMessage('');
       volumeStore.setLoading(false);
 
       try {
@@ -425,6 +450,7 @@
       getRecentDicoms().then((paths) => { recentPaths = paths; }).catch(() => {});
     } catch (e) {
       volumeStore.setLoading(false);
+      volumeStore.setLoadMessage('');
       errorMessage = e instanceof Error ? e.message : String(e);
       console.error('Failed to load patient:', e);
     } finally {
@@ -666,8 +692,8 @@
               style="width: {volumeStore.loadProgress}%"
             ></div>
           </div>
-          <span class="text-[11px] tabular-nums text-text-secondary">
-            Loading volume... {volumeStore.loadProgress}%
+          <span class="truncate text-[11px] text-text-secondary">
+            {volumeStore.loadMessage || 'Loading volume...'} <span class="tabular-nums">{volumeStore.loadProgress}%</span>
           </span>
         </div>
       {:else if pipelineStore.status === 'error'}

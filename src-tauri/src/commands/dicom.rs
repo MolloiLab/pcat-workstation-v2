@@ -305,6 +305,10 @@ pub struct ProgressEvent {
     pub phase: &'static str,
     pub done: usize,
     pub total: usize,
+    /// Optional detail string (e.g. the current series folder name during a
+    /// patient-wide load). `None` for phases that don't carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Scan a DICOM folder for series (header-only; no pixel data decoded).
@@ -313,12 +317,12 @@ pub async fn scan_series(
     path: String,
     app: AppHandle,
 ) -> Result<Vec<SeriesDescriptorDto>, String> {
-    let _ = app.emit("dicom_load_progress", ProgressEvent { phase: "scanning", done: 0, total: 0 });
+    let _ = app.emit("dicom_load_progress", ProgressEvent { phase: "scanning", done: 0, total: 0, detail: None });
     let dir = PathBuf::from(path);
     let series = dicom_scan::scan_series(&dir)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = app.emit("dicom_load_progress", ProgressEvent { phase: "scanned", done: series.len(), total: series.len() });
+    let _ = app.emit("dicom_load_progress", ProgressEvent { phase: "scanned", done: series.len(), total: series.len(), detail: None });
     Ok(series.into_iter().map(SeriesDescriptorDto::from).collect())
 }
 
@@ -415,6 +419,7 @@ pub async fn load_series(
                 phase: "done",
                 done: cached.metadata.num_slices,
                 total: cached.metadata.num_slices,
+                detail: None,
             },
         );
 
@@ -431,7 +436,7 @@ pub async fn load_series(
     let progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total| {
         let _ = app_cb.emit(
             "dicom_load_progress",
-            ProgressEvent { phase: "decoding", done, total },
+            ProgressEvent { phase: "decoding", done, total, detail: None },
         );
     });
 
@@ -475,6 +480,7 @@ pub async fn load_series(
         phase: "done",
         done: metadata.num_slices,
         total: metadata.num_slices,
+        detail: None,
     });
 
     let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&voxels_arc[..]).to_vec();
@@ -556,7 +562,7 @@ pub async fn load_dual_energy(
         let scaled = done.saturating_mul(50) / total.max(1);
         let _ = app_cb_low.emit(
             "dicom_load_progress",
-            ProgressEvent { phase: "decoding", done: scaled, total: 100 },
+            ProgressEvent { phase: "decoding", done: scaled, total: 100, detail: None },
         );
     });
     let app_cb_high = app.clone();
@@ -564,7 +570,7 @@ pub async fn load_dual_energy(
         let scaled = 50 + done.saturating_mul(50) / total.max(1);
         let _ = app_cb_high.emit(
             "dicom_load_progress",
-            ProgressEvent { phase: "decoding", done: scaled, total: 100 },
+            ProgressEvent { phase: "decoding", done: scaled, total: 100, detail: None },
         );
     });
 
@@ -600,6 +606,7 @@ pub async fn load_dual_energy(
         phase: "done",
         done: 100,
         total: 100,
+        detail: None,
     });
 
     let voxel_bytes: Vec<u8> = bytemuck::cast_slice(&low_vol.voxels_i16).to_vec();
@@ -838,12 +845,15 @@ pub async fn load_patient_all(
     let mut failures: Vec<String> = Vec::new();
 
     for (i, (name, series_dir)) in subdirs.into_iter().enumerate() {
+        // Phase "patient_series" signals the start of a new series and carries
+        // its folder name as `detail` so the footer can show "Loading X/Y: name".
         let _ = app.emit(
             "dicom_load_progress",
             ProgressEvent {
                 phase: "patient_series",
                 done: i,
                 total,
+                detail: Some(name.clone()),
             },
         );
 
@@ -874,21 +884,15 @@ pub async fn load_patient_all(
             let mut guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
             guard.volume_cache.get(&cache_key).unwrap().metadata.clone()
         } else {
-            let series_idx = i + 1;
+            // Fine-grained per-slice progress so the footer bar animates
+            // smoothly within each series. The coarse "patient_series" event
+            // emitted just before this series started already carries the
+            // series index + name, so we only need `decoding` here.
             let app_cb = app.clone();
             let progress: Box<dyn Fn(usize, usize) + Send + Sync> = Box::new(move |done, total_slices| {
                 let _ = app_cb.emit(
                     "dicom_load_progress",
-                    ProgressEvent {
-                        phase: "patient_series_decode",
-                        done: series_idx,
-                        total,
-                    },
-                );
-                // Also emit fine-grained decode progress.
-                let _ = app_cb.emit(
-                    "dicom_load_progress",
-                    ProgressEvent { phase: "decoding", done, total: total_slices },
+                    ProgressEvent { phase: "decoding", done, total: total_slices, detail: None },
                 );
             });
 
@@ -1020,7 +1024,7 @@ pub async fn load_patient_all(
                     drop(guard);
                     let _ = app.emit(
                         "dicom_load_progress",
-                        ProgressEvent { phase: "done", done: total, total },
+                        ProgressEvent { phase: "done", done: total, total, detail: None },
                     );
                     return Ok(PatientLoadResult { series: descriptors, active_index, failures });
                 }
@@ -1052,7 +1056,7 @@ pub async fn load_patient_all(
 
     let _ = app.emit(
         "dicom_load_progress",
-        ProgressEvent { phase: "done", done: total, total },
+        ProgressEvent { phase: "done", done: total, total, detail: None },
     );
 
     Ok(PatientLoadResult { series: descriptors, active_index, failures })

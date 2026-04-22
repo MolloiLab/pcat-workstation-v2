@@ -38,6 +38,9 @@ let currentVolume = $state<VolumeMetadata | null>(null);
 let cornerstoneVolumeId = $state<string | null>(null);
 let loading = $state(false);
 let loadProgress = $state(0);
+/** Optional human-readable detail shown alongside the progress bar
+ *  (e.g. "Loading 3/6: MonoPlus_100keV"). Empty string hides the suffix. */
+let loadMessage = $state('');
 /** Volumes currently loaded in the Rust cache for the active patient. */
 let loaded = $state<LoadedSeriesEntry[]>([]);
 
@@ -61,6 +64,9 @@ export const volumeStore = {
   get loaded() {
     return loaded;
   },
+  get loadMessage() {
+    return loadMessage;
+  },
 
   set(vol: VolumeMetadata) {
     currentVolume = vol;
@@ -74,6 +80,9 @@ export const volumeStore = {
   setLoadProgress(v: number) {
     loadProgress = v;
   },
+  setLoadMessage(msg: string) {
+    loadMessage = msg;
+  },
   setLoaded(entries: LoadedSeriesEntry[]) {
     loaded = entries;
   },
@@ -85,6 +94,7 @@ export const volumeStore = {
     cornerstoneVolumeId = null;
     loading = false;
     loadProgress = 0;
+    loadMessage = '';
     loaded = [];
   },
 };

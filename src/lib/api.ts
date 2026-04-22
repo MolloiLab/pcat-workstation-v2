@@ -72,13 +72,15 @@ export type DicomLoadPhase =
   | 'scanned'
   | 'decoding'
   | 'patient_series'
-  | 'patient_series_decode'
   | 'done';
 
 export interface DicomLoadProgress {
   phase: DicomLoadPhase;
   done: number;
   total: number;
+  /** Optional detail string — e.g. the current series folder name during a
+   *  patient-wide load. Omitted for phases that don't carry one. */
+  detail?: string;
 }
 
 /** Scan a DICOM folder (header-only). Header-only; no pixel data decoded. */
