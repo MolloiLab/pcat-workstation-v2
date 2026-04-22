@@ -11,7 +11,6 @@
   import {
     updateSnakePoints,
     addSnakePoint,
-    finalizeContour,
     useVesselWallAsContour,
   } from '$lib/api';
 
@@ -21,11 +20,19 @@
     /** Current snake contour points [x,y] in pixel coords */
     snakePoints: [number, number][] | null;
     onSnakeUpdate: (points: [number, number][]) => void;
-    onFinalize: () => void;
     status: 'pending' | 'in-progress' | 'done';
     /** Absolute arc-length (mm) of the ostium along the centerline.
      *  Displayed arc = target.arc_mm - arcOffsetMm. */
     arcOffsetMm?: number;
+    /** Optional material-decomposition overlay (flat pixels×pixels, values in
+     *  volume fraction [0,1] or mass density mg/mL). Rendered as a rainbow
+     *  colormap on top of the HU grayscale when non-null. NaN = skip voxel. */
+    overlay?: number[] | null;
+    /** Material label shown in the colorbar legend. */
+    material?: string;
+    /** Unit for the overlay: 'fraction' or 'mass'. Controls the colorbar
+     *  range and label. */
+    unit?: string;
   };
 
   let {
@@ -33,9 +40,11 @@
     targetIndex,
     snakePoints,
     onSnakeUpdate,
-    onFinalize,
     status,
     arcOffsetMm = 0,
+    overlay = null,
+    material = '',
+    unit = 'fraction',
   }: Props = $props();
 
   /* ── Canvas state ──────────────────────────────────────── */
@@ -67,10 +76,28 @@
 
   /* ── Rendering ─────────────────────────────────────────── */
 
+  /** Turbo-style rainbow colormap — good perceptual ordering, no ambiguous
+   *  green band. Input t is clamped to [0, 1]. */
+  function jetColor(t: number): [number, number, number] {
+    const u = Math.max(0, Math.min(1, t));
+    const r = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * u - 3))) * 255;
+    const g = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * u - 2))) * 255;
+    const b = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * u - 1))) * 255;
+    return [Math.round(r), Math.round(g), Math.round(b)];
+  }
+
+  /** Scale range for the overlay colormap: [0, 1] for volume fractions,
+   *  [0, 1100] mg/mL (water density × 1.1 for iodine/calcium headroom) for
+   *  mass densities. Fixed ranges so contiguous cross-sections share the
+   *  same color scale. */
+  function overlayRange(): [number, number] {
+    if (unit === 'mass') return [0, 1100];
+    return [0, 1];
+  }
+
   function renderBackground(ctx: CanvasRenderingContext2D) {
     const srcSize = target.pixels;
 
-    // Render HU data to an offscreen canvas at native resolution
     const srcCanvas = document.createElement('canvas');
     srcCanvas.width = srcSize;
     srcCanvas.height = srcSize;
@@ -79,19 +106,31 @@
 
     const lo = WC - WW / 2;
     const range = WW;
+    const [vMin, vMax] = overlayRange();
+    const vSpan = vMax - vMin;
 
     for (let i = 0; i < target.image.length; i++) {
       const hu = target.image[i];
       const gray = Math.max(0, Math.min(255, Math.round(((hu - lo) / range) * 255)));
-      imgData.data[i * 4] = gray;
-      imgData.data[i * 4 + 1] = gray;
-      imgData.data[i * 4 + 2] = gray;
+
+      const ov = overlay ? overlay[i] : NaN;
+      if (overlay && !Number.isNaN(ov)) {
+        // Material overlay inside the ROI: rainbow colormap.
+        const t = vSpan > 0 ? (ov - vMin) / vSpan : 0;
+        const [r, g, b] = jetColor(t);
+        imgData.data[i * 4] = r;
+        imgData.data[i * 4 + 1] = g;
+        imgData.data[i * 4 + 2] = b;
+      } else {
+        imgData.data[i * 4] = gray;
+        imgData.data[i * 4 + 1] = gray;
+        imgData.data[i * 4 + 2] = gray;
+      }
       imgData.data[i * 4 + 3] = 255;
     }
 
     srcCtx.putImageData(imgData, 0, 0);
 
-    // Scale to canvas size
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(srcCanvas, 0, 0, srcSize, srcSize, 0, 0, canvasSize, canvasSize);
@@ -187,6 +226,8 @@
     void dragIndex;
     void addPointMode;
     void canvasSize;
+    void overlay;
+    void unit;
     queueMicrotask(() => render());
   });
 
@@ -345,23 +386,9 @@
       const adopted = await useVesselWallAsContour({ targetIndex });
       if (adopted.length > 0) {
         onSnakeUpdate(adopted[0].points);
-        onFinalize();
       }
     } catch (err) {
       console.error('Reset failed:', err);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function handleAccept() {
-    if (busy) return;
-    busy = true;
-    try {
-      await finalizeContour(targetIndex);
-      onFinalize();
-    } catch (err) {
-      console.error('Finalize contour failed:', err);
     } finally {
       busy = false;
     }
@@ -408,6 +435,33 @@
         </span>
       </div>
 
+      <!-- MMD colorbar legend (only when overlay is showing) -->
+      {#if overlay}
+        <div class="pointer-events-none absolute bottom-2 right-2 flex items-end gap-1.5">
+          <div class="flex flex-col items-end text-[9px] tabular-nums text-white drop-shadow">
+            <span>{unit === 'mass' ? '1100' : '100%'}</span>
+            <span class="flex-1"></span>
+            <span>0</span>
+          </div>
+          <div
+            class="h-20 w-2.5 rounded border border-white/40"
+            style="background: linear-gradient(to top,
+              rgb(128,  0,   0),
+              rgb(255,  0,   0),
+              rgb(255,128,   0),
+              rgb(255,255,   0),
+              rgb(128,255, 128),
+              rgb(  0,255, 255),
+              rgb(  0,128, 255),
+              rgb(  0,  0, 255),
+              rgb(  0,  0, 128));"
+          ></div>
+          <span class="text-[9px] font-medium text-white drop-shadow [writing-mode:vertical-rl] [transform:rotate(180deg)]">
+            {material}{unit === 'mass' ? ' (mg/mL)' : ''}
+          </span>
+        </div>
+      {/if}
+
       <!-- Loading overlay -->
       {#if busy}
         <div class="absolute inset-0 flex items-center justify-center rounded bg-black/30">
@@ -435,14 +489,6 @@
       title="Re-adopt the auto-detected vessel wall"
     >
       Reset
-    </button>
-    <button
-      class="ml-auto rounded bg-success/15 px-3 py-1 text-xs font-medium text-success hover:bg-success/25 active:bg-success/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
-      onclick={handleAccept}
-      disabled={busy || !snakePoints}
-      title="Accept contour and mark as done"
-    >
-      Accept
     </button>
   </div>
 </div>

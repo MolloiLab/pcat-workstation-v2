@@ -421,10 +421,12 @@ pub async fn finalize_contour(
     Ok(())
 }
 
-/// Build a 3D ROI mask from all finalized contours and run multi-material
-/// decomposition on the masked region.
+/// Build a 3D ROI mask from every cross-section that currently has a contour
+/// and run multi-material decomposition on the masked region.
 ///
-/// Returns summary statistics (mean fractions over the mask).
+/// There is no "accept" step: any contour present in `snake_contours` (from
+/// auto-adoption or manual drag) is included. Returns summary statistics
+/// (mean fractions over the mask).
 #[tauri::command]
 pub async fn run_mmd_on_roi(
     method: String,
@@ -457,28 +459,24 @@ pub async fn run_mmd_on_roi(
             .as_ref()
             .ok_or_else(|| "no annotation targets generated".to_string())?;
 
-        // Collect all finalized contours, sorted by target index.
-        let mut finalized_pairs: Vec<(usize, Vec<[f64; 2]>)> = Vec::new();
-        for (&idx, &is_final) in &guard.finalized {
-            if is_final {
-                if let Some(contour) = guard.snake_contours.get(&idx) {
-                    finalized_pairs.push((idx, contour.clone()));
-                }
-            }
+        // Collect every cross-section that has a contour, sorted by target
+        // index (required by build_3d_roi_mask). No finalized filter.
+        let mut contour_pairs: Vec<(usize, Vec<[f64; 2]>)> = guard
+            .snake_contours
+            .iter()
+            .map(|(&idx, c)| (idx, c.clone()))
+            .collect();
+
+        if contour_pairs.is_empty() {
+            return Err("no contours — open the MMD tab to auto-adopt the lumen wall".into());
         }
 
-        if finalized_pairs.is_empty() {
-            return Err("no finalized contours — finalize at least one cross-section".into());
-        }
-
-        // Sort by target index (ascending) as required by build_3d_roi_mask.
-        finalized_pairs.sort_by_key(|(idx, _)| *idx);
+        contour_pairs.sort_by_key(|(idx, _)| *idx);
 
         let finalized_contours: Vec<Vec<[f64; 2]>> =
-            finalized_pairs.iter().map(|(_, c)| c.clone()).collect();
+            contour_pairs.iter().map(|(_, c)| c.clone()).collect();
 
-        // Map target indices to frame column indices.
-        let finalized_indices: Vec<usize> = finalized_pairs
+        let finalized_indices: Vec<usize> = contour_pairs
             .iter()
             .map(|(idx, _)| targets[*idx].frame_index)
             .collect();
@@ -701,18 +699,15 @@ pub async fn sample_surfaces(
             .ok_or_else(|| "no annotation targets generated".to_string())?
             .clone();
 
-        // Collect finalized contours.
-        let mut finalized_contours: HashMap<usize, Vec<[f64; 2]>> = HashMap::new();
-        for (&idx, &is_final) in &guard.finalized {
-            if is_final {
-                if let Some(contour) = guard.snake_contours.get(&idx) {
-                    finalized_contours.insert(idx, contour.clone());
-                }
-            }
-        }
+        // Use every cross-section that has a contour (no finalized filter).
+        let finalized_contours: HashMap<usize, Vec<[f64; 2]>> = guard
+            .snake_contours
+            .iter()
+            .map(|(&idx, c)| (idx, c.clone()))
+            .collect();
 
         if finalized_contours.is_empty() {
-            return Err("no finalized contours — finalize at least one cross-section".into());
+            return Err("no contours — open the MMD tab to auto-adopt the lumen wall".into());
         }
 
         let frame = guard
@@ -1016,17 +1011,14 @@ pub async fn export_mmd_csv(
             .ok_or_else(|| "no annotation targets generated".to_string())?
             .clone();
 
-        let mut finalized_contours: HashMap<usize, Vec<[f64; 2]>> = HashMap::new();
-        for (&idx, &is_final) in &guard.finalized {
-            if is_final {
-                if let Some(contour) = guard.snake_contours.get(&idx) {
-                    finalized_contours.insert(idx, contour.clone());
-                }
-            }
-        }
+        let finalized_contours: HashMap<usize, Vec<[f64; 2]>> = guard
+            .snake_contours
+            .iter()
+            .map(|(&idx, c)| (idx, c.clone()))
+            .collect();
 
         if finalized_contours.is_empty() {
-            return Err("no finalized contours — finalize at least one cross-section".into());
+            return Err("no contours — open the MMD tab to auto-adopt the lumen wall".into());
         }
 
         let frame = guard

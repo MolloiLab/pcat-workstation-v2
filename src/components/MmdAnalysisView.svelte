@@ -25,9 +25,9 @@
     sampleSurfaces,
     runMmdOnRoi,
     saveAnnotations,
-    loadAnnotations,
     exportMmdCsv,
     useVesselWallAsContour,
+    getMmdOverlay,
   } from '$lib/api';
   import { volumeStore } from '$lib/stores/volumeStore.svelte';
   import { seedStore } from '$lib/stores/seedStore.svelte';
@@ -66,6 +66,14 @@
   let mmdBusy = $state(false);
   let mmdError = $state('');
 
+  /** Per-target flat material overlay (pixels×pixels) for the current
+   *  material/unit. Lazily fetched after MMD runs when the user focuses a
+   *  section, then cached until material/unit/mmdSummary change. */
+  let overlayCache = $state<Record<number, number[]>>({});
+  let currentOverlay = $derived<number[] | null>(
+    overlayCache[selectedIndex] ?? null,
+  );
+
   let loadingTargets = $state(false);
   let saveBusy = $state(false);
   let saveMsg = $state('');
@@ -76,9 +84,7 @@
   let currentTarget = $derived(targets[selectedIndex] ?? null);
   let currentSnake = $derived(snakePoints[selectedIndex] ?? null);
   let currentStatus = $derived(statusMap[selectedIndex] ?? 'pending');
-  let finalizedCount = $derived(
-    Object.values(statusMap).filter((s) => s === 'done').length,
-  );
+  let contourCount = $derived(Object.keys(snakePoints).length);
   let totalCount = $derived(targets.length);
 
   // Arc-length offset: the first target sits at `start_arc_mm` (the ostium's
@@ -107,52 +113,29 @@
         : null;
       targets = await generateAnnotationTargets(centerlineMm, ostiumZyx);
       selectedIndex = 0;
-      statusMap = {};
       snakePoints = {};
+      statusMap = {};
       surfaces = [];
       mmdSummary = null;
       mmdError = '';
+      overlayCache = {};
 
-      // Saved annotations take precedence over auto-detection.
-      let restoredFromSave = false;
-      if (dicomPath) {
-        try {
-          const saved = await loadAnnotations(dicomPath);
-          if (saved) {
-            const restoredSnake: Record<number, [number, number][]> = {};
-            const restoredStatus: Record<number, 'pending' | 'in-progress' | 'done'> = {};
-            for (const [key, pts] of Object.entries(saved.snake_contours)) {
-              const idx = Number(key);
-              restoredSnake[idx] = pts;
-              restoredStatus[idx] = saved.finalized[idx] ? 'done' : 'in-progress';
-            }
-            snakePoints = restoredSnake;
-            statusMap = restoredStatus;
-            restoredFromSave = true;
-            console.log('Restored saved annotations');
-          }
-        } catch (err) {
-          console.warn('Could not load saved annotations:', err);
+      // Always auto-adopt the vessel wall — clean 16-point contours every
+      // open. Prior saved annotations are reachable via the Save/Load flow
+      // but never auto-applied; this avoids stale dense polygons from older
+      // sessions leaking into a fresh open.
+      try {
+        const adopted = await useVesselWallAsContour({ all: true });
+        const initSnake: Record<number, [number, number][]> = {};
+        const initStatus: Record<number, 'pending' | 'in-progress' | 'done'> = {};
+        for (const c of adopted) {
+          initSnake[c.target_index] = c.points;
+          initStatus[c.target_index] = 'done';
         }
-      }
-
-      // No saved state → auto-adopt the auto-detected vessel wall on every
-      // cross-section. User can drag/add points to refine before running MMD;
-      // any edit sets the section back to 'in-progress' until they re-accept.
-      if (!restoredFromSave) {
-        try {
-          const adopted = await useVesselWallAsContour({ all: true });
-          const initSnake: Record<number, [number, number][]> = {};
-          const initStatus: Record<number, 'pending' | 'in-progress' | 'done'> = {};
-          for (const c of adopted) {
-            initSnake[c.target_index] = c.points;
-            initStatus[c.target_index] = 'done';
-          }
-          snakePoints = initSnake;
-          statusMap = initStatus;
-        } catch (err) {
-          console.warn('Auto-adopt vessel wall failed:', err);
-        }
+        snakePoints = initSnake;
+        statusMap = initStatus;
+      } catch (err) {
+        console.warn('Auto-adopt vessel wall failed:', err);
       }
     } catch (err) {
       console.error('Failed to generate annotation targets:', err);
@@ -169,23 +152,10 @@
 
   function handleSnakeUpdate(points: [number, number][]) {
     snakePoints = { ...snakePoints, [selectedIndex]: points };
+    // No Accept step: edits stay immediately usable for Run MMD, so the
+    // section is always "done" as long as it has a contour.
     if (statusMap[selectedIndex] !== 'done') {
-      statusMap = { ...statusMap, [selectedIndex]: 'in-progress' };
-    }
-  }
-
-  function handleFinalize() {
-    statusMap = { ...statusMap, [selectedIndex]: 'done' };
-    // Auto-save after finalization.
-    autoSave();
-  }
-
-  async function autoSave() {
-    if (!dicomPath) return;
-    try {
-      await saveAnnotations(dicomPath, centerlineMm);
-    } catch (err) {
-      console.warn('Auto-save failed:', err);
+      statusMap = { ...statusMap, [selectedIndex]: 'done' };
     }
   }
 
@@ -194,7 +164,7 @@
     saveBusy = true;
     saveMsg = '';
     try {
-      const path = await saveAnnotations(dicomPath, centerlineMm);
+      await saveAnnotations(dicomPath, centerlineMm);
       saveMsg = 'Saved';
       setTimeout(() => { saveMsg = ''; }, 2000);
     } catch (err) {
@@ -226,7 +196,7 @@
 
   function handleMaterialChange(m: string) {
     material = m;
-    // Refresh surfaces if MMD has been run.
+    overlayCache = {}; // invalidate — overlay is material-specific
     if (mmdSummary) {
       refreshSurfaces();
     }
@@ -234,10 +204,27 @@
 
   function handleUnitChange(u: string) {
     unit = u;
+    overlayCache = {};
     if (mmdSummary) {
       refreshSurfaces();
     }
   }
+
+  // Lazily fetch the material overlay for the currently-selected cross-section
+  // whenever MMD has produced a result and the cache hasn't seen this target
+  // under the active material/unit.
+  $effect(() => {
+    if (!mmdSummary) return;
+    const idx = selectedIndex;
+    if (overlayCache[idx]) return;
+    getMmdOverlay(idx, material, unit)
+      .then((data) => {
+        overlayCache = { ...overlayCache, [idx]: data };
+      })
+      .catch((err) => {
+        console.warn('Overlay fetch failed:', err);
+      });
+  });
 
   function handleSurfaceSlider(index: number) {
     surfaceIndex = index;
@@ -247,6 +234,7 @@
     if (mmdBusy) return;
     mmdBusy = true;
     mmdError = '';
+    overlayCache = {}; // stale now
     try {
       mmdSummary = await runMmdOnRoi('pwsqs');
       await refreshSurfaces();
@@ -279,11 +267,8 @@
     </div>
   {:else}
     {#if !mmdSummary}
-      <div class="shrink-0 border-b border-border bg-accent/5 px-3 py-1.5 text-[11px] text-text-secondary">
-        <span class="font-medium text-accent">Auto-detected contours.</span>
-        Check each cross-section below — drag a point or click <span class="font-medium">Add Point</span>
-        to refine, then <span class="font-medium">Accept</span> again. Use <span class="font-medium">Reset</span>
-        to re-adopt the auto-detected wall. Click <span class="font-medium">Run MMD</span> when all sections look right.
+      <div class="shrink-0 border-b border-border bg-accent/5 px-3 py-1 text-[11px] text-text-secondary">
+        Auto-adopted lumen wall — drag points to refine, then <span class="font-medium text-accent">Run MMD</span>.
       </div>
     {/if}
     <!-- Main content: editor + surface plot side-by-side -->
@@ -296,9 +281,11 @@
             targetIndex={selectedIndex}
             snakePoints={currentSnake}
             onSnakeUpdate={handleSnakeUpdate}
-            onFinalize={handleFinalize}
             status={currentStatus}
             {arcOffsetMm}
+            overlay={currentOverlay}
+            {material}
+            {unit}
           />
         {/if}
       </div>
@@ -345,8 +332,8 @@
         <button
           class="rounded bg-accent/15 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/25 active:bg-accent/35 disabled:bg-surface-tertiary/40 disabled:text-text-secondary/70"
           onclick={handleRunMmd}
-          disabled={mmdBusy || finalizedCount === 0}
-          title="Run PWSQS multi-material decomposition on finalized contours"
+          disabled={mmdBusy || contourCount === 0}
+          title="Run PWSQS multi-material decomposition on the current contours"
         >
           {mmdBusy ? 'Running MMD...' : 'Run MMD'}
         </button>
@@ -370,7 +357,7 @@
         </button>
 
         <span class="text-[11px] tabular-nums text-text-secondary">
-          {finalizedCount}/{totalCount} done
+          {contourCount}/{totalCount}
         </span>
 
         {#if saveMsg}
