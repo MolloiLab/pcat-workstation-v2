@@ -491,16 +491,14 @@ pub async fn run_mmd_on_roi(
             .as_ref()
             .ok_or_else(|| "no dual-energy volume loaded".to_string())?;
 
-        let vol = guard
-            .volume
-            .as_ref()
-            .ok_or_else(|| "no volume loaded".to_string())?;
-
-        let volume_shape = [
-            vol.data.shape()[0],
-            vol.data.shape()[1],
-            vol.data.shape()[2],
-        ];
+        // Build the mask in the dual-energy grid — MMD runs against `de.low`
+        // / `de.high`, so the mask shape must match those volumes exactly.
+        // If the currently-active `state.volume` is a different series
+        // (e.g. CCTA) with different dims, using its shape here would panic
+        // in pwsqs with a mask-shape assertion. The CPR frame + contours
+        // live in patient mm so they're reusable across grids.
+        let de_low_shape = de.low.shape();
+        let volume_shape = [de_low_shape[0], de_low_shape[1], de_low_shape[2]];
 
         // Get cross-section params from the first target.
         let cs_width_mm = targets[0].width_mm;
@@ -513,9 +511,9 @@ pub async fn run_mmd_on_roi(
             clone_frame(frame),
             (Arc::clone(&de.low), Arc::clone(&de.high), de.low_energy_kev, de.high_energy_kev),
             volume_shape,
-            vol.spacing,
-            vol.origin,
-            vol.direction,
+            de.spacing,
+            de.origin,
+            de.direction,
         )
     };
 
@@ -721,19 +719,22 @@ pub async fn sample_surfaces(
             .ok_or_else(|| "no CPR frame built".to_string())?;
         let frame = clone_frame(frame);
 
-        let vol = guard
-            .volume
+        // Sample in the dual-energy grid (the material maps live there),
+        // not the currently-active `state.volume` which may be a different
+        // series (CCTA, CaScore) after patient-wide loading.
+        let de = guard
+            .dual_energy
             .as_ref()
-            .ok_or_else(|| "no volume loaded".to_string())?;
+            .ok_or_else(|| "no dual-energy volume loaded".to_string())?;
 
         (
             material_map,
             frame,
             targets,
             finalized_contours,
-            vol.spacing,
-            vol.origin,
-            vol.direction,
+            de.spacing,
+            de.origin,
+            de.direction,
         )
     };
 
@@ -795,14 +796,17 @@ pub async fn get_mmd_overlay(
         .as_ref()
         .ok_or_else(|| "no CPR frame built".to_string())?;
 
-    let vol = guard
-        .volume
+    // Overlay samples the MMD material map, which lives in the dual-energy
+    // grid — pull geometry from state.dual_energy, not state.volume (the
+    // currently-displayed series may be a different volume entirely).
+    let de = guard
+        .dual_energy
         .as_ref()
-        .ok_or_else(|| "no volume loaded".to_string())?;
+        .ok_or_else(|| "no dual-energy volume loaded".to_string())?;
 
-    let spacing = vol.spacing;
-    let origin = vol.origin;
-    let direction = vol.direction;
+    let spacing = de.spacing;
+    let origin = de.origin;
+    let direction = de.direction;
 
     let frame_idx = target.frame_index;
     if frame_idx >= frame.n_cols() {
@@ -1052,19 +1056,21 @@ pub async fn export_mmd_csv(
             .ok_or_else(|| "no CPR frame built".to_string())?;
         let frame = clone_frame(frame);
 
-        let vol = guard
-            .volume
+        // CSV surfaces use the same radial-angular sampler as sample_surfaces;
+        // geometry must come from the dual-energy grid.
+        let de = guard
+            .dual_energy
             .as_ref()
-            .ok_or_else(|| "no volume loaded".to_string())?;
+            .ok_or_else(|| "no dual-energy volume loaded".to_string())?;
 
         (
             arrays,
             frame,
             targets,
             finalized_contours,
-            vol.spacing,
-            vol.origin,
-            vol.direction,
+            de.spacing,
+            de.origin,
+            de.direction,
         )
     };
 
